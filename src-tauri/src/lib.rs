@@ -13,6 +13,54 @@ use tauri::Manager;
 
 use db::Db;
 
+/// macOS：把红绿灯按钮的垂直位置对齐到指定中心（窗口顶部起算的逻辑像素）。
+///
+/// 背景：wry 的 `traffic_light_position` 的 y 只拉高标题栏容器高度，
+/// `inset_traffic_lights` 每次重绘只重设按钮的 x 坐标——按钮 y 永远贴顶，
+/// 所以这里用 objc2 直接改按钮 frame 的 origin.y。
+///
+/// # 参数
+///
+/// - `window`: 已创建的主窗口
+/// - `center_y`: 三个按钮期望的中心（距窗口顶部，逻辑像素；顶栏 48px → 传 24）
+///
+/// # 异常
+///
+/// 按钮不存在或 NSWindow 指针无效时静默返回（不影响启动）。
+#[cfg(target_os = "macos")]
+fn align_traffic_lights(window: &tauri::WebviewWindow, center_y: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSView, NSWindowButton};
+
+    let Ok(raw) = window.ns_window() else {
+        return;
+    };
+    if raw.is_null() {
+        return;
+    }
+    let ns_win = raw as *mut AnyObject;
+
+    // 按钮直径 12，frame 高约 16：origin.y = 中心 - 半高
+    let target_y = center_y - 8.0;
+
+    for kind in [
+        NSWindowButton::CloseButton,
+        NSWindowButton::MiniaturizeButton,
+        NSWindowButton::ZoomButton,
+    ] {
+        let button: *mut AnyObject =
+            unsafe { msg_send![ns_win, standardWindowButton: kind] };
+        if button.is_null() {
+            continue;
+        }
+        let view = unsafe { &*(button as *const NSView) };
+        let mut frame = unsafe { NSView::frame(view) };
+        frame.origin.y = target_y;
+        unsafe { NSView::setFrameOrigin(view, frame.origin) };
+    }
+}
+
 /// 退出前清理：断开全部 MCP 连接（回收 stdio 子进程）。
 fn on_exit(app: &tauri::AppHandle) {
     let runtime = app.state::<tauri::async_runtime::Runtime>();
@@ -40,14 +88,18 @@ pub fn run() {
             .inner_size(1360.0, 840.0)
             .min_inner_size(1000.0, 620.0)
             .center();
-            // macOS：Overlay 标题栏 + 红绿灯与 48px 顶栏垂直居中
-            // （y=19，按钮直径 12 → 中心 25px，比几何中心低 1px 做视觉补偿）
+            // macOS：Overlay 标题栏 + 标题栏容器拉高到 48（y=32：容器高 = 按钮高16 + y）
+            // 按钮的垂直位置随后由 align_traffic_lights 精确对齐
             #[cfg(target_os = "macos")]
             let builder = builder
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
                 .hidden_title(true)
-                .traffic_light_position(tauri::LogicalPosition::new(20.0, 19.0));
-            builder.build()?;
+                .traffic_light_position(tauri::LogicalPosition::new(20.0, 32.0));
+            let win = builder.build()?;
+
+            // macOS：红绿灯与 48px 顶栏垂直居中（按钮中心 = 24px）
+            #[cfg(target_os = "macos")]
+            align_traffic_lights(&win, 24.0);
 
             Ok(())
         })

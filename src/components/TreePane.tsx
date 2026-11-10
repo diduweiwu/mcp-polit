@@ -46,6 +46,17 @@ export function TreePane() {
   const [renameTarget, setRenameTarget] = useState<TreeNode | null>(null);
   const [renameName, setRenameName] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<TreeNode | null>(null);
+  /** 收起动画播放中（淡出结束后才真正折叠） */
+  const [closing, setClosing] = useState(false);
+
+  /** 收起资源树：先播 160ms 淡出，再触发折叠 */
+  const collapseWithAnim = () => {
+    if (closing) return;
+    setClosing(true);
+    window.setTimeout(() => {
+      useAppStore.getState().toggleTreeCollapsed();
+    }, 160);
+  };
 
   /** 打开「新建目录」弹窗 */
   const newFolderUnder = (parentId: number | null) => {
@@ -86,7 +97,9 @@ export function TreePane() {
 
   return (
     <div
-      className="flex h-full flex-col overflow-hidden"
+      className={`flex h-full flex-col overflow-hidden ${
+        closing ? "anim-fade-out" : "anim-pane-in"
+      }`}
       onContextMenu={(e) => {
         // 空白区域右键：根层新建
         if (e.target === e.currentTarget) openCtx(e, null);
@@ -115,7 +128,7 @@ export function TreePane() {
           <button
             className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
             title="收起资源树"
-            onClick={useAppStore.getState().toggleTreeCollapsed}
+            onClick={collapseWithAnim}
           >
             <PanelLeftClose size={14} />
           </button>

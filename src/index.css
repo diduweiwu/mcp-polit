@@ -107,6 +107,10 @@ textarea {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+@keyframes mcp-pane-in {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
 
 .anim-fade-in {
   animation: mcp-fade-in 0.18s ease-out both;
@@ -125,6 +129,10 @@ textarea {
 }
 .anim-slide-up {
   animation: mcp-slide-up 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+/* 资源树栏展开时的滑入动画（挂载即播） */
+.anim-pane-in {
+  animation: mcp-pane-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 /* 细滚动条 */
