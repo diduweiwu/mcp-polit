@@ -54,6 +54,8 @@ interface AppState {
 
   /* 布局：资源树栏是否折叠 */
   treeCollapsed: boolean;
+  /** 均分布局信号（计数器；TopBar 触发，Workspace 监听） */
+  layoutEqualizeSignal: number;
 
   /* 日志（结果面板底部展示；最多保留 200 条） */
   logs: LogEntry[];
@@ -112,6 +114,8 @@ interface AppState {
 
   /** 切换资源树栏折叠/展开 */
   toggleTreeCollapsed: () => void;
+  /** 触发四栏均分布局 */
+  equalizeLayout: () => void;
 
   /** 追加一条日志 */
   addLog: (level: LogLevel, message: string) => void;
@@ -164,6 +168,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   results: [],
   seq: 0,
   treeCollapsed: false,
+  layoutEqualizeSignal: 0,
   logs: [],
   settings: {},
   syncing: false,
@@ -432,6 +437,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleTreeCollapsed() {
     set((s) => ({ treeCollapsed: !s.treeCollapsed }));
+  },
+
+  equalizeLayout() {
+    set((s) => ({ layoutEqualizeSignal: s.layoutEqualizeSignal + 1 }));
   },
 
   addLog(level, message) {

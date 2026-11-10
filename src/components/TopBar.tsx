@@ -5,6 +5,7 @@ import { useState } from "react";
 import {
   Check,
   ChevronDown,
+  Columns3,
   FolderPlus,
   Monitor,
   Moon,
@@ -190,8 +191,15 @@ export function TopBar() {
         </button>
       </div>
 
-      {/* 右侧：设置 + 主题色 + 明暗切换 */}
+      {/* 右侧：均分布局 + 设置 + 主题色 + 明暗切换 */}
       <div className="flex items-center gap-1.5">
+        <button
+          className="btn-ghost h-8 !px-2"
+          title="四栏均分宽度"
+          onClick={() => useAppStore.getState().equalizeLayout()}
+        >
+          <Columns3 size={15} />
+        </button>
         <button
           className="btn-ghost h-8 !px-2"
           title="设置"
