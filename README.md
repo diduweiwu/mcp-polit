@@ -32,6 +32,18 @@ pnpm tauri build  # 打包
 
 依赖：Node 18+、pnpm、Rust stable（Tauri 官方要求）。
 
+### 打包与系统要求
+
+推送 `v*` 标签（如 `git tag v0.1.0 && git push origin v0.1.0`）会触发 GitHub Actions（`.github/workflows/build.yml`）三平台自动打包，并创建 Release 附全部安装包：
+
+| 平台 | 产物 | 最低系统版本 |
+|---|---|---|
+| macOS | `.app` / `.dmg`（universal：Intel + Apple Silicon 合包） | macOS 10.15+（Apple Silicon 机型实际要求 11+） |
+| Windows | NSIS 安装包 / MSI（x64） | Windows 10+（WebView2 运行时要求） |
+| Linux | `.deb` / `.rpm` / `.AppImage`（x64） | glibc 2.35+（Ubuntu 22.04+ / Debian 12+ / Fedora 36+） |
+
+手动触发（workflow_dispatch）也可以打包，产物在工作流的 Artifacts 里下载，不创建 Release。
+
 ### 数据存储位置
 
 | 平台 | 路径 |

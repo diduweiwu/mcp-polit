@@ -55,9 +55,10 @@ fn align_traffic_lights(window: &tauri::WebviewWindow, center_y: f64) {
             continue;
         }
         let view = unsafe { &*(button as *const NSView) };
-        let mut frame = unsafe { NSView::frame(view) };
+        // 注意：objc2-app-kit 0.3 中这两个方法本身是安全的（内部自动处理消息发送）
+        let mut frame = NSView::frame(view);
         frame.origin.y = target_y;
-        unsafe { NSView::setFrameOrigin(view, frame.origin) };
+        NSView::setFrameOrigin(view, frame.origin);
     }
 }
 

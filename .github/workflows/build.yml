@@ -1,0 +1,95 @@
+# MCPilot 多平台打包工作流
+#
+# 产物与支持的最低系统版本：
+# - macOS (universal：Intel + Apple Silicon 合包)：macOS 10.15+（Apple Silicon 机型实际要求 11+）
+# - Windows (x64，NSIS 安装包 + MSI)：Windows 10+（WebView2 运行时要求；Tauri 2.12 已放弃 Win7/8）
+# - Linux (x64，deb/rpm/AppImage)：glibc 2.35+（Ubuntu 22.04+ / Debian 12+ / Fedora 36+）
+#
+# 触发：推送 v* 标签（同时创建 GitHub Release 并附全部安装包），或手动 workflow_dispatch（仅上传构建产物）。
+
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # tag 触发时创建 Release 需要写权限
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS：universal 合包（一次产出同时支持 Intel 与 Apple Silicon）
+          - os: macos-latest
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # Windows x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+          # Linux x64：用 22.04 构建（glibc 2.35），让产物覆盖尽量多的发行版
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Rust 编译缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - name: 安装 Linux 系统依赖（Tauri v2 需要 webkit2gtk-4.1）
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建 & 上传产物
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS：部署目标 10.15（Tauri v2 官方最低；universal 合包时取最小值）
+          MACOSX_DEPLOYMENT_TARGET: 10.15
+        with:
+          projectPath: .
+          # tag 推送时创建 Release 并附安装包；手动触发时仅上传构建产物
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: "MCPilot ${{ github.ref_name }}"
+          releaseBody: "MCPilot 桌面客户端安装包。详见 README 的系统版本要求。"
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.target }}
