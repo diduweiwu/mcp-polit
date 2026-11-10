@@ -18,21 +18,26 @@ use db::Db;
 ///
 /// 背景：wry 的 `traffic_light_position` 的 y 只拉高标题栏容器高度，
 /// `inset_traffic_lights` 每次重绘只重设按钮的 x 坐标——按钮 y 永远贴顶，
-/// 所以这里用 objc2 直接改按钮 frame 的 origin.y。
+/// 所以这里用 objc2 直接改按钮 frame。
+///
+/// 实现采用「探测式校准」：不做坐标系方向假设（AppKit 各级 view 有 flipped 与否之分），
+/// 先读按钮当前位置，再试探性平移一次测出「origin.y 每 +1 对应的视觉位移」，
+/// 最后线性外推出精确的目标 origin.y。任何系统版本下都自洽。
 ///
 /// # 参数
 ///
 /// - `window`: 已创建的主窗口
-/// - `center_y`: 三个按钮期望的中心（距窗口顶部，逻辑像素；顶栏 48px → 传 24）
+/// - `target_center`: 按钮期望的中心（距窗口顶部，逻辑像素；顶栏 48px → 传 24）
 ///
 /// # 异常
 ///
 /// 按钮不存在或 NSWindow 指针无效时静默返回（不影响启动）。
 #[cfg(target_os = "macos")]
-fn align_traffic_lights(window: &tauri::WebviewWindow, center_y: f64) {
+fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use objc2_app_kit::{NSView, NSWindowButton};
+    use objc2_foundation::{NSPoint, NSRect};
 
     let Ok(raw) = window.ns_window() else {
         return;
@@ -42,8 +47,21 @@ fn align_traffic_lights(window: &tauri::WebviewWindow, center_y: f64) {
     }
     let ns_win = raw as *mut AnyObject;
 
-    // 按钮直径 12，frame 高约 16：origin.y = 中心 - 半高
-    let target_y = center_y - 8.0;
+    // contentView 高度（Overlay 下 ≈ 整窗高），用于把窗口坐标换成「距窗口顶」距离
+    let content_height: f64 = unsafe {
+        let cv: *mut AnyObject = msg_send![ns_win, contentView];
+        if cv.is_null() {
+            return;
+        }
+        let f: NSRect = msg_send![cv, frame];
+        f.size.height
+    };
+
+    /// 按钮中心当前「距窗口顶部」的距离（逻辑像素，转窗口坐标后换算）。
+    fn center_from_top(view: &NSView, content_height: f64) -> f64 {
+        let r: NSRect = view.convertRect_toView(NSView::frame(view), None);
+        content_height - (r.origin.y + r.size.height / 2.0)
+    }
 
     for kind in [
         NSWindowButton::CloseButton,
@@ -56,10 +74,22 @@ fn align_traffic_lights(window: &tauri::WebviewWindow, center_y: f64) {
             continue;
         }
         let view = unsafe { &*(button as *const NSView) };
-        // 注意：objc2-app-kit 0.3 中这两个方法本身是安全的（内部自动处理消息发送）
-        let mut frame = NSView::frame(view);
-        frame.origin.y = target_y;
-        NSView::setFrameOrigin(view, frame.origin);
+        let f0 = NSView::frame(view);
+
+        // 1. 当前位置
+        let d0 = center_from_top(view, content_height);
+        // 2. 试探：origin.y + 100，测量视觉位移方向
+        NSView::setFrameOrigin(view, NSPoint { x: f0.origin.x, y: f0.origin.y + 100.0 });
+        let d1 = center_from_top(view, content_height);
+        // 3. 回退
+        NSView::setFrameOrigin(view, f0.origin);
+        let per_unit = d0 - d1; // origin.y 每 +1 引起的「距顶距离」变化
+        if per_unit.abs() < 0.001 {
+            continue; // 移动无效（异常环境），跳过
+        }
+        // 4. 线性外推精确目标
+        let target_y = f0.origin.y + (d0 - target_center) / per_unit;
+        NSView::setFrameOrigin(view, NSPoint { x: f0.origin.x, y: target_y });
     }
 }
 
