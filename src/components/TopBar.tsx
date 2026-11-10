@@ -14,9 +14,24 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppStore } from "../store";
 import { THEME_PRESETS } from "../theme";
 import { ConfirmDialog, Dropdown, MenuItem, Modal, useClickOutside } from "./ui";
+
+/**
+ * 顶栏按下即拖动窗口。
+ *
+ * 规则：左键按下、且落点不在任何交互元素（按钮/输入框/菜单）内时，
+ * 调用系统级 startDragging 进入窗口拖动——比 data-tauri-drag-region
+ * 更可靠（后者要求命中元素本身，顶栏子元素会挡住大部分区域）。
+ */
+function handleDragMouseDown(e: React.MouseEvent<HTMLElement>) {
+  if (e.button !== 0) return;
+  const target = e.target as HTMLElement;
+  if (target.closest("button, input, select, textarea, [role='menu']")) return;
+  void getCurrentWindow().startDragging();
+}
 
 /** 顶栏 */
 export function TopBar() {
@@ -58,13 +73,13 @@ export function TopBar() {
   };
 
   return (
-    // data-tauri-drag-region：顶栏空白处可拖动窗口；按钮/下拉不受影响
+    // 整条顶栏可拖动窗口（onMouseDown 里排除按钮等交互元素）
     <header
-      data-tauri-drag-region
+      onMouseDown={handleDragMouseDown}
       className="flex h-12 shrink-0 items-center justify-between border-b border-line bg-panel pl-[84px] pr-3"
     >
       {/* 左侧：Logo + 项目切换（左侧留白是 macOS 悬浮红绿灯的区域） */}
-      <div className="flex items-center gap-2" data-tauri-drag-region>
+      <div className="flex items-center gap-2">
         <div className="flex items-center gap-1.5 pr-1">
           <span
             className="flex h-6 w-6 items-center justify-center rounded-md text-white"
