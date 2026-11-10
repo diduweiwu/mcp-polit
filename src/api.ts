@@ -114,3 +114,13 @@ export const getSettings = () =>
 /** 写入一个设置项 */
 export const saveSetting = (key: string, value: string) =>
   invoke<void>("save_setting", { key, value });
+
+/* ---------- Git 同步 ---------- */
+
+/** 导出全部项目到 git 仓库，返回操作日志 */
+export const syncExport = () =>
+  invoke<Array<{ level: string; message: string }>>("sync_export");
+
+/** 从 git 仓库导入全部项目（覆盖同名项目），返回操作日志 */
+export const syncImport = () =>
+  invoke<Array<{ level: string; message: string }>>("sync_import");

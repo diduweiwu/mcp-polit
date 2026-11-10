@@ -25,8 +25,8 @@ export const THEME_PRESETS: ThemePreset[] = [
   { key: "orange", label: "暖橙", primary: "#fb923c", strong: "#ea580c" },
 ];
 
-/** 明暗模式 */
-export type ThemeMode = "light" | "dark";
+/** 明暗模式：system = 跟随系统 */
+export type ThemeMode = "light" | "dark" | "system";
 
 /** 把主色调应用到文档根元素 */
 export function applyThemeColor(preset: ThemePreset) {
@@ -35,9 +35,25 @@ export function applyThemeColor(preset: ThemePreset) {
   root.style.setProperty("--c-primary-strong", preset.strong);
 }
 
-/** 切换明暗模式（给 html 加/去掉 dark 类） */
+/** 切换明暗模式（system 时查询系统偏好；给 html 加/去掉 dark 类） */
 export function applyThemeMode(mode: ThemeMode) {
-  document.documentElement.classList.toggle("dark", mode === "dark");
+  const dark =
+    mode === "dark" ||
+    (mode === "system" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.classList.toggle("dark", dark);
+}
+
+/** 订阅系统明暗变化（themeMode = system 时实时生效） */
+export function watchSystemTheme(cb: () => void): () => void {
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+}
+
+/** 明暗模式循环顺序：亮色 -> 暗色 -> 跟随系统 */
+export function nextThemeMode(mode: ThemeMode): ThemeMode {
+  return mode === "light" ? "dark" : mode === "dark" ? "system" : "light";
 }
 
 /** 按 key 找预设；找不到回退到默认天蓝 */

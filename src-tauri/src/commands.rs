@@ -270,3 +270,31 @@ pub fn save_setting(db: State<'_, Db>, key: String, value: String) -> CmdResult<
     let conn = db.0.lock().unwrap();
     crate::db::set_setting(&conn, &key, &value)
 }
+
+/* ---------- Git 同步 ---------- */
+
+/// 导出全部项目到 git 仓库。仓库路径与脱敏开关从 settings 读取。
+///
+/// 返回操作日志列表（info/warn/error），由前端写入日志面板。
+#[tauri::command]
+pub async fn sync_export(app: AppHandle, db: State<'_, Db>) -> CmdResult<Vec<crate::models::LogEntry>> {
+    let (repo, include_secrets) = {
+        let conn = db.0.lock().unwrap();
+        crate::sync::read_sync_settings(&conn)
+    };
+    let repo = repo.ok_or_else(crate::error::AppError::new_sync_repo)?;
+    Ok(crate::sync::export_all(&app, &db, &repo, include_secrets).await)
+}
+
+/// 从 git 仓库导入全部项目（覆盖同名项目）。
+///
+/// 返回操作日志列表，由前端写入日志面板。
+#[tauri::command]
+pub async fn sync_import(app: AppHandle, db: State<'_, Db>) -> CmdResult<Vec<crate::models::LogEntry>> {
+    let (repo, _secrets) = {
+        let conn = db.0.lock().unwrap();
+        crate::sync::read_sync_settings(&conn)
+    };
+    let repo = repo.ok_or_else(crate::error::AppError::new_sync_repo)?;
+    Ok(crate::sync::import_all(&app, &db, &repo).await)
+}

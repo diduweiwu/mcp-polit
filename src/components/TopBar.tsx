@@ -6,18 +6,21 @@ import {
   Check,
   ChevronDown,
   FolderPlus,
+  Monitor,
   Moon,
   Palette,
   Pencil,
   Plus,
+  Settings,
   Sun,
   Trash2,
   Zap,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppStore } from "../store";
-import { THEME_PRESETS } from "../theme";
+import { THEME_PRESETS, nextThemeMode, type ThemeMode } from "../theme";
 import { ConfirmDialog, Dropdown, MenuItem, Modal, useClickOutside } from "./ui";
+import { SettingsModal } from "./SettingsModal";
 
 /**
  * 顶栏按下即拖动窗口。
@@ -55,7 +58,16 @@ export function TopBar() {
   const [renameName, setRenameName] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const paletteRef = useClickOutside<HTMLDivElement>(() => setPaletteOpen(false));
+
+  /** 主题模式按钮的图标与提示文案 */
+  const themeBtn =
+    themeMode === "dark"
+      ? { icon: <Moon size={15} />, title: "暗色（点击切换为跟随系统）" }
+      : themeMode === "system"
+        ? { icon: <Monitor size={15} />, title: "跟随系统（点击切换为亮色）" }
+        : { icon: <Sun size={15} />, title: "亮色（点击切换为暗色）" };
 
   /** 提交新建项目 */
   const submitNew = async () => {
@@ -178,8 +190,15 @@ export function TopBar() {
         </button>
       </div>
 
-      {/* 右侧：主题色 + 明暗切换 */}
+      {/* 右侧：设置 + 主题色 + 明暗切换 */}
       <div className="flex items-center gap-1.5">
+        <button
+          className="btn-ghost h-8 !px-2"
+          title="设置"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Settings size={15} />
+        </button>
         <div className="relative" ref={paletteRef}>
           <button
             className="btn-ghost h-8 gap-1.5 !px-2.5"
@@ -227,10 +246,10 @@ export function TopBar() {
 
         <button
           className="btn-ghost h-8 !px-2"
-          title={themeMode === "dark" ? "切换到亮色" : "切换到深色"}
-          onClick={() => void setThemeMode(themeMode === "dark" ? "light" : "dark")}
+          title={themeBtn.title}
+          onClick={() => void setThemeMode(nextThemeMode(themeMode) as ThemeMode)}
         >
-          {themeMode === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+          {themeBtn.icon}
         </button>
       </div>
 
@@ -303,6 +322,9 @@ export function TopBar() {
           setDeleteOpen(false);
         }}
       />
+
+      {/* 设置弹窗 */}
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </header>
   );
 }

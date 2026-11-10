@@ -8,6 +8,8 @@ import * as api from "./api";
 import type {
   CallResult,
   ConnStatus,
+  LogLevel,
+  LogEntry,
   NodeType,
   Project,
   ServerConfig,
@@ -52,6 +54,13 @@ interface AppState {
 
   /* 布局：资源树栏是否折叠 */
   treeCollapsed: boolean;
+
+  /* 日志（结果面板底部展示；最多保留 200 条） */
+  logs: LogEntry[];
+
+  /* 应用设置缓存（键值对） */
+  settings: Record<string, string>;
+  syncing: boolean;
 
   /* ---------- actions ---------- */
 
@@ -104,6 +113,21 @@ interface AppState {
   /** 切换资源树栏折叠/展开 */
   toggleTreeCollapsed: () => void;
 
+  /** 追加一条日志 */
+  addLog: (level: LogLevel, message: string) => void;
+  /** 批量追加后端返回的日志（补时间戳） */
+  addLogs: (entries: Array<{ level: string; message: string }>) => void;
+  /** 清空日志 */
+  clearLogs: () => void;
+
+  /** 保存一个设置项并同步缓存 */
+  saveSetting: (key: string, value: string) => Promise<void>;
+
+  /** 导出到 git 仓库（日志写入面板） */
+  syncExport: () => Promise<void>;
+  /** 从 git 仓库导入（覆盖同名项目，日志写入面板，完成后刷新树） */
+  syncImport: () => Promise<void>;
+
   /** 合并后端推送的连接状态（Tauri event） */
   applyConnState: (ev: { node_id: number; status: ConnStatus; message: string | null }) => void;
 }
@@ -140,6 +164,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   results: [],
   seq: 0,
   treeCollapsed: false,
+  logs: [],
+  settings: {},
+  syncing: false,
 
   async init() {
     // 1. 设置
@@ -150,7 +177,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const colorKey = map["theme_color"] || "sky";
       applyThemeMode(mode);
       applyThemeColor(presetByKey(colorKey));
-      set({ themeMode: mode, themeColorKey: colorKey });
+      set({ themeMode: mode, themeColorKey: colorKey, settings: map });
     } catch {
       /* 后端未就绪时用默认值 */
     }
@@ -407,10 +434,75 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ treeCollapsed: !s.treeCollapsed }));
   },
 
+  addLog(level, message) {
+    const now = new Date();
+    const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map((n) => String(n).padStart(2, "0"))
+      .join(":");
+    set((s) => ({
+      logs: [...s.logs, { time, level, message }].slice(-200),
+    }));
+  },
+
+  addLogs(entries) {
+    const now = new Date();
+    const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map((n) => String(n).padStart(2, "0"))
+      .join(":");
+    const mapped = entries.map((e) => ({
+      time,
+      level: (["info", "warn", "error"].includes(e.level) ? e.level : "info") as LogLevel,
+      message: e.message,
+    }));
+    set((s) => ({ logs: [...s.logs, ...mapped].slice(-200) }));
+  },
+
+  clearLogs() {
+    set({ logs: [] });
+  },
+
+  async saveSetting(key, value) {
+    await api.saveSetting(key, value);
+    set((s) => ({ settings: { ...s.settings, [key]: value } }));
+  },
+
+  async syncExport() {
+    if (get().syncing) return;
+    set({ syncing: true });
+    try {
+      const logs = await api.syncExport();
+      get().addLogs(logs);
+    } catch (e) {
+      get().addLog("error", String(e));
+    } finally {
+      set({ syncing: false });
+    }
+  },
+
+  async syncImport() {
+    if (get().syncing) return;
+    set({ syncing: true });
+    try {
+      const logs = await api.syncImport();
+      get().addLogs(logs);
+      // 导入可能改动了树与项目，整体刷新
+      await get().init();
+    } catch (e) {
+      get().addLog("error", String(e));
+    } finally {
+      set({ syncing: false });
+    }
+  },
+
   applyConnState(ev) {
     set((s) => ({
       connStates: { ...s.connStates, [ev.node_id]: ev.status },
       connErrors: { ...s.connErrors, [ev.node_id]: ev.message ?? "" },
     }));
+    // 连接错误同时写入日志面板
+    if (ev.status === "error" && ev.message) {
+      const name = get().nodes.find((n) => n.id === ev.node_id)?.name;
+      get().addLog("error", `连接失败${name ? `「${name}」` : ""}：${ev.message}`);
+    }
   },
 }));

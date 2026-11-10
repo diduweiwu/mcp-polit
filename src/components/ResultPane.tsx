@@ -2,15 +2,26 @@
  * 第四栏：调用结果（历史卡片列表，支持树形/原始切换与复制）。
  */
 import { useMemo, useState } from "react";
-import { Braces, Check, Copy, ListTree, Loader2, Trash2, XCircle } from "lucide-react";
+import {
+  Braces,
+  Check,
+  ChevronUp,
+  Copy,
+  ListTree,
+  Loader2,
+  ScrollText,
+  Trash2,
+  XCircle,
+} from "lucide-react";
 import { useAppStore } from "../store";
-import type { CallResult } from "../types";
+import type { CallResult, LogLevel } from "../types";
 import { EmptyState } from "./ui";
 import { JsonNode } from "./JsonView";
 
 /** 结果栏 */
 export function ResultPane() {
   const { results, running, clearResults, selectedToolName } = useAppStore();
+  const [logOpen, setLogOpen] = useState(false);
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
@@ -42,6 +53,73 @@ export function ResultPane() {
           results.map((r) => <ResultCard key={r.seq} result={r} isNew={r.seq === results[0]?.seq} />)
         )}
       </div>
+
+      {/* 底部日志面板：默认收起 */}
+      <LogPanel open={logOpen} toggle={() => setLogOpen((v) => !v)} />
+    </div>
+  );
+}
+
+/** 日志面板属性 */
+interface LogPanelProps {
+  open: boolean;
+  toggle: () => void;
+}
+
+/** 可折叠日志面板：展示同步操作、连接错误等运行日志（仅内存，不落盘） */
+function LogPanel({ open, toggle }: LogPanelProps) {
+  const { logs, clearLogs } = useAppStore();
+  const levelCls: Record<LogLevel, string> = {
+    info: "text-inksoft",
+    warn: "text-warn",
+    error: "text-err",
+  };
+  const dotCls: Record<LogLevel, string> = {
+    info: "bg-inksoft/50",
+    warn: "bg-warn",
+    error: "bg-err",
+  };
+  return (
+    <div className="shrink-0 border-t border-line">
+      <button
+        className="flex h-8 w-full items-center justify-between px-3 text-[12px] text-inksoft transition-colors hover:text-ink"
+        onClick={toggle}
+      >
+        <span className="flex items-center gap-1.5">
+          <ScrollText size={13} /> 日志
+          {logs.length > 0 && (
+            <span className="chip bg-panel2 text-[10px] text-inksoft">{logs.length}</span>
+          )}
+        </span>
+        <ChevronUp size={14} className={`transition-transform duration-200 ${open ? "" : "rotate-180"}`} />
+      </button>
+      {open && (
+        <div className="anim-fade-in max-h-44 overflow-y-auto border-t border-line px-3 py-1.5">
+          {logs.length === 0 ? (
+            <div className="py-2 text-[11.5px] text-inksoft/60">
+              暂无日志。Git 同步、连接失败等操作的记录会显示在这里（仅保留在本会话内存中）。
+            </div>
+          ) : (
+            <>
+              <div className="mb-1 flex justify-end">
+                <button
+                  className="rounded px-1.5 py-0.5 text-[11px] text-inksoft hover:bg-panel2 hover:text-err"
+                  onClick={clearLogs}
+                >
+                  清空
+                </button>
+              </div>
+              {logs.map((l, i) => (
+                <div key={i} className="flex items-start gap-2 py-0.5 font-mono text-[11.5px] leading-relaxed selectable">
+                  <span className="shrink-0 text-inksoft/50">{l.time}</span>
+                  <span className={`mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full ${dotCls[l.level]}`} />
+                  <span className={`break-all ${levelCls[l.level]}`}>{l.message}</span>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

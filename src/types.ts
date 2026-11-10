@@ -89,6 +89,17 @@ export interface JsonSchema {
   additionalProperties?: boolean | JsonSchema;
 }
 
+/** 日志级别 */
+export type LogLevel = "info" | "warn" | "error";
+
+/** 日志条目（同步等操作的执行记录） */
+export interface LogEntry {
+  /** 前端写入时生成的显示时间 HH:MM:SS */
+  time: string;
+  level: LogLevel;
+  message: string;
+}
+
 /** 工具调用结果 */
 export interface CallResult {
   /** 调用序号（前端生成，用于结果对照） */

@@ -8,6 +8,7 @@ mod db;
 mod error;
 mod mcp_manager;
 mod models;
+mod sync;
 
 use tauri::Manager;
 
@@ -135,6 +136,9 @@ pub fn run() {
             // 应用设置
             commands::get_settings,
             commands::save_setting,
+            // Git 同步
+            commands::sync_export,
+            commands::sync_import,
         ])
         .run(tauri::generate_context!())
         .expect("MCPilot 启动失败");

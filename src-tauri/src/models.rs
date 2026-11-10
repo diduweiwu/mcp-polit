@@ -145,3 +145,12 @@ pub struct CallResult {
     /// 入参快照（JSON 字符串，便于前端历史对照）
     pub arguments: String,
 }
+
+/// 日志条目：同步等操作的执行记录，前端在结果面板底部的日志区展示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    /// 级别。枚举：info-普通信息；warn-警告；error-错误
+    pub level: String,
+    /// 日志内容
+    pub message: String,
+}

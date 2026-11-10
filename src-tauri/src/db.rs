@@ -187,6 +187,18 @@ pub fn delete_project(conn: &Connection, id: i64) -> CmdResult<Vec<i64>> {
     Ok(server_ids)
 }
 
+/// 清空项目的全部树节点与配置（保留项目本身）。Git 同步导入覆盖用。
+///
+/// 返回被删除的 server 节点 ID 列表，供上层先断开对应连接。
+pub fn delete_project_nodes(conn: &Connection, id: i64) -> CmdResult<Vec<i64>> {
+    let server_ids = project_server_ids(conn, id)?;
+    conn.execute(
+        "DELETE FROM tree_nodes WHERE project_id = ?1",
+        rusqlite::params![id],
+    )?;
+    Ok(server_ids)
+}
+
 /// 查询项目下全部 server 节点 ID。
 fn project_server_ids(conn: &Connection, project_id: i64) -> CmdResult<Vec<i64>> {
     let mut stmt = conn
