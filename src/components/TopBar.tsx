@@ -58,9 +58,13 @@ export function TopBar() {
   };
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-line bg-panel px-3">
-      {/* 左侧：Logo + 项目切换 */}
-      <div className="flex items-center gap-2">
+    // data-tauri-drag-region：顶栏空白处可拖动窗口；按钮/下拉不受影响
+    <header
+      data-tauri-drag-region
+      className="flex h-12 shrink-0 items-center justify-between border-b border-line bg-panel pl-[84px] pr-3"
+    >
+      {/* 左侧：Logo + 项目切换（左侧留白是 macOS 悬浮红绿灯的区域） */}
+      <div className="flex items-center gap-2" data-tauri-drag-region>
         <div className="flex items-center gap-1.5 pr-1">
           <span
             className="flex h-6 w-6 items-center justify-center rounded-md text-white"
