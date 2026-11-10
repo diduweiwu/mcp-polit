@@ -39,15 +39,15 @@ export function ResultPane() {
             text="填写参数后点击「运行」，调用结果会显示在这里。本会话的历史结果仅保留在内存中，不会写入磁盘。"
           />
         ) : (
-          results.map((r) => <ResultCard key={r.seq} result={r} />)
+          results.map((r) => <ResultCard key={r.seq} result={r} isNew={r.seq === results[0]?.seq} />)
         )}
       </div>
     </div>
   );
 }
 
-/** 单条结果卡片 */
-function ResultCard({ result }: { result: CallResult }) {
+/** 单条结果卡片（新结果带滑入动画） */
+function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) {
   const [view, setView] = useState<"tree" | "raw">("tree");
   const [tab, setTab] = useState<"content" | "structured" | "args">("content");
   const [copied, setCopied] = useState(false);
@@ -86,7 +86,7 @@ function ResultCard({ result }: { result: CallResult }) {
   };
 
   return (
-    <div className="card mb-2 overflow-hidden">
+    <div className={`card mb-2 overflow-hidden ${isNew ? "anim-slide-up" : ""}`}>
       {/* 卡片头 */}
       <div className="flex h-8 items-center justify-between border-b border-line bg-panel2 px-2.5">
         <div className="flex items-center gap-2 text-[11.5px]">

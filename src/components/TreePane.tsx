@@ -19,7 +19,7 @@ import {
 import { useAppStore } from "../store";
 import { buildTree, type TreeEntry } from "../lib/tree";
 import type { TreeNode } from "../types";
-import { ConfirmDialog, EmptyState, StatusDot } from "./ui";
+import { ConfirmDialog, EmptyState, Modal, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
 /** 右键菜单状态 */
@@ -133,7 +133,7 @@ export function TreePane() {
         <>
           <div className="fixed inset-0 z-40" onClick={() => setCtx(null)} onContextMenu={(e) => { e.preventDefault(); setCtx(null); }} />
           <div
-            className="card fixed z-50 min-w-[150px] overflow-hidden py-1 shadow-xl"
+            className="card anim-pop-in fixed z-50 min-w-[150px] overflow-hidden py-1 shadow-xl"
             style={{ left: ctx.x, top: ctx.y }}
           >
             {ctx.node?.node_type === "folder" && (
@@ -177,29 +177,32 @@ export function TreePane() {
       )}
 
       {/* 新建目录弹窗 */}
-      {folderOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="card w-[380px] p-4 shadow-2xl">
-            <div className="mb-2 text-[14px] font-semibold">新建目录</div>
-            <input
-              className="field"
-              autoFocus
-              placeholder="目录名称"
-              value={folderName}
-              onChange={(e) => setFolderName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void submitFolder()}
-            />
-            <div className="mt-3 flex justify-end gap-2">
-              <button className="btn-ghost" onClick={() => setFolderOpen(false)}>
-                取消
-              </button>
-              <button className="btn-primary" onClick={() => void submitFolder()}>
-                创建
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Modal
+        open={folderOpen}
+        title="新建目录"
+        onClose={() => setFolderOpen(false)}
+        width={420}
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setFolderOpen(false)}>
+              取消
+            </button>
+            <button className="btn-primary" onClick={() => void submitFolder()}>
+              创建
+            </button>
+          </>
+        }
+      >
+        <label className="label">目录名称</label>
+        <input
+          className="field"
+          autoFocus
+          placeholder="例如：数据工具 / 内网服务"
+          value={folderName}
+          onChange={(e) => setFolderName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void submitFolder()}
+        />
+      </Modal>
 
       {/* 新建 Server 弹窗 */}
       {formOpen && (
@@ -210,41 +213,44 @@ export function TreePane() {
       )}
 
       {/* 重命名弹窗 */}
-      {renameTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="card w-[380px] p-4 shadow-2xl">
-            <div className="mb-2 text-[14px] font-semibold">
-              重命名{renameTarget.node_type === "folder" ? "目录" : "Server 别名"}
-            </div>
-            <input
-              className="field"
-              autoFocus
-              value={renameName}
-              onChange={(e) => setRenameName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
+      <Modal
+        open={renameTarget != null}
+        title={renameTarget?.node_type === "server" ? "重命名 Server 别名" : "重命名目录"}
+        onClose={() => setRenameTarget(null)}
+        width={420}
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setRenameTarget(null)}>
+              取消
+            </button>
+            <button
+              className="btn-primary"
+              onClick={() => {
+                if (renameTarget) {
                   void useAppStore.getState().renameNode(renameTarget.id, renameName.trim());
-                  setRenameTarget(null);
                 }
+                setRenameTarget(null);
               }}
-            />
-            <div className="mt-3 flex justify-end gap-2">
-              <button className="btn-ghost" onClick={() => setRenameTarget(null)}>
-                取消
-              </button>
-              <button
-                className="btn-primary"
-                onClick={() => {
-                  void useAppStore.getState().renameNode(renameTarget.id, renameName.trim());
-                  setRenameTarget(null);
-                }}
-              >
-                保存
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+            >
+              保存
+            </button>
+          </>
+        }
+      >
+        <label className="label">名称</label>
+        <input
+          className="field"
+          autoFocus
+          value={renameName}
+          onChange={(e) => setRenameName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && renameTarget) {
+              void useAppStore.getState().renameNode(renameTarget.id, renameName.trim());
+              setRenameTarget(null);
+            }
+          }}
+        />
+      </Modal>
 
       {/* 删除确认 */}
       <ConfirmDialog

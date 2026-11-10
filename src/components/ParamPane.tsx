@@ -82,7 +82,7 @@ export function ParamPane() {
     <div className="flex h-full flex-col overflow-hidden bg-panel/50">
       <PaneHeader title={`参数 · ${tool.name}`} tool={tool} mode={mode} setMode={switchMode} />
 
-      <div className="flex-1 overflow-y-auto p-3">
+      <div key={selectedToolName ?? "empty"} className="anim-fade-in flex-1 overflow-y-auto p-3">
         {mode === "form" ? (
           <SchemaForm
             schema={tool.input_schema}

@@ -2,7 +2,13 @@
  * 通用 UI 原语：模态框、下拉菜单、状态点、空态占位。
  * 保持零第三方 UI 依赖，风格与整体设计一致。
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { X } from "lucide-react";
 import type { ConnStatus } from "../types";
 
@@ -30,20 +36,63 @@ interface ModalProps {
   width?: number;
 }
 
-/** 通用模态框 */
+/** 通用模态框：带淡入/缩放入出场动画、Esc 关闭、点击遮罩关闭 */
 export function Modal({ open, title, onClose, children, footer, width = 520 }: ModalProps) {
+  /** 退出动画播放中标记（动画结束后才真正回调 onClose 卸载） */
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+
+  /** 请求关闭：先播 150ms 退出动画，再交给父组件卸载 */
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setClosing(true);
+    window.setTimeout(() => {
+      closingRef.current = false;
+      setClosing(false);
+      onClose();
+    }, 150);
+  }, [onClose]);
+
+  /* open 状态复位时重置内部状态 */
+  useEffect(() => {
+    if (!open) {
+      closingRef.current = false;
+      setClosing(false);
+    }
+  }, [open]);
+
+  /* Esc 关闭 */
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") requestClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, requestClose]);
+
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+    <div
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px] ${
+        closing ? "anim-fade-out" : "anim-fade-in"
+      }`}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) requestClose();
+      }}
+    >
       <div
-        className="card max-h-[85vh] w-full overflow-hidden shadow-2xl"
+        className={`card max-h-[85vh] w-full overflow-hidden shadow-2xl ${
+          closing ? "anim-zoom-out" : "anim-zoom-in"
+        }`}
         style={{ maxWidth: width }}
       >
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <div className="text-[14px] font-semibold">{title}</div>
           <button
             className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
-            onClick={onClose}
+            onClick={requestClose}
             title="关闭"
           >
             <X size={16} />
@@ -152,7 +201,7 @@ export function Dropdown({
       {trigger(open, () => setOpen((v) => !v))}
       {open && (
         <div
-          className={`card absolute top-full z-40 mt-1 min-w-[180px] overflow-hidden py-1 shadow-xl ${
+          className={`card anim-pop-in absolute top-full z-40 mt-1 min-w-[180px] overflow-hidden py-1 shadow-xl ${
             align === "right" ? "right-0" : "left-0"
           }`}
         >

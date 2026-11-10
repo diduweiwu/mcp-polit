@@ -76,7 +76,7 @@ export function TopBar() {
     // 整条顶栏可拖动窗口（onMouseDown 里排除按钮等交互元素）
     <header
       onMouseDown={handleDragMouseDown}
-      className="flex h-12 shrink-0 items-center justify-between border-b border-line bg-panel pl-[84px] pr-3"
+      className="flex h-12 shrink-0 cursor-default items-center justify-between border-b border-line bg-panel pl-[84px] pr-3"
     >
       {/* 左侧：Logo + 项目切换（左侧留白是 macOS 悬浮红绿灯的区域） */}
       <div className="flex items-center gap-2">
@@ -195,7 +195,7 @@ export function TopBar() {
             />
           </button>
           {paletteOpen && (
-            <div className="card absolute right-0 top-full z-40 mt-1 w-[168px] p-2 shadow-xl">
+            <div className="card anim-pop-in absolute right-0 top-full z-40 mt-1 w-[168px] p-2 shadow-xl">
               <div className="mb-1.5 px-1 text-[12px] text-inksoft">主色调</div>
               <div className="grid grid-cols-3 gap-1.5">
                 {THEME_PRESETS.map((p) => (

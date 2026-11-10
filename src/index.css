@@ -66,13 +66,65 @@ body {
   background: var(--c-bg);
   -webkit-font-smoothing: antialiased;
   user-select: none;
+  /* 非输入区域统一箭头光标（避免顶栏/文字上出现 I-beam，对齐原生应用观感） */
+  cursor: default;
 }
 
-/* 输入类元素允许选中文本 */
+/* 输入类元素允许选中并显示文本光标 */
 input,
 textarea,
 .selectable {
   user-select: text;
+}
+input,
+textarea {
+  cursor: text;
+}
+
+/* ---------- 过渡动画 ---------- */
+
+@keyframes mcp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes mcp-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes mcp-zoom-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes mcp-zoom-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(8px) scale(0.97); }
+}
+@keyframes mcp-pop-in {
+  from { opacity: 0; transform: translateY(-5px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes mcp-slide-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.anim-fade-in {
+  animation: mcp-fade-in 0.18s ease-out both;
+}
+.anim-fade-out {
+  animation: mcp-fade-out 0.15s ease-in both;
+}
+.anim-zoom-in {
+  animation: mcp-zoom-in 0.22s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.anim-zoom-out {
+  animation: mcp-zoom-out 0.15s ease-in both;
+}
+.anim-pop-in {
+  animation: mcp-pop-in 0.16s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.anim-slide-up {
+  animation: mcp-slide-up 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 /* 细滚动条 */
