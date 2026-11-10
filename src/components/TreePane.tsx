@@ -4,6 +4,7 @@
  * 支持：目录无限嵌套、右键菜单（新建/重命名/删除/编辑配置）、拖拽移动、连接状态点。
  */
 import { useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronRight,
@@ -157,8 +158,8 @@ export function TreePane() {
         )}
       </div>
 
-      {/* 右键菜单 */}
-      {ctx && (
+      {/* 右键菜单（Portal 到 body，避免被分栏绘制层覆盖） */}
+      {ctx && createPortal(
         <>
           <div className="fixed inset-0 z-40" onClick={() => setCtx(null)} onContextMenu={(e) => { e.preventDefault(); setCtx(null); }} />
           <div
@@ -202,7 +203,8 @@ export function TreePane() {
               </>
             )}
           </div>
-        </>
+        </>,
+        document.body,
       )}
 
       {/* 新建目录弹窗 */}

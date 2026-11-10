@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import type { ConnStatus } from "../types";
 
@@ -73,7 +74,8 @@ export function Modal({ open, title, onClose, children, footer, width = 520 }: M
   }, [open, requestClose]);
 
   if (!open) return null;
-  return (
+  /* Portal 到 body：避免渲染在 Allotment 分栏子树内时被 pane 的绘制层盖住 */
+  return createPortal(
     <div
       className={`fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-[2px] ${
         closing ? "anim-fade-out" : "anim-fade-in"
@@ -105,7 +107,8 @@ export function Modal({ open, title, onClose, children, footer, width = 520 }: M
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
