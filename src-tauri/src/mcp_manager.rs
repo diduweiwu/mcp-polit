@@ -415,3 +415,147 @@ fn collect_secret_values(map: &Map<String, Value>, out: &mut Vec<String>) {
         }
     }
 }
+
+/* ---------- 端到端集成测试（依赖本机 node 与 /tmp/mcpilot-test 下的测试 server） ---------- */
+
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use crate::models::{TransportType::Stdio, TransportType::StreamableHttp};
+
+    /// 测试脚本缺失时跳过（非本机环境不失败）
+    fn skip_if_missing(path: &str) -> bool {
+        !std::path::Path::new(path).exists()
+    }
+
+    fn stdio_cfg() -> ServerConfig {
+        ServerConfig {
+            node_id: 0,
+            transport_type: Stdio,
+            command: Some("node".into()),
+            args: Some(r#"["/tmp/mcpilot-test/stdio-server.mjs"]"#.into()),
+            env: Some(r#"{"DEBUG":"topsecret"}"#.into()),
+            working_dir: None,
+            url: None,
+            headers: None,
+            timeout_ms: 10_000,
+            enabled: true,
+            note: None,
+        }
+    }
+
+    /// 从 CallResult 的 content 里提取文本
+    fn text_of(content: &Value) -> String {
+        content
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        let o = c.as_object()?;
+                        if o.get("type")?.as_str()? == "text" {
+                            o.get("text")?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn stdio_端到端_连接列表调用与脱敏() {
+        let script = "/tmp/mcpilot-test/stdio-server.mjs";
+        if skip_if_missing(script) {
+            eprintln!("跳过：找不到 {script}");
+            return;
+        }
+        let cfg = stdio_cfg();
+        let transport = build_stdio_transport(&cfg).expect("构建 stdio 传输");
+        let service = ().serve(transport).await.expect("握手");
+        let tools = service.peer().list_tools(None).await.expect("tools/list");
+        assert_eq!(tools.tools.len(), 2);
+        assert_eq!(tools.tools[0].name, "echo");
+
+        let params = CallToolRequestParams::new("add")
+            .with_arguments(JsonObject::from(
+                serde_json::json!({"a": 40, "b": 2})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            ));
+        let res = service.peer().call_tool(params).await.expect("tools/call");
+        assert!(!res.is_error.unwrap_or(true));
+        let v = serde_json::to_value(&res.content).unwrap();
+        assert_eq!(text_of(&v), "42");
+
+        // 脱敏验证：把敏感词放进错误文案后应被替换
+        let mut msg = sanitize("连接失败 secret=topsecret 泄漏".into(), &cfg);
+        assert!(!msg.contains("topsecret"), "脱敏失败：{msg}");
+        assert!(msg.contains("***"));
+        let _ = service.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn http_端到端_会话与自定义头() {
+        let port = 3931; // 测试专用端口，避免与手动调试实例冲突
+        let script = "/tmp/mcpilot-test/http-server.mjs";
+        if skip_if_missing(script) {
+            eprintln!("跳过：找不到 {script}");
+            return;
+        }
+        let mut child = tokio::process::Command::new("node")
+            .arg(script)
+            .env("PORT", port.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("启动 http 测试 server");
+        // 等待端口就绪
+        let mut up = false;
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(up, "http 测试 server 未就绪");
+
+        let cfg = ServerConfig {
+            node_id: 0,
+            transport_type: StreamableHttp,
+            command: None,
+            args: None,
+            env: None,
+            working_dir: None,
+            url: Some(format!("http://127.0.0.1:{port}/mcp")),
+            headers: Some(r#"{"Authorization":"Bearer test-token-123456"}"#.into()),
+            timeout_ms: 10_000,
+            enabled: true,
+            note: None,
+        };
+        let transport = build_http_transport(&cfg).expect("构建 http 传输");
+        let service = ().serve(transport).await.expect("握手");
+        let tools = service.peer().list_tools(None).await.expect("tools/list");
+        assert_eq!(tools.tools.len(), 1);
+        assert_eq!(tools.tools[0].name, "upper");
+
+        let params = CallToolRequestParams::new("upper").with_arguments(JsonObject::from(
+            serde_json::json!({"text": "hello mcpilot"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        ));
+        let res = service.peer().call_tool(params).await.expect("tools/call");
+        let v = serde_json::to_value(&res.content).unwrap();
+        let txt = text_of(&v);
+        assert!(txt.contains("HELLO MCPILOT"), "实际返回：{txt}");
+        // 请求头已随请求送达（测试 server 会在带 Authorization 时打标记）
+        assert!(txt.contains("已带鉴权头"), "自定义头未送达：{txt}");
+
+        let _ = service.cancel().await;
+        let _ = child.kill().await;
+    }
+}
