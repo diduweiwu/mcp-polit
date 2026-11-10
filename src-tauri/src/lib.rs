@@ -30,16 +30,25 @@ pub fn run() {
             let conn = db::init(&db_path)?;
             app.manage(Db(std::sync::Mutex::new(conn)));
 
-            // macOS：红绿灯下移到与 48px 顶栏垂直居中（中心 ≈ 24px，y+6=25 略作视觉补偿）
+            // 主窗口手动构建（conf 声明式窗口无法设置红绿灯的逻辑坐标）
+            let builder = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::default(),
+            )
+            .title("MCPilot — 本地 MCP 调试工作台")
+            .inner_size(1360.0, 840.0)
+            .min_inner_size(1000.0, 620.0)
+            .center();
+            // macOS：Overlay 标题栏 + 红绿灯与 48px 顶栏垂直居中
+            // （y=19，按钮直径 12 → 中心 25px，比几何中心低 1px 做视觉补偿）
             #[cfg(target_os = "macos")]
-            {
-                use tauri::Manager as _;
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.set_traffic_light_position(tauri::Position::Logical(
-                        tauri::LogicalPosition::new(20.0, 19.0),
-                    ));
-                }
-            }
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true)
+                .traffic_light_position(tauri::LogicalPosition::new(20.0, 19.0));
+            builder.build()?;
+
             Ok(())
         })
         .on_window_event(|window, event| {
