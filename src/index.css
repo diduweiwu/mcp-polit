@@ -101,7 +101,8 @@ textarea,
 .label {
   @apply mb-1 block text-[12px] font-medium text-inksoft;
 }
-.btn {
+/* @utility 声明：让 btn 既可用于标记，也能被下面的变体 @apply 引用（v4 要求） */
+@utility btn {
   @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5
     text-[13px] font-medium transition-all active:scale-[0.98] disabled:pointer-events-none
     disabled:opacity-50;
