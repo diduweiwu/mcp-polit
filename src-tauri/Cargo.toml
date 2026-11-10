@@ -21,6 +21,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 # MCP 官方 Rust SDK：client + stdio 子进程传输 + Streamable HTTP 客户端传输
 rmcp = { version = "3.9", features = [
@@ -31,6 +32,8 @@ rmcp = { version = "3.9", features = [
 ] }
 # HTTP 头构造（HeaderName/HeaderValue）
 http = "1"
+# 与 rmcp 内部一致的 reqwest 版本（仅为命名 StreamableHttpClientTransport<reqwest::Client> 类型）
+reqwest = { version = "0.13", default-features = false }
 # 本地 SQLite 持久化（bundled：静态编译，无系统依赖）
 rusqlite = { version = "0.41", features = ["bundled"] }
 
