@@ -58,6 +58,12 @@ export function TreePane() {
     setFolderOpen(false);
   };
 
+  /** 右键菜单项统一入口：关闭菜单后执行动作 */
+  const runMenu = (fn: () => void) => () => {
+    setCtx(null);
+    fn();
+  };
+
   /** 打开右键菜单并阻止默认行为 */
   const openCtx = (e: React.MouseEvent, node: TreeNode | null) => {
     e.preventDefault();
@@ -138,38 +144,38 @@ export function TreePane() {
           >
             {ctx.node?.node_type === "folder" && (
               <>
-                <CtxItem icon={<FolderPlus size={13} />} label="新建子目录" onClick={() => newFolderUnder(ctx.node!.id)} />
-                <CtxItem icon={<Server size={13} />} label="新建 Server" onClick={() => newUnder(ctx.node!.id)} />
+                <CtxItem icon={<FolderPlus size={13} />} label="新建子目录" onClick={runMenu(() => newFolderUnder(ctx.node!.id))} />
+                <CtxItem icon={<Server size={13} />} label="新建 Server" onClick={runMenu(() => newUnder(ctx.node!.id))} />
                 <div className="my-1 border-t border-line" />
               </>
             )}
             {ctx.node?.node_type === "server" && (
               <>
-                <CtxItem icon={<Plug size={13} />} label="连接" onClick={() => void useAppStore.getState().connect(ctx.node!.id)} />
-                <CtxItem icon={<Settings2 size={13} />} label="编辑配置" onClick={() => {
+                <CtxItem icon={<Plug size={13} />} label="连接" onClick={runMenu(() => void useAppStore.getState().connect(ctx.node!.id))} />
+                <CtxItem icon={<Settings2 size={13} />} label="编辑配置" onClick={runMenu(() => {
                   void useAppStore.getState().selectNode(ctx.node!.id, { autoConnect: false });
                   setFormParent(null);
                   setFormOpen(true);
-                }} />
+                })} />
                 <div className="my-1 border-t border-line" />
               </>
             )}
             {ctx.node && (
               <>
-                <CtxItem icon={<Pencil size={13} />} label="重命名" onClick={() => {
+                <CtxItem icon={<Pencil size={13} />} label="重命名" onClick={runMenu(() => {
                   // 闭包内 TS 无法保留 ctx.node 的非空收窄，此处断言安全（位于 ctx.node && 分支内）
                   const target = ctx.node!;
                   setRenameTarget(target);
                   setRenameName(target.name);
-                }} />
+                })} />
                 <div className="my-1 border-t border-line" />
-                <CtxItem icon={<Trash2 size={13} />} label="删除" danger onClick={() => setDeleteTarget(ctx.node)} />
+                <CtxItem icon={<Trash2 size={13} />} label="删除" danger onClick={runMenu(() => setDeleteTarget(ctx.node))} />
               </>
             )}
             {!ctx.node && (
               <>
-                <CtxItem icon={<FolderPlus size={13} />} label="新建目录" onClick={() => newFolderUnder(null)} />
-                <CtxItem icon={<Server size={13} />} label="新建 Server" onClick={() => newUnder(null)} />
+                <CtxItem icon={<FolderPlus size={13} />} label="新建目录" onClick={runMenu(() => newFolderUnder(null))} />
+                <CtxItem icon={<Server size={13} />} label="新建 Server" onClick={runMenu(() => newUnder(null))} />
               </>
             )}
           </div>
