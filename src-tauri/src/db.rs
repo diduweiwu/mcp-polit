@@ -197,18 +197,21 @@ fn project_server_ids(conn: &Connection, project_id: i64) -> CmdResult<Vec<i64>>
 
 /* ---------- 树节点 ---------- */
 
-/// 查询项目下全部节点（扁平列表，前端组装树）。
+/// 查询项目下全部节点（扁平列表，前端组装树；LEFT JOIN 带出 server 的传输类型）。
 pub fn list_nodes(conn: &Connection, project_id: i64) -> CmdResult<Vec<TreeNode>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, parent_id, node_type, name, sort_order, created_at, updated_at
-         FROM tree_nodes WHERE project_id = ?1
-         ORDER BY sort_order ASC, id ASC",
+        "SELECT t.id, t.project_id, t.parent_id, t.node_type, t.name, t.sort_order,
+                t.created_at, t.updated_at, s.transport_type
+         FROM tree_nodes t
+         LEFT JOIN server_configs s ON s.node_id = t.id
+         WHERE t.project_id = ?1
+         ORDER BY t.sort_order ASC, t.id ASC",
     )?;
     let rows = stmt.query_map(rusqlite::params![project_id], map_node)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 行 -> TreeNode 的映射函数。
+/// 行 -> TreeNode 的映射函数（第 9 列为 LEFT JOIN 的传输类型，目录为 NULL）。
 fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeNode> {
     Ok(TreeNode {
         id: row.get(0)?,
@@ -219,6 +222,7 @@ fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeNode> {
         sort_order: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        transport_type: row.get::<_, Option<String>>(8)?.map(|s| transport_from_str(&s)),
     })
 }
 
@@ -234,8 +238,11 @@ fn node_type_from_str(s: &str) -> NodeType {
 /// 按 ID 查询节点；不存在时报错。
 pub fn get_node(conn: &Connection, id: i64) -> CmdResult<TreeNode> {
     conn.query_row(
-        "SELECT id, project_id, parent_id, node_type, name, sort_order, created_at, updated_at
-         FROM tree_nodes WHERE id = ?1",
+        "SELECT t.id, t.project_id, t.parent_id, t.node_type, t.name, t.sort_order,
+                t.created_at, t.updated_at, s.transport_type
+         FROM tree_nodes t
+         LEFT JOIN server_configs s ON s.node_id = t.id
+         WHERE t.id = ?1",
         rusqlite::params![id],
         map_node,
     )

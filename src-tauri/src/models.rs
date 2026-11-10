@@ -47,6 +47,9 @@ pub struct TreeNode {
     pub created_at: String,
     /// 最后更新时间（本地时间字符串）
     pub updated_at: String,
+    /// 传输类型（仅 server 节点有值，前端按协议类型着色标识）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_type: Option<TransportType>,
 }
 
 /// MCP 传输类型。

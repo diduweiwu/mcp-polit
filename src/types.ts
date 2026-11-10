@@ -24,6 +24,8 @@ export interface TreeNode {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  /** 传输类型（仅 server 节点有值，按协议类型着色标识） */
+  transport_type?: TransportType | null;
 }
 
 /** MCP 传输类型 */

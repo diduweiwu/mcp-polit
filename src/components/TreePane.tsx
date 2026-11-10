@@ -10,11 +10,13 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Globe,
   PanelLeftClose,
   Pencil,
   Plug,
   Server,
   Settings2,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import { useAppStore } from "../store";
@@ -382,15 +384,20 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
               <ChevronRight size={14} className="shrink-0 text-inksoft" />
             )}
             {expanded ? (
-              <FolderOpen size={14} className="shrink-0 text-warn" />
+              <FolderOpen size={14} className="shrink-0 text-inksoft" />
             ) : (
-              <Folder size={14} className="shrink-0 text-warn" />
+              <Folder size={14} className="shrink-0 text-inksoft" />
             )}
           </>
         ) : (
           <>
             <span className="w-[14px] shrink-0" />
-            <Server size={14} className="shrink-0 text-primarystrong" />
+            {/* 按传输协议着色标识：stdio=终端绿，Streamable HTTP=地球紫 */}
+            {node.transport_type === "streamable_http" ? (
+              <Globe size={14} className="shrink-0 text-violet-500" />
+            ) : (
+              <Terminal size={14} className="shrink-0 text-emerald-500" />
+            )}
           </>
         )}
         <span className="min-w-0 flex-1 truncate text-[13px]">{node.name}</span>
