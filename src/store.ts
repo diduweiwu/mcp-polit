@@ -75,8 +75,8 @@ interface AppState {
   /** 折叠/展开切换 */
   toggleExpand: (id: number) => void;
 
-  /** 选中一个树节点：server 会自动补连接、拉工具 */
-  selectNode: (id: number) => Promise<void>;
+  /** 选中一个树节点：server 会自动补连接、拉工具（可用 opts 关闭自动连接） */
+  selectNode: (id: number, opts?: { autoConnect?: boolean }) => Promise<void>;
   /** 连接指定 server 并加载工具 */
   connect: (id: number) => Promise<void>;
   /** 断开指定 server */
@@ -273,7 +273,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ expandedIds: { ...s.expandedIds, [id]: !s.expandedIds[id] } }));
   },
 
-  async selectNode(id) {
+  async selectNode(id, opts) {
     const node = get().nodes.find((n) => n.id === id);
     if (!node || node.node_type !== "server") return;
     // 展开祖先目录，保证选中项可见
@@ -284,10 +284,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       cur = parent?.parent_id ?? null;
     }
     set({ selectedNodeId: id, selectedToolName: null, results: [] });
+    const autoConnect = opts?.autoConnect !== false;
     const status = get().connStates[id];
     if (status === "connected") {
       if (!get().tools[id]) await fetchTools(id);
-    } else if (status !== "connecting") {
+    } else if (autoConnect && status !== "connecting") {
       await get().connect(id);
     }
     // 连接成功后自动选中第一个工具

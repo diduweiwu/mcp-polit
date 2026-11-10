@@ -37,9 +37,26 @@ export function TreePane() {
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [formParent, setFormParent] = useState<number | null>(null);
+  const [folderOpen, setFolderOpen] = useState(false);
+  const [folderParent, setFolderParent] = useState<number | null>(null);
+  const [folderName, setFolderName] = useState("");
   const [renameTarget, setRenameTarget] = useState<TreeNode | null>(null);
   const [renameName, setRenameName] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<TreeNode | null>(null);
+
+  /** 打开「新建目录」弹窗 */
+  const newFolderUnder = (parentId: number | null) => {
+    setFolderParent(parentId);
+    setFolderName("");
+    setFolderOpen(true);
+  };
+
+  /** 提交新建目录 */
+  const submitFolder = async () => {
+    if (!folderName.trim()) return;
+    await useAppStore.getState().createNode(folderParent, "folder", folderName.trim());
+    setFolderOpen(false);
+  };
 
   /** 打开右键菜单并阻止默认行为 */
   const openCtx = (e: React.MouseEvent, node: TreeNode | null) => {
@@ -75,7 +92,7 @@ export function TreePane() {
           <button
             className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
             title="新建根目录"
-            onClick={() => newUnder(null)}
+            onClick={() => newFolderUnder(null)}
           >
             <FolderPlus size={14} />
           </button>
@@ -121,7 +138,7 @@ export function TreePane() {
           >
             {ctx.node?.node_type === "folder" && (
               <>
-                <CtxItem icon={<FolderPlus size={13} />} label="新建子目录" onClick={() => newUnder(ctx.node!.id)} />
+                <CtxItem icon={<FolderPlus size={13} />} label="新建子目录" onClick={() => newFolderUnder(ctx.node!.id)} />
                 <CtxItem icon={<Server size={13} />} label="新建 Server" onClick={() => newUnder(ctx.node!.id)} />
                 <div className="my-1 border-t border-line" />
               </>
@@ -130,7 +147,7 @@ export function TreePane() {
               <>
                 <CtxItem icon={<Plug size={13} />} label="连接" onClick={() => void useAppStore.getState().connect(ctx.node!.id)} />
                 <CtxItem icon={<Settings2 size={13} />} label="编辑配置" onClick={() => {
-                  useAppStore.getState().selectNode(ctx.node!.id);
+                  void useAppStore.getState().selectNode(ctx.node!.id, { autoConnect: false });
                   setFormParent(null);
                   setFormOpen(true);
                 }} />
@@ -151,12 +168,37 @@ export function TreePane() {
             )}
             {!ctx.node && (
               <>
-                <CtxItem icon={<FolderPlus size={13} />} label="新建目录" onClick={() => newUnder(null)} />
+                <CtxItem icon={<FolderPlus size={13} />} label="新建目录" onClick={() => newFolderUnder(null)} />
                 <CtxItem icon={<Server size={13} />} label="新建 Server" onClick={() => newUnder(null)} />
               </>
             )}
           </div>
         </>
+      )}
+
+      {/* 新建目录弹窗 */}
+      {folderOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="card w-[380px] p-4 shadow-2xl">
+            <div className="mb-2 text-[14px] font-semibold">新建目录</div>
+            <input
+              className="field"
+              autoFocus
+              placeholder="目录名称"
+              value={folderName}
+              onChange={(e) => setFolderName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void submitFolder()}
+            />
+            <div className="mt-3 flex justify-end gap-2">
+              <button className="btn-ghost" onClick={() => setFolderOpen(false)}>
+                取消
+              </button>
+              <button className="btn-primary" onClick={() => void submitFolder()}>
+                创建
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 新建 Server 弹窗 */}
