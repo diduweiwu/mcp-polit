@@ -195,17 +195,17 @@ export function TopBar() {
             />
           </button>
           {paletteOpen && (
-            <div className="card anim-pop-in absolute right-0 top-full z-40 mt-1 w-[168px] p-2 shadow-xl">
-              <div className="mb-1.5 px-1 text-[12px] text-inksoft">主色调</div>
-              <div className="grid grid-cols-3 gap-1.5">
-                {THEME_PRESETS.map((p) => (
+            <div className="card anim-pop-in absolute right-0 top-full z-40 mt-1 w-[156px] p-1.5 shadow-xl">
+              <div className="px-2 pb-1 pt-1 text-[11px] font-medium text-inksoft">主色调</div>
+              {THEME_PRESETS.map((p) => {
+                const selected = themeColorKey === p.key;
+                return (
                   <button
                     key={p.key}
-                    title={p.label}
-                    className={`flex items-center justify-center gap-1 rounded-md border py-1.5 text-[11px] transition-colors ${
-                      themeColorKey === p.key
-                        ? "border-primary bg-primarysoft text-primarystrong"
-                        : "border-line hover:bg-panel2"
+                    className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] transition-colors ${
+                      selected
+                        ? "bg-primarysoft font-medium text-primarystrong"
+                        : "text-ink hover:bg-panel2"
                     }`}
                     onClick={() => {
                       void setThemeColor(p.key);
@@ -213,13 +213,14 @@ export function TopBar() {
                     }}
                   >
                     <span
-                      className="h-3 w-3 rounded-full"
+                      className="h-3.5 w-3.5 shrink-0 rounded-full ring-1 ring-inset ring-black/10 dark:ring-white/20"
                       style={{ background: p.primary }}
                     />
-                    {p.label}
+                    <span className="flex-1 text-left">{p.label}</span>
+                    {selected && <Check size={14} className="text-primarystrong" />}
                   </button>
-                ))}
-              </div>
+                );
+              })}
             </div>
           )}
         </div>
