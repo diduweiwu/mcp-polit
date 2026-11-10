@@ -47,6 +47,9 @@ interface AppState {
   results: CallResult[];
   seq: number;
 
+  /* 布局：资源树栏是否折叠 */
+  treeCollapsed: boolean;
+
   /* ---------- actions ---------- */
 
   /** 应用启动时调用：恢复设置、项目列表与上次激活项目 */
@@ -91,6 +94,9 @@ interface AppState {
   /** 清空当前结果面板 */
   clearResults: () => void;
 
+  /** 切换资源树栏折叠/展开 */
+  toggleTreeCollapsed: () => void;
+
   /** 合并后端推送的连接状态（Tauri event） */
   applyConnState: (ev: { node_id: number; status: ConnStatus; message: string | null }) => void;
 }
@@ -125,6 +131,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   running: false,
   results: [],
   seq: 0,
+  treeCollapsed: false,
 
   async init() {
     // 1. 设置
@@ -368,6 +375,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearResults() {
     set({ results: [] });
+  },
+
+  toggleTreeCollapsed() {
+    set((s) => ({ treeCollapsed: !s.treeCollapsed }));
   },
 
   applyConnState(ev) {

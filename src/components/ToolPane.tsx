@@ -4,6 +4,7 @@
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
+  PanelLeftOpen,
   Plug,
   PlugZap,
   RefreshCw,
@@ -16,7 +17,7 @@ import { EmptyState, StatusDot } from "./ui";
 
 /** 工具列表栏 */
 export function ToolPane() {
-  const { selectedNodeId, nodes, tools, connStates, connErrors, selectedToolName, selectTool, connect, disconnect, refreshTools } =
+  const { selectedNodeId, nodes, tools, connStates, connErrors, selectedToolName, selectTool, connect, disconnect, refreshTools, treeCollapsed, toggleTreeCollapsed } =
     useAppStore();
 
   const [keyword, setKeyword] = useState("");
@@ -38,14 +39,40 @@ export function ToolPane() {
 
   if (!node) {
     return (
-      <PaneWrap title="工具列表">
+      <PaneWrap
+        title="工具列表"
+        lead={
+          treeCollapsed ? (
+            <button
+              className="mr-1 rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
+              title="展开资源树"
+              onClick={toggleTreeCollapsed}
+            >
+              <PanelLeftOpen size={14} />
+            </button>
+          ) : undefined
+        }
+      >
         <EmptyState icon={<Wrench size={36} strokeWidth={1.2} />} text="在左侧选择一个 MCP Server，这里会列出它的全部工具。" />
       </PaneWrap>
     );
   }
 
   return (
-    <PaneWrap title={`工具列表 · ${node.name}`}>
+    <PaneWrap
+      title={`工具列表 · ${node.name}`}
+      lead={
+        treeCollapsed ? (
+          <button
+            className="mr-1 rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
+            title="展开资源树"
+            onClick={toggleTreeCollapsed}
+          >
+            <PanelLeftOpen size={14} />
+          </button>
+        ) : undefined
+      }
+    >
       {/* 状态条 */}
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-2.5">
         <div className="flex items-center gap-1.5 text-[12px]">
@@ -141,11 +168,20 @@ export function ToolPane() {
   );
 }
 
-/** 栏外壳：标题 + 内容 */
-function PaneWrap({ title, children }: { title: string; children: React.ReactNode }) {
+/** 栏外壳：标题 + 内容（lead 为标题左侧的可选元素，如展开按钮） */
+function PaneWrap({
+  title,
+  children,
+  lead,
+}: {
+  title: string;
+  children: React.ReactNode;
+  lead?: React.ReactNode;
+}) {
   return (
     <div className="flex h-full flex-col overflow-hidden border-r border-line bg-panel/50">
       <div className="flex h-9 shrink-0 items-center border-b border-line px-3">
+        {lead}
         <span className="truncate text-[12px] font-semibold text-inksoft">{title}</span>
       </div>
       {children}

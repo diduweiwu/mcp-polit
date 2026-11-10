@@ -10,6 +10,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  PanelLeftClose,
   Pencil,
   Plug,
   Server,
@@ -108,6 +109,13 @@ export function TreePane() {
             onClick={() => newUnder(null)}
           >
             <Server size={14} />
+          </button>
+          <button
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
+            title="收起资源树"
+            onClick={useAppStore.getState().toggleTreeCollapsed}
+          >
+            <PanelLeftClose size={14} />
           </button>
         </div>
       </div>
