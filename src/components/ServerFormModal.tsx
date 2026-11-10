@@ -104,7 +104,9 @@ export function ServerFormModal({ parentId, onClose }: Props) {
         if (editNode.name !== name.trim()) {
           await renameNode(editNode.id, name.trim());
         }
-        await api.saveServerConfig({ ...cfg, node_id: editNode.id });
+        const saved = { ...cfg, node_id: editNode.id };
+        await api.saveServerConfig(saved);
+        useAppStore.getState().updateConfigCache(saved);
       } else {
         const node = await api.createNode(
           useAppStore.getState().activeProjectId!,
@@ -112,7 +114,9 @@ export function ServerFormModal({ parentId, onClose }: Props) {
           "server",
           name.trim(),
         );
-        await api.saveServerConfig({ ...cfg, node_id: node.id });
+        const saved = { ...cfg, node_id: node.id };
+        await api.saveServerConfig(saved);
+        useAppStore.getState().updateConfigCache(saved);
         await reloadNodes();
         void selectNode(node.id);
       }

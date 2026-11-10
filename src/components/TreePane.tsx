@@ -330,6 +330,7 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
     connStates,
     connErrors,
     moveNode,
+    connect,
   } = useAppStore();
 
   const isFolder = node.node_type === "folder";
@@ -373,8 +374,15 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
         }`}
         style={{ paddingLeft: 6 + depth * 14 }}
         onClick={() => (isFolder ? toggleExpand(node.id) : void selectNode(node.id))}
+        onDoubleClick={() => !isFolder && void connect(node.id)}
         onContextMenu={(e) => onCtx(e, node)}
-        title={err ? `${node.name}\n${err}` : node.name}
+        title={
+          err
+            ? `${node.name}\n${err}`
+            : isFolder
+              ? node.name
+              : `${node.name}\n单击查看配置，双击连接`
+        }
       >
         {isFolder ? (
           <>

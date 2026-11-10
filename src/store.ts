@@ -10,6 +10,7 @@ import type {
   ConnStatus,
   NodeType,
   Project,
+  ServerConfig,
   ToolInfo,
   TreeNode,
 } from "./types";
@@ -41,6 +42,8 @@ interface AppState {
   connErrors: Record<number, string>;
   tools: Record<number, ToolInfo[]>;
   selectedToolName: string | null;
+  /** server 配置缓存（nodeId -> 配置；选中时按需加载） */
+  serverConfigs: Record<number, ServerConfig>;
 
   /* 调用 */
   running: boolean;
@@ -78,8 +81,12 @@ interface AppState {
   /** 折叠/展开切换 */
   toggleExpand: (id: number) => void;
 
-  /** 选中一个树节点：server 会自动补连接、拉工具（可用 opts 关闭自动连接） */
+  /** 选中一个树节点：server 显示配置摘要，不自动连接（连接由双击/按钮触发） */
   selectNode: (id: number, opts?: { autoConnect?: boolean }) => Promise<void>;
+  /** 按需加载某节点的配置（带缓存） */
+  loadConfig: (id: number) => Promise<ServerConfig | null>;
+  /** 更新配置缓存（保存配置后调用） */
+  updateConfigCache: (cfg: ServerConfig) => void;
   /** 连接指定 server 并加载工具 */
   connect: (id: number) => Promise<void>;
   /** 断开指定 server */
@@ -128,6 +135,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   connErrors: {},
   tools: {},
   selectedToolName: null,
+  serverConfigs: {},
   running: false,
   results: [],
   seq: 0,
@@ -291,18 +299,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       cur = parent?.parent_id ?? null;
     }
     set({ selectedNodeId: id, selectedToolName: null, results: [] });
-    const autoConnect = opts?.autoConnect !== false;
+    // 按需加载配置摘要（单击即看配置，不自动连接）
+    void get().loadConfig(id);
+    const autoConnect = opts?.autoConnect === true;
     const status = get().connStates[id];
     if (status === "connected") {
       if (!get().tools[id]) await fetchTools(id);
     } else if (autoConnect && status !== "connecting") {
       await get().connect(id);
     }
-    // 连接成功后自动选中第一个工具
-    const tools = get().tools[id];
-    if (tools && tools.length > 0 && get().selectedNodeId === id) {
-      set({ selectedToolName: tools[0].name });
+  },
+
+  async loadConfig(id) {
+    const cached = get().serverConfigs[id];
+    if (cached) return cached;
+    try {
+      const cfg = await api.getServerConfig(id);
+      set((s) => ({ serverConfigs: { ...s.serverConfigs, [id]: cfg } }));
+      return cfg;
+    } catch {
+      return null;
     }
+  },
+
+  updateConfigCache(cfg) {
+    set((s) => ({ serverConfigs: { ...s.serverConfigs, [cfg.node_id]: cfg } }));
   },
 
   async connect(id) {
@@ -314,6 +335,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         connErrors: { ...s.connErrors, [id]: "" },
         tools: { ...s.tools, [id]: tools },
       }));
+      // 连接成功且该节点正被选中时，自动选中第一个工具
+      const st = get();
+      if (st.selectedNodeId === id && !st.selectedToolName && tools.length > 0) {
+        set({ selectedToolName: tools[0].name });
+      }
     } catch (e) {
       set((s) => ({
         connStates: { ...s.connStates, [id]: "error" },

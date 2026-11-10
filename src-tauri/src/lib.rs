@@ -29,6 +29,17 @@ pub fn run() {
             let db_path = data_dir.join("mcpilot.db");
             let conn = db::init(&db_path)?;
             app.manage(Db(std::sync::Mutex::new(conn)));
+
+            // macOS：红绿灯下移到与 48px 顶栏垂直居中（中心 ≈ 24px，y+6=25 略作视觉补偿）
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::Manager as _;
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_traffic_light_position(tauri::Position::Logical(
+                        tauri::LogicalPosition::new(20.0, 19.0),
+                    ));
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

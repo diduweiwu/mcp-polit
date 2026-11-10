@@ -4,16 +4,22 @@
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
+  Clock,
+  Globe,
   PanelLeftOpen,
+  Pencil,
   Plug,
   PlugZap,
   RefreshCw,
   Search,
+  Terminal,
   Unplug,
   Wrench,
 } from "lucide-react";
 import { useAppStore } from "../store";
+import type { TreeNode } from "../types";
 import { EmptyState, StatusDot } from "./ui";
+import { ServerFormModal } from "./ServerFormModal";
 
 /** 工具列表栏 */
 export function ToolPane() {
@@ -131,13 +137,10 @@ export function ToolPane() {
         </div>
       )}
 
-      {/* 工具列表 */}
+      {/* 未连接：显示配置摘要面板（单击节点即出现）；已连接：显示工具列表 */}
       <div className="flex-1 overflow-y-auto p-1.5">
         {status !== "connected" ? (
-          <EmptyState
-            icon={<Plug size={32} strokeWidth={1.2} />}
-            text={status === "connecting" ? "正在连接 Server…" : "连接后即可查看工具列表。"}
-          />
+          <ServerSummary node={node} status={status} />
         ) : filtered.length === 0 ? (
           <EmptyState text={keyword ? "没有匹配的工具。" : "该 Server 未提供任何工具。"} />
         ) : (
@@ -210,5 +213,125 @@ function IconBtn({
     >
       {children}
     </button>
+  );
+}
+
+/** JSON 对象字符串 -> 键值对数组（非法/为空返回 []） */
+function rowsOf(json?: string | null): Array<[string, string]> {
+  const s = json?.trim();
+  if (!s) return [];
+  try {
+    const obj = JSON.parse(s) as Record<string, unknown>;
+    return Object.entries(obj).map(([k, v]) => [k, String(v)]);
+  } catch {
+    return [];
+  }
+}
+
+/** 摘要行 */
+function SummaryRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="mb-1.5">
+      <div className="mb-0.5 text-[11px] text-inksoft/70">{label}</div>
+      <div className="rounded-md bg-panel2 px-2 py-1 font-mono text-[12px] break-all selectable">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Server 配置摘要面板：单击树节点后显示连接信息与「连接」入口，
+ * 双击树节点或点击按钮才发起连接。
+ */
+function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
+  const cfg = useAppStore((s) => s.serverConfigs[node.id]);
+  const connect = useAppStore((s) => s.connect);
+  const [editOpen, setEditOpen] = useState(false);
+
+  if (!cfg) {
+    return (
+      <EmptyState
+        icon={<Plug size={32} strokeWidth={1.2} />}
+        text={status === "connecting" ? "正在连接 Server…" : "加载配置中…"}
+      />
+    );
+  }
+
+  const isHttp = cfg.transport_type === "streamable_http";
+  const connecting = status === "connecting";
+
+  return (
+    <div className="anim-fade-in p-2">
+      {/* 传输类型徽章 */}
+      <div className="mb-2.5 flex items-center gap-1.5">
+        <span
+          className={`chip ${
+            isHttp ? "bg-violet-500/10 text-violet-500" : "bg-emerald-500/10 text-emerald-500"
+          }`}
+        >
+          {isHttp ? <Globe size={11} /> : <Terminal size={11} />}
+          {isHttp ? "Streamable HTTP" : "stdio"}
+        </span>
+        {!cfg.enabled && <span className="chip bg-warn/10 text-warn">已停用</span>}
+      </div>
+
+      {/* 主要连接信息 */}
+      {isHttp ? (
+        <SummaryRow label="服务地址">{cfg.url ?? "（未配置）"}</SummaryRow>
+      ) : (
+        <>
+          <SummaryRow label="启动命令">{cfg.command ?? "（未配置）"}</SummaryRow>
+          {cfg.args?.trim() && <SummaryRow label="参数">{cfg.args}</SummaryRow>}
+          {cfg.working_dir?.trim() && <SummaryRow label="工作目录">{cfg.working_dir}</SummaryRow>}
+        </>
+      )}
+
+      {rowsOf(cfg.headers).length > 0 && (
+        <SummaryRow label="请求头">
+          {rowsOf(cfg.headers).map(([k, v]) => (
+            <div key={k} className="mb-0.5">
+              <span className="text-primarystrong">{k}:</span> {v}
+            </div>
+          ))}
+        </SummaryRow>
+      )}
+      {rowsOf(cfg.env).length > 0 && (
+        <SummaryRow label="环境变量">
+          {rowsOf(cfg.env).map(([k, v]) => (
+            <div key={k} className="mb-0.5">
+              <span className="text-primarystrong">{k}:</span> {v}
+            </div>
+          ))}
+        </SummaryRow>
+      )}
+
+      <div className="mb-2.5 flex items-center gap-1 text-[11px] text-inksoft">
+        <Clock size={11} /> 调用超时 {cfg.timeout_ms} ms
+      </div>
+      {cfg.note?.trim() && (
+        <div className="mb-2.5 rounded-md bg-panel2 p-2 text-[12px] leading-relaxed text-inksoft selectable">
+          {cfg.note}
+        </div>
+      )}
+
+      {/* 操作 */}
+      <button
+        className="btn-primary h-9 w-full"
+        disabled={connecting || !cfg.enabled}
+        onClick={() => void connect(node.id)}
+      >
+        <PlugZap size={14} />
+        {connecting ? "连接中…" : status === "error" ? "重试连接" : "连接"}
+      </button>
+      <button className="btn-ghost mt-1.5 h-8 w-full" onClick={() => setEditOpen(true)}>
+        <Pencil size={13} /> 编辑配置
+      </button>
+      <p className="mt-2 text-center text-[11px] text-inksoft/60">
+        提示：双击左侧节点可直接连接
+      </p>
+
+      {editOpen && <ServerFormModal parentId={null} onClose={() => setEditOpen(false)} />}
+    </div>
   );
 }
