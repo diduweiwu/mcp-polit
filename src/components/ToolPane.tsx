@@ -4,6 +4,7 @@
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
+  ChevronDown,
   Clock,
   Globe,
   PanelLeftOpen,
@@ -12,6 +13,7 @@ import {
   PlugZap,
   RefreshCw,
   Search,
+  Settings2,
   Terminal,
   Unplug,
   Wrench,
@@ -137,13 +139,17 @@ export function ToolPane() {
         </div>
       )}
 
-      {/* 未连接：显示配置摘要面板（单击节点即出现）；已连接：显示工具列表 */}
+      {/* 未连接：显示配置摘要面板（单击节点即出现）；已连接：可折叠配置条 + 工具列表 */}
       <div className="flex-1 overflow-y-auto p-1.5">
         {status !== "connected" ? (
           <ServerSummary node={node} status={status} />
-        ) : filtered.length === 0 ? (
-          <EmptyState text={keyword ? "没有匹配的工具。" : "该 Server 未提供任何工具。"} />
         ) : (
+          <ConnectedConfigBar node={node} />
+        )}
+        {status === "connected" &&
+          (filtered.length === 0 ? (
+            <EmptyState text={keyword ? "没有匹配的工具。" : "该 Server 未提供任何工具。"} />
+          ) : (
           filtered.map((t) => {
             const active = selectedToolName === t.name;
             return (
@@ -165,9 +171,35 @@ export function ToolPane() {
               </button>
             );
           })
-        )}
+        ))}
       </div>
     </PaneWrap>
+  );
+}
+
+/** 已连接状态顶部的可折叠配置条：默认收起，点击展开完整配置摘要 */
+function ConnectedConfigBar({ node }: { node: TreeNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-1">
+      <button
+        className="flex w-full items-center justify-between rounded-md border border-line bg-panel2 px-2 py-1.5 text-[12px] text-inksoft transition-colors hover:text-ink"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="flex items-center gap-1.5">
+          <Settings2 size={13} /> Server 配置
+        </span>
+        <ChevronDown
+          size={13}
+          className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open && (
+        <div className="anim-fade-in mt-1">
+          <ServerSummary node={node} status="connected" />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -241,13 +273,16 @@ function SummaryRow({ label, children }: { label: string; children: React.ReactN
 }
 
 /**
- * Server 配置摘要面板：单击树节点后显示连接信息与「连接」入口，
- * 双击树节点或点击按钮才发起连接。
+ * Server 配置摘要面板。
+ *
+ * - 未连接：显示连接信息 + 「连接」「编辑配置」按钮；
+ * - 已连接（折叠条展开时）：显示同样信息，底部按钮换为「重新连接」「断开」。
  */
 function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
   const cfg = useAppStore((s) => s.serverConfigs[node.id]);
-  const connect = useAppStore((s) => s.connect);
+  const { connect, disconnect, refreshTools } = useAppStore();
   const [editOpen, setEditOpen] = useState(false);
+  const connected = status === "connected";
 
   if (!cfg) {
     return (
@@ -315,21 +350,40 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
         </div>
       )}
 
-      {/* 操作 */}
-      <button
-        className="btn-primary h-9 w-full"
-        disabled={connecting || !cfg.enabled}
-        onClick={() => void connect(node.id)}
-      >
-        <PlugZap size={14} />
-        {connecting ? "连接中…" : status === "error" ? "重试连接" : "连接"}
-      </button>
-      <button className="btn-ghost mt-1.5 h-8 w-full" onClick={() => setEditOpen(true)}>
-        <Pencil size={13} /> 编辑配置
-      </button>
-      <p className="mt-2 text-center text-[11px] text-inksoft/60">
-        提示：双击左侧节点可直接连接
-      </p>
+      {/* 操作：已连接 -> 重新连接 / 断开；未连接 -> 连接 / 编辑配置 */}
+      {connected ? (
+        <div className="grid grid-cols-2 gap-1.5">
+          <button
+            className="btn-primary h-9"
+            disabled={connecting}
+            onClick={() => void refreshTools(node.id)}
+            title="断开并重新连接（刷新工具列表）"
+          >
+            <RefreshCw size={14} className={connecting ? "animate-spin" : ""} />
+            {connecting ? "连接中…" : "重新连接"}
+          </button>
+          <button className="btn-ghost h-9" onClick={() => void disconnect(node.id)}>
+            <Unplug size={14} /> 断开
+          </button>
+        </div>
+      ) : (
+        <>
+          <button
+            className="btn-primary h-9 w-full"
+            disabled={connecting || !cfg.enabled}
+            onClick={() => void connect(node.id)}
+          >
+            <PlugZap size={14} />
+            {connecting ? "连接中…" : status === "error" ? "重试连接" : "连接"}
+          </button>
+          <button className="btn-ghost mt-1.5 h-8 w-full" onClick={() => setEditOpen(true)}>
+            <Pencil size={13} /> 编辑配置
+          </button>
+          <p className="mt-2 text-center text-[11px] text-inksoft/60">
+            提示：双击左侧节点可直接连接
+          </p>
+        </>
+      )}
 
       {editOpen && <ServerFormModal parentId={null} onClose={() => setEditOpen(false)} />}
     </div>

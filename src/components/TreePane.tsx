@@ -7,7 +7,6 @@ import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
-  ChevronRight,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -401,11 +400,13 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
       >
         {isFolder ? (
           <>
-            {expanded ? (
-              <ChevronDown size={14} className="shrink-0 text-inksoft" />
-            ) : (
-              <ChevronRight size={14} className="shrink-0 text-inksoft" />
-            )}
+            {/* 展开时朝下，收起时旋转 -90° 带过渡 */}
+            <ChevronDown
+              size={14}
+              className={`shrink-0 text-inksoft transition-transform duration-200 ${
+                expanded ? "" : "-rotate-90"
+              }`}
+            />
             {expanded ? (
               <FolderOpen size={14} className="shrink-0 text-inksoft" />
             ) : (
@@ -427,20 +428,23 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
         {status && <StatusDot status={status} />}
       </div>
 
-      {isFolder && expanded && (
-        <div>
-          {children.length === 0 ? (
-            <div
-              className="py-1 text-[12px] text-inksoft/70"
-              style={{ paddingLeft: 30 + depth * 14 }}
-            >
-              （空目录）
-            </div>
-          ) : (
-            children.map((c) => (
-              <TreeItem key={c.node.id} entry={c} depth={depth + 1} onCtx={onCtx} />
-            ))
-          )}
+      {/* 子节点：grid-rows 高度过渡实现展开/收起动画 */}
+      {isFolder && (
+        <div className={`tree-children ${expanded ? "open" : ""}`}>
+          <div>
+            {children.length === 0 ? (
+              <div
+                className="py-1 text-[12px] text-inksoft/70"
+                style={{ paddingLeft: 30 + depth * 14 }}
+              >
+                （空目录）
+              </div>
+            ) : (
+              children.map((c) => (
+                <TreeItem key={c.node.id} entry={c} depth={depth + 1} onCtx={onCtx} />
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>
