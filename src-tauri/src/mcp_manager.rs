@@ -491,7 +491,7 @@ mod e2e_tests {
         assert_eq!(text_of(&v), "42");
 
         // 脱敏验证：把敏感词放进错误文案后应被替换
-        let mut msg = sanitize("连接失败 secret=topsecret 泄漏".into(), &cfg);
+        let msg = sanitize("连接失败 secret=topsecret 泄漏".into(), &cfg);
         assert!(!msg.contains("topsecret"), "脱敏失败：{msg}");
         assert!(msg.contains("***"));
         let _ = service.cancel().await;

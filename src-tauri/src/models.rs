@@ -16,6 +16,9 @@ pub struct Project {
     pub created_at: String,
     /// 最后更新时间（本地时间字符串）
     pub updated_at: String,
+    /// 同步绑定的 git 仓库目录；None 表示未开启同步
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_dir: Option<String>,
 }
 
 /// 树节点类型：目录或 MCP Server。

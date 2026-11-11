@@ -79,7 +79,7 @@ interface AppState {
   /** 重新加载当前项目节点列表 */
   reloadNodes: () => Promise<void>;
 
-  createProject: (name: string) => Promise<void>;
+  createProject: (name: string, syncDir?: string) => Promise<void>;
   renameProject: (id: number, name: string) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
 
@@ -254,8 +254,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ nodes, expandedIds });
   },
 
-  async createProject(name) {
-    const p = await api.createProject(name);
+  async createProject(name, syncDir) {
+    const p = await api.createProject(name, syncDir);
     set((s) => ({ projects: [...s.projects, p] }));
     await get().setActiveProject(p.id);
   },

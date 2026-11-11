@@ -8,6 +8,14 @@ export interface Project {
   name: string;
   created_at: string;
   updated_at: string;
+  /** 同步绑定的 git 仓库目录；无则未开启同步 */
+  sync_dir?: string | null;
+}
+
+/** 分支信息：当前分支 + 全部本地分支 */
+export interface BranchInfo {
+  current: string;
+  branches: string[];
 }
 
 /** 树节点类型 */

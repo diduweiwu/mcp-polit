@@ -118,6 +118,11 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         COMMIT;
         "#,
     )?;
+    // 增量迁移：projects.sync_dir（已存在时忽略报错）
+    let _ = conn.execute(
+        "ALTER TABLE projects ADD COLUMN sync_dir TEXT",
+        [],
+    );
     Ok(())
 }
 
@@ -126,24 +131,33 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
 /// 查询全部项目（按创建时间升序）。
 pub fn list_projects(conn: &Connection) -> CmdResult<Vec<Project>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, created_at, updated_at FROM projects ORDER BY id ASC",
+        "SELECT id, name, created_at, updated_at, sync_dir FROM projects ORDER BY id ASC",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Project {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            created_at: row.get(2)?,
-            updated_at: row.get(3)?,
-        })
-    })?;
+    let rows = stmt.query_map([], map_project)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// 行 -> Project 的映射函数。
+fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+        sync_dir: row.get(4)?,
+    })
+}
+
 /// 新建项目并返回带 ID 的完整对象。
-pub fn create_project(conn: &Connection, name: &str) -> CmdResult<Project> {
+///
+/// # 参数
+///
+/// - `name`: 项目名称
+/// - `sync_dir`: 同步绑定的 git 仓库目录；None 表示不开启同步
+pub fn create_project(conn: &Connection, name: &str, sync_dir: Option<&str>) -> CmdResult<Project> {
     conn.execute(
-        "INSERT INTO projects (name) VALUES (?1)",
-        rusqlite::params![name],
+        "INSERT INTO projects (name, sync_dir) VALUES (?1, ?2)",
+        rusqlite::params![name, sync_dir],
     )?;
     let id = conn.last_insert_rowid();
     get_project(conn, id)
@@ -152,16 +166,9 @@ pub fn create_project(conn: &Connection, name: &str) -> CmdResult<Project> {
 /// 按 ID 查询单个项目；不存在时报错。
 pub fn get_project(conn: &Connection, id: i64) -> CmdResult<Project> {
     conn.query_row(
-        "SELECT id, name, created_at, updated_at FROM projects WHERE id = ?1",
+        "SELECT id, name, created_at, updated_at, sync_dir FROM projects WHERE id = ?1",
         rusqlite::params![id],
-        |row| {
-            Ok(Project {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-            })
-        },
+        map_project,
     )
     .map_err(|e| AppError::new(format!("项目不存在（id={id}）：{e}")))
 }
@@ -532,7 +539,7 @@ mod tests {
     #[test]
     fn 项目与节点增删改查() {
         let conn = mem_db();
-        let p = create_project(&conn, "演示项目").unwrap();
+        let p = create_project(&conn, "演示项目", None).unwrap();
         let folder = create_node(&conn, p.id, None, NodeType::Folder, "目录A").unwrap();
         let sub = create_node(&conn, p.id, Some(folder.id), NodeType::Folder, "子目录A1").unwrap();
         let server = create_node(&conn, p.id, Some(sub.id), NodeType::Server, "文件服务器").unwrap();
@@ -568,7 +575,7 @@ mod tests {
     #[test]
     fn 禁止把目录移动到自己的后代() {
         let conn = mem_db();
-        let p = create_project(&conn, "p").unwrap();
+        let p = create_project(&conn, "p", None).unwrap();
         let a = create_node(&conn, p.id, None, NodeType::Folder, "a").unwrap();
         let b = create_node(&conn, p.id, Some(a.id), NodeType::Folder, "b").unwrap();
         // a 移到 b 下（b 是 a 的后代）应失败
@@ -580,7 +587,7 @@ mod tests {
     #[test]
     fn 删除项目返回其下全部server并级联删除() {
         let conn = mem_db();
-        let p = create_project(&conn, "p").unwrap();
+        let p = create_project(&conn, "p", None).unwrap();
         let s1 = create_node(&conn, p.id, None, NodeType::Server, "s1").unwrap();
         let f = create_node(&conn, p.id, None, NodeType::Folder, "f").unwrap();
         let s2 = create_node(&conn, p.id, Some(f.id), NodeType::Server, "s2").unwrap();

@@ -3,14 +3,18 @@
  *
  * 支持：目录无限嵌套、右键菜单（新建/重命名/删除/编辑配置）、拖拽移动、连接状态点。
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  Check,
   ChevronDown,
+  Download,
   Folder,
   FolderOpen,
   FolderPlus,
+  GitBranch,
   Globe,
+  Loader2,
   PanelLeftClose,
   Pencil,
   Plug,
@@ -18,11 +22,13 @@ import {
   Settings2,
   Terminal,
   Trash2,
+  Upload,
 } from "lucide-react";
+import * as api from "../api";
 import { useAppStore } from "../store";
 import { buildTree, type TreeEntry } from "../lib/tree";
-import type { TreeNode } from "../types";
-import { ConfirmDialog, EmptyState, Modal, StatusDot } from "./ui";
+import type { BranchInfo, TreeNode } from "../types";
+import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
 /** 右键菜单状态 */
@@ -134,6 +140,9 @@ export function TreePane() {
           </button>
         </div>
       </div>
+
+      {/* 同步条：项目绑定了 git 目录时显示（分支切换 + 推送/拉取） */}
+      <SyncBar />
 
       {/* 树主体 */}
       <div
@@ -297,6 +306,120 @@ export function TreePane() {
           setDeleteTarget(null);
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * 同步条：项目绑定了 git 目录时显示。
+ * 分支下拉（点击切换，checkout 后刷新树）+ 推送（导出+commit+push）/ 拉取（pull+导入）。
+ */
+function SyncBar() {
+  const activeProjectId = useAppStore((s) => s.activeProjectId);
+  const project = useAppStore((s) => s.projects.find((p) => p.id === s.activeProjectId));
+  const { addLogs, reloadNodes } = useAppStore();
+  const [info, setInfo] = useState<BranchInfo | null>(null);
+  const [busy, setBusy] = useState<"push" | "pull" | null>(null);
+
+  const hasSync = !!project?.sync_dir;
+
+  /* 项目切换/挂载时拉取分支信息 */
+  useEffect(() => {
+    setInfo(null);
+    if (!hasSync || activeProjectId == null) return;
+    api
+      .projectBranches(activeProjectId)
+      .then(setInfo)
+      .catch((e) => useAppStore.getState().addLog("warn", String(e)));
+  }, [hasSync, activeProjectId]);
+
+  if (!hasSync || !project) return null;
+
+  /** 推送 / 拉取 */
+  const doSync = async (dir: "push" | "pull") => {
+    setBusy(dir);
+    try {
+      const logs =
+        dir === "push"
+          ? await api.projectSyncPush(project.id)
+          : await api.projectSyncPull(project.id);
+      addLogs(logs);
+      if (dir === "pull") await reloadNodes();
+    } catch (e) {
+      useAppStore.getState().addLog("error", String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** 切换分支 */
+  const switchBranch = async (branch: string) => {
+    if (activeProjectId == null) return;
+    try {
+      await api.projectCheckout(project.id, branch);
+      const next = await api.projectBranches(project.id);
+      setInfo(next);
+      useAppStore.getState().addLog("info", `已切换分支：${branch}（分支间内容可能不同，可点击「拉取」加载该分支配置）`);
+    } catch (e) {
+      useAppStore.getState().addLog("error", String(e));
+    }
+  };
+
+  return (
+    <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-panel2/60 px-2">
+      <GitBranch size={12} className="shrink-0 text-inksoft" />
+      {info ? (
+        <Dropdown
+          trigger={(open, toggle) => (
+            <button
+              className="flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] text-ink transition-colors hover:bg-panel"
+              onClick={toggle}
+              title="切换分支"
+            >
+              <span className="max-w-[90px] truncate">{info.current}</span>
+              <ChevronDown size={11} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+            </button>
+          )}
+        >
+          {(close) => (
+            <>
+              {info.branches.length === 0 && (
+                <div className="px-3 py-1.5 text-[12px] text-inksoft">（仓库还没有任何分支）</div>
+              )}
+              {info.branches.map((b) => (
+                <MenuItem
+                  key={b}
+                  label={b}
+                  icon={b === info.current ? <Check size={13} className="text-primarystrong" /> : <span className="w-[13px]" />}
+                  onClick={() => {
+                    void switchBranch(b);
+                    close();
+                  }}
+                />
+              ))}
+            </>
+          )}
+        </Dropdown>
+      ) : (
+        <span className="text-[11.5px] text-inksoft/70">Git 同步</span>
+      )}
+      <span className="flex-1" />
+      <button
+        className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
+        title="推送：导出当前配置并 commit + push"
+        disabled={busy != null}
+        onClick={() => void doSync("push")}
+      >
+        {busy === "push" ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+      </button>
+      <button
+        className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
+        title="拉取：pull 并覆盖加载该分支的配置"
+        disabled={busy != null}
+        onClick={() => void doSync("pull")}
+      >
+        {busy === "pull" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+      </button>
     </div>
   );
 }

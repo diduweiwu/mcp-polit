@@ -3,6 +3,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  BranchInfo,
   CallResult,
   ConnStateEvent,
   Project,
@@ -17,9 +18,9 @@ import type {
 /** 列出全部项目 */
 export const listProjects = () => invoke<Project[]>("list_projects");
 
-/** 新建项目 */
-export const createProject = (name: string) =>
-  invoke<Project>("create_project", { name });
+/** 新建项目（syncDir 为可选的同步目录，后端会校验/创建并 git init） */
+export const createProject = (name: string, syncDir?: string) =>
+  invoke<Project>("create_project", { name, syncDir: syncDir || null });
 
 /** 重命名项目 */
 export const renameProject = (id: number, name: string) =>
@@ -124,3 +125,21 @@ export const syncExport = () =>
 /** 从 git 仓库导入全部项目（覆盖同名项目），返回操作日志 */
 export const syncImport = () =>
   invoke<Array<{ level: string; message: string }>>("sync_import");
+
+/* ---------- 项目级同步 ---------- */
+
+/** 推送项目到其绑定的 git 仓库（导出 + commit + push） */
+export const projectSyncPush = (projectId: number) =>
+  invoke<Array<{ level: string; message: string }>>("project_sync_push", { projectId });
+
+/** 从项目绑定的 git 仓库拉取并导入（覆盖当前配置） */
+export const projectSyncPull = (projectId: number) =>
+  invoke<Array<{ level: string; message: string }>>("project_sync_pull", { projectId });
+
+/** 列出项目同步仓库的分支 */
+export const projectBranches = (projectId: number) =>
+  invoke<BranchInfo>("project_branches", { projectId });
+
+/** 切换项目同步仓库的分支 */
+export const projectCheckout = (projectId: number, branch: string) =>
+  invoke<void>("project_checkout", { projectId, branch });

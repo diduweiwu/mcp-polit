@@ -169,6 +169,10 @@ pub fn run() {
             // Git 同步
             commands::sync_export,
             commands::sync_import,
+            commands::project_sync_push,
+            commands::project_sync_pull,
+            commands::project_branches,
+            commands::project_checkout,
         ])
         .run(tauri::generate_context!())
         .expect("MCPilot 启动失败");

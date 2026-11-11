@@ -23,14 +23,28 @@ pub fn list_projects(db: State<'_, Db>) -> CmdResult<Vec<Project>> {
 }
 
 /// 新建项目。
+///
+/// # 参数
+///
+/// - `name`: 项目名称
+/// - `sync_dir`: 可选的同步目录；填写时会校验/创建并自动 git init
 #[tauri::command]
-pub fn create_project(db: State<'_, Db>, name: String) -> CmdResult<Project> {
+pub fn create_project(db: State<'_, Db>, name: String, sync_dir: Option<String>) -> CmdResult<Project> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(crate::error::AppError::new("项目名称不能为空"));
     }
+    let dir = match sync_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(d) => Some(
+            crate::sync::prepare_sync_dir(d)
+                .map_err(crate::error::AppError::new)?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => None,
+    };
     let conn = db.0.lock().unwrap();
-    crate::db::create_project(&conn, &name)
+    crate::db::create_project(&conn, &name, dir.as_deref())
 }
 
 /// 重命名项目。
@@ -297,4 +311,56 @@ pub async fn sync_import(app: AppHandle, db: State<'_, Db>) -> CmdResult<Vec<cra
     };
     let repo = repo.ok_or_else(crate::error::AppError::new_sync_repo)?;
     Ok(crate::sync::import_all(&app, &db, &repo).await)
+}
+
+/* ---------- 项目级同步（资源树推送/拉取/分支） ---------- */
+
+/// 推送项目到其绑定的 git 仓库（导出 + commit + push），返回操作日志。
+#[tauri::command]
+pub async fn project_sync_push(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_id: i64,
+) -> CmdResult<Vec<crate::models::LogEntry>> {
+    Ok(crate::sync::push_project(&app, &db, project_id).await)
+}
+
+/// 从项目绑定的 git 仓库拉取并导入（覆盖当前配置），返回操作日志。
+#[tauri::command]
+pub async fn project_sync_pull(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_id: i64,
+) -> CmdResult<Vec<crate::models::LogEntry>> {
+    Ok(crate::sync::pull_project(&app, &db, project_id).await)
+}
+
+/// 列出项目同步仓库的分支（当前分支 + 全部本地分支）。
+#[tauri::command]
+pub fn project_branches(
+    db: State<'_, Db>,
+    project_id: i64,
+) -> CmdResult<crate::sync::BranchInfo> {
+    let project = {
+        let conn = db.0.lock().unwrap();
+        crate::db::get_project(&conn, project_id)?
+    };
+    let dir = project
+        .sync_dir
+        .ok_or_else(|| crate::error::AppError::new("该项目未开启同步"))?;
+    crate::sync::git_branches(std::path::Path::new(&dir)).map_err(crate::error::AppError::new)
+}
+
+/// 切换项目同步仓库的分支。
+#[tauri::command]
+pub fn project_checkout(db: State<'_, Db>, project_id: i64, branch: String) -> CmdResult<()> {
+    let project = {
+        let conn = db.0.lock().unwrap();
+        crate::db::get_project(&conn, project_id)?
+    };
+    let dir = project
+        .sync_dir
+        .ok_or_else(|| crate::error::AppError::new("该项目未开启同步"))?;
+    crate::sync::git_checkout(std::path::Path::new(&dir), &branch)
+        .map_err(crate::error::AppError::new)
 }

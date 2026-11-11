@@ -55,6 +55,7 @@ export function TopBar() {
   const active = projects.find((p) => p.id === activeProjectId) ?? null;
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newSyncDir, setNewSyncDir] = useState("");
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -70,12 +71,17 @@ export function TopBar() {
         ? { icon: <Monitor size={15} />, title: "跟随系统（点击切换为亮色）" }
         : { icon: <Sun size={15} />, title: "亮色（点击切换为暗色）" };
 
-  /** 提交新建项目 */
+  /** 提交新建项目（含可选同步目录；目录校验失败时错误信息由后端返回） */
   const submitNew = async () => {
     if (!newName.trim()) return;
-    await createProject(newName.trim());
-    setNewName("");
-    setNewOpen(false);
+    try {
+      await createProject(newName.trim(), newSyncDir.trim() || undefined);
+      setNewName("");
+      setNewSyncDir("");
+      setNewOpen(false);
+    } catch (e) {
+      useAppStore.getState().addLog("error", `创建项目失败：${e}`);
+    }
   };
 
   /** 提交重命名 */
@@ -266,7 +272,7 @@ export function TopBar() {
         open={newOpen}
         title="新建项目"
         onClose={() => setNewOpen(false)}
-        width={420}
+        width={480}
         footer={
           <>
             <button className="btn-ghost" onClick={() => setNewOpen(false)}>
@@ -287,6 +293,19 @@ export function TopBar() {
           onChange={(e) => setNewName(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && void submitNew()}
         />
+        <div className="mt-3">
+          <label className="label">同步目录（可选，开启 Git 同步）</label>
+          <input
+            className="field font-mono"
+            placeholder="~/mcpilot-sync/backend 或本地 git 仓库路径"
+            value={newSyncDir}
+            onChange={(e) => setNewSyncDir(e.target.value)}
+          />
+          <p className="mt-1.5 text-[12px] leading-relaxed text-inksoft">
+            填写后该项目与此目录绑定：目录不存在会自动创建，非 git 目录会自动
+            <span className="font-mono"> git init</span>。开启后可在资源树切换分支、推送/拉取配置。
+          </p>
+        </div>
         <p className="mt-2 text-[12px] text-inksoft">
           项目用于隔离不同场景的目录与 Server 配置，可随时在左上角切换。
         </p>
