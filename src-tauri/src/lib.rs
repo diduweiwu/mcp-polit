@@ -20,9 +20,10 @@ use db::Db;
 /// `inset_traffic_lights` 每次重绘只重设按钮的 x 坐标——按钮 y 永远贴顶，
 /// 所以这里用 objc2 直接改按钮 frame。
 ///
-/// 实现采用「探测式校准」：不做坐标系方向假设（AppKit 各级 view 有 flipped 与否之分），
-/// 先读按钮当前位置，再试探性平移一次测出「origin.y 每 +1 对应的视觉位移」，
-/// 最后线性外推出精确的目标 origin.y。任何系统版本下都自洽。
+/// 「距窗口顶部的距离」统一用**屏幕坐标系**测量（AppKit 各级 view 的
+/// flipped 方向不一，窗口内坐标做绝对参考会偏差）：
+///   按钮屏幕坐标 - 窗口屏幕坐标 = 按钮距窗口顶部（屏幕系 y 向下，直接相减即得）。
+/// 仍保留探测差分：origin.y 每 +1 对应的视觉位移量由实测得出，不假设方向。
 ///
 /// # 参数
 ///
@@ -36,7 +37,7 @@ use db::Db;
 fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
-    use objc2_app_kit::{NSView, NSWindowButton};
+    use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
     use objc2_foundation::{NSPoint, NSRect};
 
     let Ok(raw) = window.ns_window() else {
@@ -45,22 +46,15 @@ fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
     if raw.is_null() {
         return;
     }
-    let ns_win = raw as *mut AnyObject;
+    let ns_win = unsafe { &*(raw as *const NSWindow) };
 
-    // contentView 高度（Overlay 下 ≈ 整窗高），用于把窗口坐标换成「距窗口顶」距离
-    let content_height: f64 = unsafe {
-        let cv: *mut AnyObject = msg_send![ns_win, contentView];
-        if cv.is_null() {
-            return;
-        }
-        let f: NSRect = msg_send![cv, frame];
-        f.size.height
-    };
-
-    /// 按钮中心当前「距窗口顶部」的距离（逻辑像素，转窗口坐标后换算）。
-    fn center_from_top(view: &NSView, content_height: f64) -> f64 {
-        let r: NSRect = view.convertRect_toView(NSView::frame(view), None);
-        content_height - (r.origin.y + r.size.height / 2.0)
+    /// 按钮中心当前距窗口顶部的距离（逻辑像素，屏幕坐标系测量）。
+    fn center_from_top(view: &NSView, ns_win: &NSWindow) -> f64 {
+        let base = view.convertRect_toView(NSView::frame(view), None);
+        let screen = ns_win.convertRectToScreen(base);
+        let win = ns_win.frame();
+        // 屏幕 y 向下：按钮屏幕 y - 窗口屏幕 y = 距窗口顶
+        screen.origin.y - win.origin.y
     }
 
     for kind in [
@@ -76,14 +70,14 @@ fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
         let view = unsafe { &*(button as *const NSView) };
         let f0 = NSView::frame(view);
 
-        // 1. 当前位置
-        let d0 = center_from_top(view, content_height);
-        // 2. 试探：origin.y + 100，测量视觉位移方向
+        // 1. 当前中心距顶
+        let d0 = center_from_top(view, ns_win);
+        // 2. 试探：origin.y + 100，测方向系数
         NSView::setFrameOrigin(view, NSPoint { x: f0.origin.x, y: f0.origin.y + 100.0 });
-        let d1 = center_from_top(view, content_height);
+        let d1 = center_from_top(view, ns_win);
         // 3. 回退
         NSView::setFrameOrigin(view, f0.origin);
-        let per_unit = d0 - d1; // origin.y 每 +1 引起的「距顶距离」变化
+        let per_unit = d0 - d1; // origin.y 每 +1 对应「距顶」的变化量（通常为 -1）
         if per_unit.abs() < 0.001 {
             continue; // 移动无效（异常环境），跳过
         }
