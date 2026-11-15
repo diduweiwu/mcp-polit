@@ -14,96 +14,6 @@ use tauri::Manager;
 
 use db::Db;
 
-/// macOS：把红绿灯按钮的垂直位置对齐到指定中心（窗口顶部起算的逻辑像素）。
-///
-/// 背景：wry 的 `traffic_light_position` 的 y 只拉高标题栏容器高度，
-/// `inset_traffic_lights` 每次重绘只重设按钮的 x 坐标——按钮 y 永远贴顶，
-/// 所以这里用 objc2 直接改按钮 frame。
-///
-/// 「距窗口顶部的距离」用**屏幕坐标**测量（屏幕系 y 向下，方向全局无歧义）：
-/// 按钮中心点（描述在按钮自身 bounds 坐标系，语义唯一）
-/// -> convertPoint 到 window base -> convertPointToScreen -> 减窗口屏幕原点。
-/// 保留探测差分：origin.y 每 +1 的视觉位移由实测得出，不假设方向。
-///
-/// # 参数
-///
-/// - `window`: 已创建的主窗口
-/// - `target_center`: 按钮期望的中心（距窗口顶部，逻辑像素；顶栏 48px → 传 24）
-#[cfg(target_os = "macos")]
-fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
-    use objc2::msg_send;
-    use objc2::runtime::AnyObject;
-    use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
-    use objc2_foundation::NSPoint;
-
-    let Ok(raw) = window.ns_window() else {
-        return;
-    };
-    if raw.is_null() {
-        return;
-    }
-    let ns_win = unsafe { &*(raw as *const NSWindow) };
-
-    /// 按钮中心当前距窗口顶部的距离（逻辑像素，屏幕坐标测量）。
-    fn center_from_top(view: &NSView, ns_win: &NSWindow) -> f64 {
-        // 中心点在按钮自身 bounds 坐标系中的描述（bounds 原点即按钮左下）
-        let b = view.bounds();
-        let center_in_self = NSPoint {
-            x: b.size.width / 2.0,
-            y: b.size.height / 2.0,
-        };
-        // 自己坐标系 -> window base -> 屏幕
-        let base = view.convertPoint_toView(center_in_self, None);
-        let screen = ns_win.convertPointToScreen(base);
-        screen.y - ns_win.frame().origin.y
-    }
-
-    for kind in [
-        NSWindowButton::CloseButton,
-        NSWindowButton::MiniaturizeButton,
-        NSWindowButton::ZoomButton,
-    ] {
-        let button: *mut AnyObject =
-            unsafe { msg_send![ns_win, standardWindowButton: kind] };
-        if button.is_null() {
-            continue;
-        }
-        let view = unsafe { &*(button as *const NSView) };
-        let f0 = NSView::frame(view);
-
-        // 1. 当前中心距顶
-        let d0 = center_from_top(view, ns_win);
-        // 2. 试探：origin.y + 100，测方向系数
-        NSView::setFrameOrigin(view, NSPoint { x: f0.origin.x, y: f0.origin.y + 100.0 });
-        let d1 = center_from_top(view, ns_win);
-        // 3. 回退
-        NSView::setFrameOrigin(view, f0.origin);
-        let per_unit = d0 - d1; // origin.y 每 +1 对应「距顶」的变化量
-        if per_unit.abs() < 0.001 {
-            continue; // 移动无效（异常环境），跳过
-        }
-        // 4. 线性外推精确目标
-        let target_y = f0.origin.y + (d0 - target_center) / per_unit;
-        NSView::setFrameOrigin(view, NSPoint { x: f0.origin.x, y: target_y });
-    }
-}
-
-/// 延迟重复校准：窗口刚创建时布局尚未稳定，首次测量可能基于中间态。
-/// 显示后 250ms / 800ms 再各校准一次（已对齐时外推位移为 0，幂等无害）。
-#[cfg(target_os = "macos")]
-fn schedule_realign(_app: tauri::AppHandle, window: tauri::WebviewWindow) {
-    for delay_ms in [250u64, 800u64] {
-        let window = window.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            let win2 = window.clone();
-            let _ = window.run_on_main_thread(move || {
-                align_traffic_lights(&win2, 24.0);
-            });
-        });
-    }
-}
-
 /// 退出前清理：断开全部 MCP 连接（回收 stdio 子进程）。
 fn on_exit(app: &tauri::AppHandle) {
     let runtime = app.state::<tauri::async_runtime::Runtime>();
@@ -121,7 +31,7 @@ pub fn run() {
             let conn = db::init(&db_path)?;
             app.manage(Db(std::sync::Mutex::new(conn)));
 
-            // 主窗口手动构建（conf 声明式窗口无法设置红绿灯的逻辑坐标）
+            // 主窗口手动构建
             let builder = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -131,21 +41,12 @@ pub fn run() {
             .inner_size(1360.0, 840.0)
             .min_inner_size(1000.0, 620.0)
             .center();
-            // macOS：Overlay 标题栏 + 标题栏容器拉高到 48（y=32：容器高 = 按钮高16 + y）
-            // 按钮的垂直位置随后由 align_traffic_lights 精确对齐
+            // macOS：Overlay 标题栏（内容延伸到标题栏区域，支持自绘红绿灯）
             #[cfg(target_os = "macos")]
             let builder = builder
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .hidden_title(true)
-                .traffic_light_position(tauri::LogicalPosition::new(20.0, 32.0));
-            let win = builder.build()?;
-
-            // macOS：红绿灯与 48px 顶栏垂直居中（按钮中心 = 24px）
-            #[cfg(target_os = "macos")]
-            {
-                align_traffic_lights(&win, 24.0);
-                schedule_realign(app.handle().clone(), win.clone());
-            }
+                .hidden_title(true);
+            let _win = builder.build()?;
 
             Ok(())
         })

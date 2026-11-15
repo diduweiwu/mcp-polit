@@ -37,12 +37,6 @@ reqwest = { version = "0.13", default-features = false }
 # 本地 SQLite 持久化（bundled：静态编译，无系统依赖）
 rusqlite = { version = "0.41", features = ["bundled"] }
 
-# macOS：直接调整红绿灯按钮的垂直位置（wry 的 y 参数只拉高标题栏容器，不动按钮）
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder"] }
-objc2-foundation = "0.3"
-
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

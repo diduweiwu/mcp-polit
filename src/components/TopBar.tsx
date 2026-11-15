@@ -2,6 +2,7 @@
  * 顶栏：左上角项目切换器 + 项目管理；右侧主题色与明暗切换。
  */
 import { useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Check,
   ChevronDown,
@@ -17,7 +18,6 @@ import {
   Trash2,
   Zap,
 } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAppStore } from "../store";
 import { THEME_PRESETS, nextThemeMode, type ThemeMode } from "../theme";
 import { ConfirmDialog, Dropdown, MenuItem, Modal, useClickOutside } from "./ui";
@@ -93,6 +93,7 @@ export function TopBar() {
 
   return (
     // 整条顶栏可拖动窗口（onMouseDown 里排除按钮等交互元素）
+    // pl-[84px]：为 macOS Overlay 模式下系统原生红绿灯的默认位置留白
     <header
       onMouseDown={handleDragMouseDown}
       className="flex h-12 shrink-0 cursor-default items-center justify-between border-b border-line bg-panel pl-[84px] pr-3"
