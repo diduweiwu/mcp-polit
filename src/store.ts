@@ -12,6 +12,7 @@ import type {
   LogLevel,
   LogEntry,
   NodeType,
+  ParamCase,
   Project,
   ServerConfig,
   ToolInfo,
@@ -66,6 +67,13 @@ interface AppState {
   /* 应用设置缓存（键值对） */
   settings: Record<string, string>;
   syncing: boolean;
+
+  /** 工具参数缓存（key: "nodeId:toolName" -> 入参 JSON；跨切换/重启保留） */
+  toolParams: Record<string, string>;
+  /** 参数 Case（key: "nodeId:toolName" -> case 列表；持久化） */
+  cases: Record<string, ParamCase[]>;
+  /** 每个 server 上次选中的工具（切换回来时恢复） */
+  lastToolByNode: Record<number, string>;
 
   /* ---------- actions ---------- */
 
@@ -128,6 +136,15 @@ interface AppState {
   /** 清空全部调用历史 */
   clearHistory: () => void;
 
+  /** 记住工具参数（内存 + 防抖持久化到 settings） */
+  saveToolParam: (key: string, argsJson: string) => void;
+  /** 保存参数 Case */
+  saveParamCase: (key: string, name: string, argsJson: string) => Promise<void>;
+  /** 删除参数 Case */
+  deleteParamCase: (key: string, name: string) => Promise<void>;
+  /** 记住 server 上次选中的工具 */
+  rememberTool: (nodeId: number, toolName: string) => void;
+
   /** 保存一个设置项并同步缓存 */
   saveSetting: (key: string, value: string) => Promise<void>;
 
@@ -176,6 +193,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   logs: [],
   settings: {},
   syncing: false,
+  toolParams: {},
+  cases: {},
+  lastToolByNode: {},
 
   async init() {
     // 1. 设置
@@ -184,7 +204,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       const map = Object.fromEntries(kv);
       const mode = (map["theme_mode"] as ThemeMode) || "light";
       applyThemeMode(mode);
-      set({ themeMode: mode, settings: map });
+      const toolParams = JSON.parse(map["tool_params"] || "{}") as Record<string, string>;
+      const cases = JSON.parse(map["tool_cases"] || "{}") as Record<string, ParamCase[]>;
+      set({ themeMode: mode, settings: map, toolParams, cases });
     } catch {
       /* 后端未就绪时用默认值 */
     }
@@ -335,6 +357,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     } else if (autoConnect && status !== "connecting") {
       await get().connect(id);
     }
+    // 恢复该 server 上次选中的工具（参数由 ParamPane 依据缓存自动回填）
+    const lastTool = get().lastToolByNode[id];
+    const tools = get().tools[id] ?? [];
+    if (lastTool && tools.some((t) => t.name === lastTool)) {
+      set({ selectedToolName: lastTool });
+    }
   },
 
   async loadConfig(id) {
@@ -402,6 +430,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   selectTool(name) {
+    const nodeId = get().selectedNodeId;
+    if (nodeId != null) get().rememberTool(nodeId, name);
     set({ selectedToolName: name, results: [] });
   },
 
@@ -487,6 +517,50 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearHistory() {
     set({ history: [] });
+  },
+
+  /** 记住工具参数（写入内存；300ms 防抖持久化到 settings 表） */
+  saveToolParam(key, argsJson) {
+    set((s) => ({ toolParams: { ...s.toolParams, [key]: argsJson } }));
+    const timerKey = `__tp_${key}`;
+    const timers = (window as unknown as Record<string, ReturnType<typeof setTimeout>>);
+    clearTimeout(timers[timerKey]);
+    timers[timerKey] = setTimeout(() => {
+      const st = useAppStore.getState();
+      void st
+        .saveSetting("tool_params", JSON.stringify(st.toolParams))
+        .catch(() => {});
+    }, 300);
+  },
+
+  /** 保存参数 Case（持久化到 settings 表） */
+  async saveParamCase(key, name, argsJson) {
+    const now = new Date();
+    const saved_at = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map((n) => String(n).padStart(2, "0"))
+      .join(":");
+    const list = [
+      ...(get().cases[key] ?? []).filter((c) => c.name !== name),
+      { name, args: argsJson, saved_at },
+    ];
+    set((s) => ({ cases: { ...s.cases, [key]: list } }));
+    await api
+      .saveSetting("tool_cases", JSON.stringify(get().cases))
+      .catch(() => {});
+  },
+
+  /** 删除参数 Case */
+  async deleteParamCase(key, name) {
+    const list = (get().cases[key] ?? []).filter((c) => c.name !== name);
+    set((s) => ({ cases: { ...s.cases, [key]: list } }));
+    await api
+      .saveSetting("tool_cases", JSON.stringify(get().cases))
+      .catch(() => {});
+  },
+
+  /** 记住 server 上次选中的工具（跨切换恢复） */
+  rememberTool(nodeId, toolName) {
+    set((s) => ({ lastToolByNode: { ...s.lastToolByNode, [nodeId]: toolName } }));
   },
 
   async saveSetting(key, value) {

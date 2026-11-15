@@ -118,9 +118,17 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         COMMIT;
         "#,
     )?;
-    // 增量迁移：projects.sync_dir（已存在时忽略报错）
+    // 增量迁移：projects.sync_dir、server_configs.envs/active_env（已存在时忽略报错）
     let _ = conn.execute(
         "ALTER TABLE projects ADD COLUMN sync_dir TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE server_configs ADD COLUMN envs TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE server_configs ADD COLUMN active_env TEXT",
         [],
     );
     Ok(())
@@ -408,7 +416,7 @@ pub fn delete_node(conn: &Connection, id: i64) -> CmdResult<Vec<i64>> {
 pub fn get_server_config(conn: &Connection, node_id: i64) -> CmdResult<ServerConfig> {
     let result = conn.query_row(
         "SELECT node_id, transport_type, command, args, env, working_dir, url, headers,
-                timeout_ms, enabled, note
+                timeout_ms, enabled, note, envs, active_env
          FROM server_configs WHERE node_id = ?1",
         rusqlite::params![node_id],
         map_config,
@@ -427,6 +435,8 @@ pub fn get_server_config(conn: &Connection, node_id: i64) -> CmdResult<ServerCon
             timeout_ms: 30_000,
             enabled: true,
             note: None,
+            envs: None,
+            active_env: None,
         }),
         Err(e) => Err(AppError::from(e)),
     }
@@ -446,6 +456,8 @@ fn map_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerConfig> {
         timeout_ms: row.get(8)?,
         enabled: row.get::<_, i64>(9)? != 0,
         note: row.get(10)?,
+        envs: row.get(11)?,
+        active_env: row.get(12)?,
     })
 }
 
@@ -473,8 +485,8 @@ pub fn upsert_server_config(conn: &Connection, cfg: &ServerConfig) -> CmdResult<
     conn.execute(
         "INSERT INTO server_configs
              (node_id, transport_type, command, args, env, working_dir, url, headers,
-              timeout_ms, enabled, note)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              timeout_ms, enabled, note, envs, active_env)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(node_id) DO UPDATE SET
              transport_type = excluded.transport_type,
              command = excluded.command,
@@ -485,7 +497,9 @@ pub fn upsert_server_config(conn: &Connection, cfg: &ServerConfig) -> CmdResult<
              headers = excluded.headers,
              timeout_ms = excluded.timeout_ms,
              enabled = excluded.enabled,
-             note = excluded.note",
+             note = excluded.note,
+             envs = excluded.envs,
+             active_env = excluded.active_env",
         rusqlite::params![
             cfg.node_id,
             transport_to_str(cfg.transport_type),
@@ -498,6 +512,8 @@ pub fn upsert_server_config(conn: &Connection, cfg: &ServerConfig) -> CmdResult<
             cfg.timeout_ms,
             cfg.enabled as i64,
             cfg.note,
+            cfg.envs,
+            cfg.active_env,
         ],
     )?;
     Ok(())
@@ -560,6 +576,8 @@ mod tests {
             timeout_ms: 15_000,
             enabled: true,
             note: Some("测试".into()),
+            envs: None,
+            active_env: None,
         };
         upsert_server_config(&conn, &cfg).unwrap();
         let got = get_server_config(&conn, server.id).unwrap();

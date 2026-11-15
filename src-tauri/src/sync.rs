@@ -589,6 +589,8 @@ async fn import_tree_dir(
             timeout_ms: ss.timeout_ms,
             enabled: ss.enabled,
             note: ss.note.clone(),
+            envs: None,
+            active_env: None,
         };
         let saved = {
             let conn = db.0.lock().unwrap();

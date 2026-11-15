@@ -90,6 +90,12 @@ pub struct ServerConfig {
     pub enabled: bool,
     /// 备注（可选）
     pub note: Option<String>,
+    /// 环境变量组（JSON：{"dev":{"env":{...},"headers":{...}}}，可多套，切换连接时覆盖 base）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envs: Option<String>,
+    /// 当前激活的环境名；None 表示使用 base 配置（不启用环境覆盖）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_env: Option<String>,
 }
 
 /// 工具信息：从 MCP Server 的 tools/list 结果中提炼、传给前端的结构。

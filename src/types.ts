@@ -59,6 +59,20 @@ export interface ServerConfig {
   timeout_ms: number;
   enabled: boolean;
   note: string | null;
+  /** 环境变量组 JSON：{"dev":{"env":{...},"headers":{...}}} */
+  envs?: string | null;
+  /** 当前激活的环境名（null = 不启用环境覆盖） */
+  active_env?: string | null;
+}
+
+/** 单个调用参数 Case（保存的入参快照） */
+export interface ParamCase {
+  /** Case 名称 */
+  name: string;
+  /** 入参 JSON 字符串 */
+  args: string;
+  /** 保存时间 HH:MM:SS */
+  saved_at: string;
 }
 
 /** 连接状态 */

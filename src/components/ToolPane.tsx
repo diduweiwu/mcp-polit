@@ -4,7 +4,9 @@
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
+  Check,
   ChevronDown,
+  Layers,
   Clock,
   Globe,
   PanelLeftOpen,
@@ -19,8 +21,9 @@ import {
   Wrench,
 } from "lucide-react";
 import { useAppStore } from "../store";
-import type { TreeNode } from "../types";
-import { EmptyState, StatusDot } from "./ui";
+import type { ServerConfig, TreeNode } from "../types";
+import * as api from "../api";
+import { Dropdown, EmptyState, MenuItem, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
 /** 工具列表栏 */
@@ -179,6 +182,7 @@ export function ToolPane() {
 
 /** 已连接状态顶部的可折叠配置条：默认收起，点击展开完整配置摘要 */
 function ConnectedConfigBar({ node }: { node: TreeNode }) {
+  const cfg = useAppStore((s) => s.serverConfigs[node.id]);
   const [open, setOpen] = useState(false);
   return (
     <div className="mb-1">
@@ -189,10 +193,13 @@ function ConnectedConfigBar({ node }: { node: TreeNode }) {
         <span className="flex items-center gap-1.5">
           <Settings2 size={13} /> Server 配置
         </span>
-        <ChevronDown
-          size={13}
-          className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
-        />
+        <span className="flex items-center gap-1.5">
+          <EnvSwitcher node={node} cfg={cfg} connected />
+          <ChevronDown
+            size={13}
+            className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+          />
+        </span>
       </button>
       {open && (
         <div className="anim-fade-in mt-1">
@@ -260,6 +267,84 @@ function rowsOf(json?: string | null): Array<[string, string]> {
   }
 }
 
+/**
+ * 环境切换器：显示 Base + 全部环境，点击切换激活环境（写入配置）。
+ * 若当前已连接，切换后自动断开（提示重新连接以应用新环境）。
+ */
+function EnvSwitcher({ node, cfg, connected }: { node: TreeNode; cfg: ServerConfig; connected: boolean }) {
+  const updateConfigCache = useAppStore((s) => s.updateConfigCache);
+  const disconnect = useAppStore((s) => s.disconnect);
+  const envNames = useMemo(() => {
+    try {
+      return Object.keys(JSON.parse(cfg.envs ?? "{}") as Record<string, unknown>);
+    } catch {
+      return [];
+    }
+  }, [cfg.envs]);
+  const active = cfg.active_env?.trim() || "";
+
+  /** 切换激活环境 */
+  const switchEnv = async (name: string) => {
+    const saved = { ...cfg, active_env: name };
+    try {
+      await api.saveServerConfig(saved);
+      updateConfigCache(saved);
+      if (connected) {
+        await disconnect(node.id);
+        useAppStore.getState().addLog(
+          "info",
+          `环境已切换为「${name || "Base"}」，连接已断开，点击「重新连接」以应用新环境`,
+        );
+      } else {
+        useAppStore.getState().addLog("info", `环境已切换为「${name || "Base"}」`);
+      }
+    } catch (e) {
+      useAppStore.getState().addLog("error", String(e));
+    }
+  };
+
+  return (
+    <Dropdown
+      align="right"
+      trigger={(open, toggle) => (
+        <button
+          className="flex items-center gap-1 rounded-full border border-line bg-panel px-2 py-0.5 text-[11px] text-ink transition-colors hover:border-primary"
+          onClick={toggle}
+          title="切换环境（激活环境的 env/headers 会覆盖 Base）"
+        >
+          <Layers size={11} />
+          {active || "Base"}
+          <ChevronDown size={10} className={`transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      )}
+    >
+      {(close) => (
+        <>
+          <MenuItem
+            label="Base"
+            icon={active === "" ? <Check size={13} className="text-primarystrong" /> : <span className="w-[13px]" />}
+            onClick={() => {
+              void switchEnv("");
+              close();
+            }}
+          />
+          {envNames.map((n) => (
+            <MenuItem
+              key={n}
+              label={n}
+              icon={active === n ? <Check size={13} className="text-primarystrong" /> : <span className="w-[13px]" />}
+              onClick={() => {
+                void switchEnv(n);
+                close();
+              }}
+            />
+          ))}
+        </>
+      )}
+    </Dropdown>
+  );
+}
+
 /** 摘要行 */
 function SummaryRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -298,7 +383,7 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
 
   return (
     <div className="anim-fade-in p-2">
-      {/* 传输类型徽章 */}
+      {/* 传输类型徽章 + 环境切换 */}
       <div className="mb-2.5 flex items-center gap-1.5">
         <span
           className={`chip ${
@@ -309,6 +394,8 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
           {isHttp ? "Streamable HTTP" : "stdio"}
         </span>
         {!cfg.enabled && <span className="chip bg-warn/10 text-warn">已停用</span>}
+        <span className="flex-1" />
+        <EnvSwitcher node={node} cfg={cfg} connected={false} />
       </div>
 
       {/* 主要连接信息 */}

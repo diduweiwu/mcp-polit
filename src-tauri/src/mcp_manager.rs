@@ -293,6 +293,38 @@ impl McpManager {
     }
 }
 
+/// 解析 JSON 对象字符串（空/非法返回空 Map，非法值由调用方校验兜底）。
+fn parse_json_object(raw: Option<&str>) -> Map<String, Value> {
+    raw.and_then(|s| serde_json::from_str::<Map<String, Value>>(s.trim()).ok())
+        .unwrap_or_default()
+}
+
+/// 应用激活的环境覆盖：base env/headers 与 envs[active] 合并（环境值优先）。
+///
+/// 返回 (合并后的 env JSON 字符串, 合并后的 headers JSON 字符串)。
+/// 激活环境不存在（名字写错/已删除）时静默回退 base，不报错。
+fn merged_env_headers(config: &ServerConfig) -> (Map<String, Value>, Map<String, Value>) {
+    let mut env = parse_json_object(config.env.as_deref());
+    let mut headers = parse_json_object(config.headers.as_deref());
+
+    if let Some(active) = config.active_env.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let envs: Map<String, Value> = parse_json_object(config.envs.as_deref());
+        if let Some(Value::Object(group)) = envs.get(active) {
+            if let Some(Value::Object(e)) = group.get("env") {
+                for (k, v) in e {
+                    env.insert(k.clone(), v.clone());
+                }
+            }
+            if let Some(Value::Object(h)) = group.get("headers") {
+                for (k, v) in h {
+                    headers.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    (env, headers)
+}
+
 /// 构建 stdio 子进程传输。
 ///
 /// # 异常
@@ -310,11 +342,8 @@ fn build_stdio_transport(config: &ServerConfig) -> Result<TokioChildProcess, App
         Some(s) => serde_json::from_str::<Vec<String>>(s)
             .map_err(|e| AppError::new(format!("参数必须是 JSON 字符串数组：{e}")))?,
     };
-    let env: Map<String, Value> = match config.env.as_deref().map(str::trim) {
-        None | Some("") => Map::new(),
-        Some(s) => serde_json::from_str(s)
-            .map_err(|e| AppError::new(format!("环境变量必须是 JSON 对象：{e}")))?,
-    };
+    // 环境变量：base + 激活环境覆盖合并
+    let (env, _headers) = merged_env_headers(config);
 
     TokioChildProcess::new(
         tokio::process::Command::new(command).configure(|cmd| {
@@ -356,17 +385,11 @@ fn build_http_transport(
     }
     let mut builder = StreamableHttpClientTransportConfig::with_uri(url);
 
-    // 解析自定义 headers（JSON 对象 -> HeaderName/HeaderValue）
-    if let Some(headers_str) = config
-        .headers
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        let raw: Map<String, Value> = serde_json::from_str(headers_str)
-            .map_err(|e| AppError::new(format!("请求头必须是 JSON 对象：{e}")))?;
+    // 自定义 headers：base + 激活环境覆盖合并（JSON 对象 -> HeaderName/HeaderValue）
+    let (_env, headers) = merged_env_headers(config);
+    if !headers.is_empty() {
         let mut map = HashMap::new();
-        for (k, v) in raw {
+        for (k, v) in headers {
             let name = http::HeaderName::from_bytes(k.as_bytes())
                 .map_err(|e| AppError::new(format!("请求头名称「{k}」不合法：{e}")))?;
             let value = v
@@ -387,18 +410,10 @@ fn build_http_transport(
 /// 策略：把配置里各敏感字段的值（长度 ≥ 4 的字符串）从错误文本中替换为 `***`。
 fn sanitize(mut msg: String, config: &ServerConfig) -> String {
     let mut secrets: Vec<String> = Vec::new();
-    // headers 的值
-    if let Some(s) = config.headers.as_deref() {
-        if let Ok(map) = serde_json::from_str::<Map<String, Value>>(s) {
-            collect_secret_values(&map, &mut secrets);
-        }
-    }
-    // env 的值
-    if let Some(s) = config.env.as_deref() {
-        if let Ok(map) = serde_json::from_str::<Map<String, Value>>(s) {
-            collect_secret_values(&map, &mut secrets);
-        }
-    }
+    // headers / env 的值（含激活环境合并后的值）
+    let (env, headers) = merged_env_headers(config);
+    collect_secret_values(&headers, &mut secrets);
+    collect_secret_values(&env, &mut secrets);
     for secret in secrets {
         msg = msg.replace(&secret, "***");
     }
@@ -441,6 +456,8 @@ mod e2e_tests {
             timeout_ms: 10_000,
             enabled: true,
             note: None,
+            envs: None,
+            active_env: None,
         }
     }
 
@@ -535,6 +552,8 @@ mod e2e_tests {
             timeout_ms: 10_000,
             enabled: true,
             note: None,
+            envs: None,
+            active_env: None,
         };
         let transport = build_http_transport(&cfg).expect("构建 http 传输");
         let service = ().serve(transport).await.expect("握手");
