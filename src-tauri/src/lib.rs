@@ -41,11 +41,16 @@ pub fn run() {
             .inner_size(1360.0, 840.0)
             .min_inner_size(1000.0, 620.0)
             .center();
-            // macOS：Overlay 标题栏（内容延伸到标题栏区域，支持自绘红绿灯）
+            // macOS：Overlay 标题栏 + 红绿灯垂直定位
+            //
+            // 实测（见 git 历史）：按钮固定在标题栏容器内 origin.y=6、高 16（中心距容器底 14），
+            // 容器高度 = 16 + y（wry 的 y 参数只调容器高度、不动按钮 y）。
+            // 要按钮中心距窗口顶 24（与 48px 顶栏垂直居中）：容器高 = 14 + 24 = 38 → y = 22。
             #[cfg(target_os = "macos")]
             let builder = builder
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .hidden_title(true);
+                .hidden_title(true)
+                .traffic_light_position(tauri::LogicalPosition::new(20.0, 22.0));
             let _win = builder.build()?;
 
             Ok(())
