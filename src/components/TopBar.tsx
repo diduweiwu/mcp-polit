@@ -105,7 +105,8 @@ export function TopBar() {
         <div className="flex items-center gap-1.5 pr-1">
           <span
             className="flex h-6 w-6 items-center justify-center rounded-md text-white"
-            style={{ background: "var(--c-primary-strong)" }}
+            style={{ background: "linear-gradient(135deg, #FB7185, #E11D48)" }}
+            title="MCPilot"
           >
             <Zap size={14} />
           </span>
