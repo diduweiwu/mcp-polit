@@ -26,11 +26,15 @@ MCPilot 是一个跨平台的 [MCP (Model Context Protocol)](https://modelcontex
 
 ```bash
 pnpm install
-pnpm tauri dev    # 开发模式
-pnpm tauri build  # 打包
+pnpm app:dev      # 开发模式（热更新，Ctrl+C 退出）
+pnpm app          # 打包并运行产物
+pnpm app:build    # 只打包不运行
+pnpm tauri build  # 同 app:build（tauri CLI 原生命令）
 ```
 
 依赖：Node 18+、pnpm、Rust stable（Tauri 官方要求）。
+
+`pnpm app` 系列等价于 `scripts/run.sh`，打包完成后按平台自动运行产物（macOS 打开 .app / Linux 启动 AppImage / Windows 提示安装包位置），产物在 `src-tauri/target/release/bundle/`。
 
 ### 打包与系统要求
 
