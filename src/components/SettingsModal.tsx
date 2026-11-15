@@ -12,7 +12,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useAppStore } from "../store";
-import { THEME_PRESETS, type ThemeMode } from "../theme";
+import { type ThemeMode } from "../theme";
 import { Modal } from "./ui";
 
 /** 明暗三态选项 */
@@ -33,8 +33,6 @@ export function SettingsModal({ open, onClose }: Props) {
   const {
     themeMode,
     setThemeMode,
-    themeColorKey,
-    setThemeColor,
     settings,
     saveSetting,
     syncExport,
@@ -66,7 +64,7 @@ export function SettingsModal({ open, onClose }: Props) {
       <section>
         <SectionTitle>外观</SectionTitle>
         <label className="label">风格模式</label>
-        <div className="mb-3 flex gap-2">
+        <div className="mb-1 flex gap-2">
           {MODE_OPTIONS.map((o) => (
             <button
               key={o.key}
@@ -82,27 +80,9 @@ export function SettingsModal({ open, onClose }: Props) {
             </button>
           ))}
         </div>
-
-        <label className="label">主色调</label>
-        <div className="flex flex-wrap gap-1.5">
-          {THEME_PRESETS.map((p) => (
-            <button
-              key={p.key}
-              onClick={() => void setThemeColor(p.key)}
-              className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] transition-colors ${
-                themeColorKey === p.key
-                  ? "border-primary bg-primarysoft text-primarystrong"
-                  : "border-line hover:bg-panel2"
-              }`}
-            >
-              <span
-                className="h-3 w-3 rounded-full ring-1 ring-inset ring-black/10 dark:ring-white/20"
-                style={{ background: p.primary }}
-              />
-              {p.label}
-            </button>
-          ))}
-        </div>
+        <p className="text-[11.5px] text-inksoft/70">
+          「跟随系统」会实时响应系统的深浅色切换。
+        </p>
       </section>
 
       <div className="my-4 border-t border-line" />

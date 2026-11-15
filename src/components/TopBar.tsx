@@ -1,5 +1,5 @@
 /**
- * 顶栏：左上角项目切换器 + 项目管理；右侧主题色与明暗切换。
+ * 顶栏：左上角项目切换器 + 项目管理；右侧布局均分、设置与风格模式切换。
  */
 import { useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -10,7 +10,6 @@ import {
   FolderPlus,
   Monitor,
   Moon,
-  Palette,
   Pencil,
   Plus,
   Settings,
@@ -19,9 +18,20 @@ import {
   Zap,
 } from "lucide-react";
 import { useAppStore } from "../store";
-import { THEME_PRESETS, nextThemeMode, type ThemeMode } from "../theme";
-import { ConfirmDialog, Dropdown, MenuItem, Modal, useClickOutside } from "./ui";
+import { THEME_MODE_OPTIONS, type ThemeMode } from "../theme";
+import { ConfirmDialog, Dropdown, MenuItem, Modal } from "./ui";
 import { SettingsModal } from "./SettingsModal";
+
+/** 风格模式 -> 图标 */
+function ModeIcon({ mode }: { mode: ThemeMode }) {
+  return mode === "dark" ? (
+    <Moon size={14} />
+  ) : mode === "system" ? (
+    <Monitor size={14} />
+  ) : (
+    <Sun size={14} />
+  );
+}
 
 /**
  * 顶栏按下即拖动窗口。
@@ -42,13 +52,11 @@ export function TopBar() {
   const {
     projects,
     activeProjectId,
-    themeColorKey,
     themeMode,
     setActiveProject,
     createProject,
     renameProject,
     deleteProject,
-    setThemeColor,
     setThemeMode,
   } = useAppStore();
 
@@ -59,17 +67,11 @@ export function TopBar() {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const paletteRef = useClickOutside<HTMLDivElement>(() => setPaletteOpen(false));
 
-  /** 主题模式按钮的图标与提示文案 */
-  const themeBtn =
-    themeMode === "dark"
-      ? { icon: <Moon size={15} />, title: "暗色（点击切换为跟随系统）" }
-      : themeMode === "system"
-        ? { icon: <Monitor size={15} />, title: "跟随系统（点击切换为亮色）" }
-        : { icon: <Sun size={15} />, title: "亮色（点击切换为暗色）" };
+  /** 当前模式的中文名（下拉按钮显示） */
+  const modeLabel =
+    THEME_MODE_OPTIONS.find((o) => o.key === themeMode)?.label ?? "亮色";
 
   /** 提交新建项目（含可选同步目录；目录校验失败时错误信息由后端返回） */
   const submitNew = async () => {
@@ -214,58 +216,46 @@ export function TopBar() {
         >
           <Settings size={15} />
         </button>
-        <div className="relative" ref={paletteRef}>
-          <button
-            className="btn-ghost h-8 gap-1.5 !px-2.5"
-            title="主色调"
-            onClick={() => setPaletteOpen((v) => !v)}
-          >
-            <Palette size={15} />
-            <span
-              className="h-3.5 w-3.5 rounded-full border border-white/40"
-              style={{
-                background: THEME_PRESETS.find((p) => p.key === themeColorKey)?.primary,
-              }}
-            />
-          </button>
-          {paletteOpen && (
-            <div className="card anim-pop-in absolute right-0 top-full z-40 mt-1 w-[156px] p-1.5 shadow-xl">
-              <div className="px-2 pb-1 pt-1 text-[11px] font-medium text-inksoft">主色调</div>
-              {THEME_PRESETS.map((p) => {
-                const selected = themeColorKey === p.key;
-                return (
-                  <button
-                    key={p.key}
-                    className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-[13px] transition-colors ${
-                      selected
-                        ? "bg-primarysoft font-medium text-primarystrong"
-                        : "text-ink hover:bg-panel2"
-                    }`}
-                    onClick={() => {
-                      void setThemeColor(p.key);
-                      setPaletteOpen(false);
-                    }}
-                  >
-                    <span
-                      className="h-3.5 w-3.5 shrink-0 rounded-full ring-1 ring-inset ring-black/10 dark:ring-white/20"
-                      style={{ background: p.primary }}
-                    />
-                    <span className="flex-1 text-left">{p.label}</span>
-                    {selected && <Check size={14} className="text-primarystrong" />}
-                  </button>
-                );
-              })}
-            </div>
+        {/* 风格模式：下拉选择（亮色 / 暗色 / 跟随系统） */}
+        <Dropdown
+          align="right"
+          trigger={(open, toggle) => (
+            <button
+              className="btn-ghost h-8 gap-1.5 !px-2.5"
+              title="风格模式"
+              onClick={toggle}
+            >
+              <ModeIcon mode={themeMode} />
+              <span className="text-[12px]">{modeLabel}</span>
+              <ChevronDown
+                size={12}
+                className={`text-inksoft transition-transform ${open ? "rotate-180" : ""}`}
+              />
+            </button>
           )}
-        </div>
-
-        <button
-          className="btn-ghost h-8 !px-2"
-          title={themeBtn.title}
-          onClick={() => void setThemeMode(nextThemeMode(themeMode) as ThemeMode)}
         >
-          {themeBtn.icon}
-        </button>
+          {(close) => (
+            <>
+              {THEME_MODE_OPTIONS.map((o) => (
+                <MenuItem
+                  key={o.key}
+                  label={o.label}
+                  icon={
+                    themeMode === o.key ? (
+                      <Check size={13} className="text-primarystrong" />
+                    ) : (
+                      <ModeIcon mode={o.key} />
+                    )
+                  }
+                  onClick={() => {
+                    void setThemeMode(o.key);
+                    close();
+                  }}
+                />
+              ))}
+            </>
+          )}
+        </Dropdown>
       </div>
 
       {/* 新建项目弹窗 */}

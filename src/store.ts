@@ -16,7 +16,7 @@ import type {
   ToolInfo,
   TreeNode,
 } from "./types";
-import { applyThemeColor, applyThemeMode, presetByKey, type ThemeMode } from "./theme";
+import { applyThemeMode, type ThemeMode } from "./theme";
 
 /** 结果面板最多保留的历史条数 */
 const MAX_RESULTS = 50;
@@ -26,7 +26,6 @@ interface AppState {
   initialized: boolean;
 
   /* 主题设置 */
-  themeColorKey: string;
   themeMode: ThemeMode;
 
   /* 项目 */
@@ -70,7 +69,6 @@ interface AppState {
   init: () => Promise<void>;
 
   /** 设置主题色（持久化） */
-  setThemeColor: (key: string) => Promise<void>;
   /** 切换明暗（持久化） */
   setThemeMode: (mode: ThemeMode) => Promise<void>;
 
@@ -152,7 +150,6 @@ async function fetchTools(id: number): Promise<ToolInfo[] | null> {
 
 export const useAppStore = create<AppState>((set, get) => ({
   initialized: false,
-  themeColorKey: "sky",
   themeMode: "light",
   projects: [],
   activeProjectId: null,
@@ -179,10 +176,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const kv = await api.getSettings();
       const map = Object.fromEntries(kv);
       const mode = (map["theme_mode"] as ThemeMode) || "light";
-      const colorKey = map["theme_color"] || "sky";
       applyThemeMode(mode);
-      applyThemeColor(presetByKey(colorKey));
-      set({ themeMode: mode, themeColorKey: colorKey, settings: map });
+      set({ themeMode: mode, settings: map });
     } catch {
       /* 后端未就绪时用默认值 */
     }
@@ -195,13 +190,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (active != null) {
       await get().setActiveProject(active);
     }
-  },
-
-  async setThemeColor(key) {
-    const preset = presetByKey(key);
-    applyThemeColor(preset);
-    set({ themeColorKey: preset.key });
-    await api.saveSetting("theme_color", preset.key).catch(() => {});
   },
 
   async setThemeMode(mode) {
