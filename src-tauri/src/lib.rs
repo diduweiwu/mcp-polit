@@ -20,25 +20,21 @@ use db::Db;
 /// `inset_traffic_lights` 每次重绘只重设按钮的 x 坐标——按钮 y 永远贴顶，
 /// 所以这里用 objc2 直接改按钮 frame。
 ///
-/// 「距窗口顶部的距离」统一用**屏幕坐标系**测量（AppKit 各级 view 的
-/// flipped 方向不一，窗口内坐标做绝对参考会偏差）：
-///   按钮屏幕坐标 - 窗口屏幕坐标 = 按钮距窗口顶部（屏幕系 y 向下，直接相减即得）。
-/// 仍保留探测差分：origin.y 每 +1 对应的视觉位移量由实测得出，不假设方向。
+/// 「距窗口顶部的距离」用**屏幕坐标**测量（屏幕系 y 向下，方向全局无歧义）：
+/// 按钮中心点（描述在按钮自身 bounds 坐标系，语义唯一）
+/// -> convertPoint 到 window base -> convertPointToScreen -> 减窗口屏幕原点。
+/// 保留探测差分：origin.y 每 +1 的视觉位移由实测得出，不假设方向。
 ///
 /// # 参数
 ///
 /// - `window`: 已创建的主窗口
 /// - `target_center`: 按钮期望的中心（距窗口顶部，逻辑像素；顶栏 48px → 传 24）
-///
-/// # 异常
-///
-/// 按钮不存在或 NSWindow 指针无效时静默返回（不影响启动）。
 #[cfg(target_os = "macos")]
 fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
-    use objc2_foundation::{NSPoint, NSRect};
+    use objc2_foundation::NSPoint;
 
     let Ok(raw) = window.ns_window() else {
         return;
@@ -48,13 +44,18 @@ fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
     }
     let ns_win = unsafe { &*(raw as *const NSWindow) };
 
-    /// 按钮中心当前距窗口顶部的距离（逻辑像素，屏幕坐标系测量）。
+    /// 按钮中心当前距窗口顶部的距离（逻辑像素，屏幕坐标测量）。
     fn center_from_top(view: &NSView, ns_win: &NSWindow) -> f64 {
-        let base = view.convertRect_toView(NSView::frame(view), None);
-        let screen = ns_win.convertRectToScreen(base);
-        let win = ns_win.frame();
-        // 屏幕 y 向下：按钮屏幕 y - 窗口屏幕 y = 距窗口顶
-        screen.origin.y - win.origin.y
+        // 中心点在按钮自身 bounds 坐标系中的描述（bounds 原点即按钮左下）
+        let b = view.bounds();
+        let center_in_self = NSPoint {
+            x: b.size.width / 2.0,
+            y: b.size.height / 2.0,
+        };
+        // 自己坐标系 -> window base -> 屏幕
+        let base = view.convertPoint_toView(center_in_self, None);
+        let screen = ns_win.convertPointToScreen(base);
+        screen.y - ns_win.frame().origin.y
     }
 
     for kind in [
@@ -77,13 +78,29 @@ fn align_traffic_lights(window: &tauri::WebviewWindow, target_center: f64) {
         let d1 = center_from_top(view, ns_win);
         // 3. 回退
         NSView::setFrameOrigin(view, f0.origin);
-        let per_unit = d0 - d1; // origin.y 每 +1 对应「距顶」的变化量（通常为 -1）
+        let per_unit = d0 - d1; // origin.y 每 +1 对应「距顶」的变化量
         if per_unit.abs() < 0.001 {
             continue; // 移动无效（异常环境），跳过
         }
         // 4. 线性外推精确目标
         let target_y = f0.origin.y + (d0 - target_center) / per_unit;
         NSView::setFrameOrigin(view, NSPoint { x: f0.origin.x, y: target_y });
+    }
+}
+
+/// 延迟重复校准：窗口刚创建时布局尚未稳定，首次测量可能基于中间态。
+/// 显示后 250ms / 800ms 再各校准一次（已对齐时外推位移为 0，幂等无害）。
+#[cfg(target_os = "macos")]
+fn schedule_realign(_app: tauri::AppHandle, window: tauri::WebviewWindow) {
+    for delay_ms in [250u64, 800u64] {
+        let window = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            let win2 = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                align_traffic_lights(&win2, 24.0);
+            });
+        });
     }
 }
 
@@ -125,7 +142,10 @@ pub fn run() {
 
             // macOS：红绿灯与 48px 顶栏垂直居中（按钮中心 = 24px）
             #[cfg(target_os = "macos")]
-            align_traffic_lights(&win, 24.0);
+            {
+                align_traffic_lights(&win, 24.0);
+                schedule_realign(app.handle().clone(), win.clone());
+            }
 
             Ok(())
         })
