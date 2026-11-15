@@ -1,5 +1,9 @@
 /**
- * 第四栏：调用结果（历史卡片列表，支持树形/原始切换与复制）。
+ * 第四栏：调用结果（tab 1）与全局调用历史（tab 2）。
+ *
+ * - 结果：当前选中工具的结果卡片（最新在顶）
+ * - 历史：全部调用记录，支持关键字搜索 + 范围过滤（全部/当前 Server/当前工具），
+ *   条目点击展开完整详情（复用结果卡片）
  */
 import { useMemo, useState } from "react";
 import {
@@ -7,9 +11,11 @@ import {
   Check,
   ChevronUp,
   Copy,
+  History,
   ListTree,
   Loader2,
   ScrollText,
+  Search,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -18,23 +24,56 @@ import type { CallResult, LogLevel } from "../types";
 import { EmptyState } from "./ui";
 import { JsonNode } from "./JsonView";
 
+/** 历史最多保留条数（与 store 一致） */
+type PaneTab = "results" | "history";
+
 /** 结果栏 */
 export function ResultPane() {
-  const { results, running, clearResults, selectedToolName } = useAppStore();
+  const { results, running, clearResults, history, clearHistory } =
+    useAppStore();
+  const [tab, setTab] = useState<PaneTab>("results");
   const [logOpen, setLogOpen] = useState(false);
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
-        <span className="text-[12px] font-semibold text-inksoft">
-          调用结果{selectedToolName ? ` · ${selectedToolName}` : ""}
-        </span>
-        <button
-          className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
-          title="清空结果"
-          onClick={clearResults}
-        >
-          <Trash2 size={14} />
-        </button>
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-2">
+        {/* 标签页切换 */}
+        <div className="flex overflow-hidden rounded-md border border-line">
+          <TabBtn active={tab === "results"} onClick={() => setTab("results")}>
+            调用结果
+          </TabBtn>
+          <TabBtn active={tab === "history"} onClick={() => setTab("history")}>
+            <span className="flex items-center gap-1">
+              <History size={12} /> 历史
+              {history.length > 0 && (
+                <span className="rounded-full bg-panel2 px-1 text-[10px] text-inksoft">
+                  {history.length}
+                </span>
+              )}
+            </span>
+          </TabBtn>
+        </div>
+
+        {/* 清空按钮（随 tab 变化） */}
+        {tab === "results" ? (
+          <button
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:opacity-40"
+            title="清空当前结果"
+            disabled={results.length === 0}
+            onClick={clearResults}
+          >
+            <Trash2 size={14} />
+          </button>
+        ) : (
+          <button
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:opacity-40"
+            title="清空全部历史"
+            disabled={history.length === 0}
+            onClick={clearHistory}
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
       </div>
 
       {running && (
@@ -43,16 +82,22 @@ export function ResultPane() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-2">
-        {results.length === 0 && !running ? (
-          <EmptyState
-            icon={<Braces size={36} strokeWidth={1.2} />}
-            text="填写参数后点击「运行」，调用结果会显示在这里。本会话的历史结果仅保留在内存中，不会写入磁盘。"
-          />
-        ) : (
-          results.map((r) => <ResultCard key={r.seq} result={r} isNew={r.seq === results[0]?.seq} />)
-        )}
-      </div>
+      {tab === "results" ? (
+        <div className="flex-1 overflow-y-auto p-2">
+          {results.length === 0 && !running ? (
+            <EmptyState
+              icon={<Braces size={36} strokeWidth={1.2} />}
+              text="填写参数后点击「运行」，调用结果会显示在这里。本会话的历史结果仅保留在内存中，不会写入磁盘。"
+            />
+          ) : (
+            results.map((r) => (
+              <ResultCard key={r.seq} result={r} isNew={r.seq === results[0]?.seq} />
+            ))
+          )}
+        </div>
+      ) : (
+        <HistoryPanel />
+      )}
 
       {/* 底部日志面板：默认收起 */}
       <LogPanel open={logOpen} toggle={() => setLogOpen((v) => !v)} />
@@ -60,71 +105,173 @@ export function ResultPane() {
   );
 }
 
-/** 日志面板属性 */
-interface LogPanelProps {
-  open: boolean;
-  toggle: () => void;
-}
+/** 历史过滤范围 */
+type HistoryScope = "all" | "server" | "tool";
 
-/** 可折叠日志面板：展示同步操作、连接错误等运行日志（仅内存，不落盘） */
-function LogPanel({ open, toggle }: LogPanelProps) {
-  const { logs, clearLogs } = useAppStore();
-  const levelCls: Record<LogLevel, string> = {
-    info: "text-inksoft",
-    warn: "text-warn",
-    error: "text-err",
-  };
-  const dotCls: Record<LogLevel, string> = {
-    info: "bg-inksoft/50",
-    warn: "bg-warn",
-    error: "bg-err",
-  };
+/** 历史面板：搜索 + 范围过滤 + 可展开详情列表 */
+function HistoryPanel() {
+  const { history, selectedNodeId, selectedToolName, nodes } = useAppStore();
+  const [keyword, setKeyword] = useState("");
+  const [scope, setScope] = useState<HistoryScope>("all");
+  /** 当前展开的条目（单开模式） */
+  const [expandedSeq, setExpandedSeq] = useState<number | null>(null);
+
+  /** 过滤：范围 + 关键字（匹配工具名 / Server 别名 / 入参） */
+  const filtered = useMemo(() => {
+    const kw = keyword.trim().toLowerCase();
+    return history.filter((h) => {
+      if (scope === "server" && h.node_id !== selectedNodeId) return false;
+      if (scope === "tool" && (h.node_id !== selectedNodeId || h.tool_name !== selectedToolName))
+        return false;
+      if (!kw) return true;
+      return (
+        h.tool_name.toLowerCase().includes(kw) ||
+        h.server_name.toLowerCase().includes(kw) ||
+        h.arguments.toLowerCase().includes(kw)
+      );
+    });
+  }, [history, keyword, scope, selectedNodeId, selectedToolName]);
+
+  const serverName = (nodeId: number) =>
+    nodes.find((n) => n.id === nodeId)?.name ?? "?";
+
   return (
-    <div className="shrink-0 border-t border-line">
-      <button
-        className="flex h-8 w-full items-center justify-between px-3 text-[12px] text-inksoft transition-colors hover:text-ink"
-        onClick={toggle}
-      >
-        <span className="flex items-center gap-1.5">
-          <ScrollText size={13} /> 日志
-          {logs.length > 0 && (
-            <span className="chip bg-panel2 text-[10px] text-inksoft">{logs.length}</span>
-          )}
-        </span>
-        <ChevronUp size={14} className={`transition-transform duration-200 ${open ? "" : "rotate-180"}`} />
-      </button>
-      {open && (
-        <div className="anim-fade-in max-h-44 overflow-y-auto border-t border-line px-3 py-1.5">
-          {logs.length === 0 ? (
-            <div className="py-2 text-[11.5px] text-inksoft/60">
-              暂无日志。Git 同步、连接失败等操作的记录会显示在这里（仅保留在本会话内存中）。
-            </div>
-          ) : (
-            <>
-              <div className="mb-1 flex justify-end">
-                <button
-                  className="rounded px-1.5 py-0.5 text-[11px] text-inksoft hover:bg-panel2 hover:text-err"
-                  onClick={clearLogs}
-                >
-                  清空
-                </button>
-              </div>
-              {logs.map((l, i) => (
-                <div key={i} className="flex items-start gap-2 py-0.5 font-mono text-[11.5px] leading-relaxed selectable">
-                  <span className="shrink-0 text-inksoft/50">{l.time}</span>
-                  <span className={`mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full ${dotCls[l.level]}`} />
-                  <span className={`break-all ${levelCls[l.level]}`}>{l.message}</span>
-                </div>
-              ))}
-            </>
-          )}
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* 搜索 + 范围切换 */}
+      <div className="shrink-0 space-y-1.5 border-b border-line p-2">
+        <div className="relative">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-inksoft" />
+          <input
+            className="field !py-1 pl-7"
+            placeholder="搜索工具名 / Server / 入参…"
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+          />
         </div>
-      )}
+        <div className="flex overflow-hidden rounded-md border border-line">
+          {(
+            [
+              ["all", "全部"],
+              ["server", "当前 Server"],
+              ["tool", "当前工具"],
+            ] as Array<[HistoryScope, string]>
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setScope(key)}
+              className={`flex-1 px-2 py-1 text-[11.5px] transition-colors ${
+                scope === key
+                  ? "bg-primarysoft text-primarystrong"
+                  : "text-inksoft hover:bg-panel2"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 列表 */}
+      <div className="flex-1 overflow-y-auto p-2">
+        {filtered.length === 0 ? (
+          <EmptyState
+            icon={<History size={36} strokeWidth={1.2} />}
+            text={
+              history.length === 0
+                ? "还没有调用记录。运行任意工具后，历史会显示在这里（仅保留本会话内存中，最多 200 条）。"
+                : "没有匹配的记录，试试调整关键字或过滤范围。"
+            }
+          />
+        ) : (
+          filtered.map((h) => (
+            <div key={h.seq} className="mb-1.5">
+              {/* 摘要行 */}
+              <button
+                onClick={() => setExpandedSeq(expandedSeq === h.seq ? null : h.seq)}
+                className={`w-full rounded-md border p-2 text-left transition-colors ${
+                  expandedSeq === h.seq
+                    ? "border-primary bg-primarysoft"
+                    : "border-line bg-panel hover:bg-panel2"
+                }`}
+              >
+                <div className="flex items-center gap-1.5">
+                  {h.is_error ? (
+                    <XCircle size={13} className="shrink-0 text-err" />
+                  ) : (
+                    <Check size={13} className="shrink-0 text-ok" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] font-medium">
+                    {h.tool_name}
+                  </span>
+                  <span className="shrink-0 text-[10.5px] text-inksoft/70">{h.timestamp}</span>
+                  <span className="shrink-0 text-[10.5px] text-inksoft">{h.duration_ms}ms</span>
+                </div>
+                <div className="mt-0.5 truncate text-[11px] text-inksoft">
+                  {serverName(h.node_id)} · {h.arguments || "{}"}
+                </div>
+              </button>
+              {/* 展开的详情 */}
+              {expandedSeq === h.seq && (
+                <div className="anim-fade-in mt-0.5">
+                  <ResultCard result={h} />
+                </div>
+              )}
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }
 
-/** 单条结果卡片（新结果带滑入动画） */
+/** 视图切换小按钮 */
+function ViewToggle({
+  active,
+  onClick,
+  icon,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] transition-colors ${
+        active ? "bg-primarysoft text-primarystrong" : "text-inksoft hover:bg-panel hover:text-ink"
+      }`}
+      onClick={onClick}
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}
+
+/** tab 按钮 */
+function TabBtn({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      className={`flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium transition-colors ${
+        active ? "bg-primarysoft text-primarystrong" : "text-inksoft hover:bg-panel2"
+      }`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** 单条结果卡片 */
 function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) {
   const [view, setView] = useState<"tree" | "raw">("tree");
   const [tab, setTab] = useState<"content" | "structured" | "args">("content");
@@ -164,7 +311,7 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
   };
 
   return (
-    <div className={`card mb-2 overflow-hidden ${isNew ? "anim-slide-up" : ""}`}>
+    <div className={`card overflow-hidden ${isNew ? "anim-slide-up mb-2" : "mb-1"}`}>
       {/* 卡片头 */}
       <div className="flex h-8 items-center justify-between border-b border-line bg-panel2 px-2.5">
         <div className="flex items-center gap-2 text-[11.5px]">
@@ -234,49 +381,66 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
   );
 }
 
-/** 视图切换小按钮 */
-function ViewToggle({
-  active,
-  onClick,
-  icon,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] transition-colors ${
-        active ? "bg-primarysoft text-primarystrong" : "text-inksoft hover:bg-panel hover:text-ink"
-      }`}
-      onClick={onClick}
-    >
-      {icon}
-      {children}
-    </button>
-  );
+/** 日志面板属性 */
+interface LogPanelProps {
+  open: boolean;
+  toggle: () => void;
 }
 
-/** 选项卡按钮 */
-function TabBtn({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
+/** 可折叠日志面板：展示同步操作、连接错误等运行日志（仅内存，不落盘） */
+function LogPanel({ open, toggle }: LogPanelProps) {
+  const { logs, clearLogs } = useAppStore();
+  const levelCls: Record<LogLevel, string> = {
+    info: "text-inksoft",
+    warn: "text-warn",
+    error: "text-err",
+  };
+  const dotCls: Record<LogLevel, string> = {
+    info: "bg-inksoft/50",
+    warn: "bg-warn",
+    error: "bg-err",
+  };
   return (
-    <button
-      className={`rounded px-2 py-0.5 text-[11.5px] transition-colors ${
-        active ? "bg-primarysoft text-primarystrong" : "text-inksoft hover:bg-panel2"
-      }`}
-      onClick={onClick}
-    >
-      {children}
-    </button>
+    <div className="shrink-0 border-t border-line">
+      <button
+        className="flex h-8 w-full items-center justify-between px-3 text-[12px] text-inksoft transition-colors hover:text-ink"
+        onClick={toggle}
+      >
+        <span className="flex items-center gap-1.5">
+          <ScrollText size={13} /> 日志
+          {logs.length > 0 && (
+            <span className="chip bg-panel2 text-[10px] text-inksoft">{logs.length}</span>
+          )}
+        </span>
+        <ChevronUp size={14} className={`transition-transform duration-200 ${open ? "" : "rotate-180"}`} />
+      </button>
+      {open && (
+        <div className="anim-fade-in max-h-44 overflow-y-auto border-t border-line px-3 py-1.5">
+          {logs.length === 0 ? (
+            <div className="py-2 text-[11.5px] text-inksoft/60">
+              暂无日志。Git 同步、连接失败等操作的记录会显示在这里（仅保留在本会话内存中）。
+            </div>
+          ) : (
+            <>
+              <div className="mb-1 flex justify-end">
+                <button
+                  className="rounded px-1.5 py-0.5 text-[11px] text-inksoft hover:bg-panel2 hover:text-err"
+                  onClick={clearLogs}
+                >
+                  清空
+                </button>
+              </div>
+              {logs.map((l, i) => (
+                <div key={i} className="flex items-start gap-2 py-0.5 font-mono text-[11.5px] leading-relaxed selectable">
+                  <span className="shrink-0 text-inksoft/50">{l.time}</span>
+                  <span className={`mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full ${dotCls[l.level]}`} />
+                  <span className={`break-all ${levelCls[l.level]}`}>{l.message}</span>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

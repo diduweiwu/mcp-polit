@@ -8,6 +8,7 @@ import * as api from "./api";
 import type {
   CallResult,
   ConnStatus,
+  HistoryEntry,
   LogLevel,
   LogEntry,
   NodeType,
@@ -58,6 +59,9 @@ interface AppState {
 
   /* 日志（结果面板底部展示；最多保留 200 条） */
   logs: LogEntry[];
+
+  /* 调用历史（全局，跨工具/项目；最多保留 200 条，仅内存） */
+  history: HistoryEntry[];
 
   /* 应用设置缓存（键值对） */
   settings: Record<string, string>;
@@ -121,6 +125,8 @@ interface AppState {
   addLogs: (entries: Array<{ level: string; message: string }>) => void;
   /** 清空日志 */
   clearLogs: () => void;
+  /** 清空全部调用历史 */
+  clearHistory: () => void;
 
   /** 保存一个设置项并同步缓存 */
   saveSetting: (key: string, value: string) => Promise<void>;
@@ -166,6 +172,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   seq: 0,
   treeCollapsed: false,
   layoutEqualizeSignal: 0,
+  history: [],
   logs: [],
   settings: {},
   syncing: false,
@@ -401,12 +408,33 @@ export const useAppStore = create<AppState>((set, get) => ({
   async runTool(nodeId, toolName, argsJson) {
     const seq = get().seq + 1;
     set({ running: true, seq });
+    const now = new Date();
+    const timestamp = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map((n) => String(n).padStart(2, "0"))
+      .join(":");
+    const server_name = get().nodes.find((n) => n.id === nodeId)?.name ?? "";
+
+    /** 结果入列：当前工具结果面板 + 全局历史 */
+    const commit = (result: CallResult) => {
+      const entry: HistoryEntry = {
+        ...result,
+        node_id: nodeId,
+        server_name,
+        timestamp,
+      };
+      set((s) => ({
+        running: false,
+        results: [result, ...s.results].slice(0, MAX_RESULTS),
+        history: [entry, ...s.history].slice(0, 200),
+      }));
+    };
+
     try {
       const result = await api.callTool(nodeId, toolName, argsJson, seq);
-      set((s) => ({ running: false, results: [result, ...s.results].slice(0, MAX_RESULTS) }));
+      commit(result);
     } catch (e) {
       // IPC/超时等异常折叠成错误结果展示
-      const err: CallResult = {
+      commit({
         seq,
         tool_name: toolName,
         is_error: true,
@@ -414,8 +442,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         structured_content: null,
         duration_ms: 0,
         arguments: argsJson,
-      };
-      set((s) => ({ running: false, results: [err, ...s.results].slice(0, MAX_RESULTS) }));
+      });
     }
   },
 
@@ -456,6 +483,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearLogs() {
     set({ logs: [] });
+  },
+
+  clearHistory() {
+    set({ history: [] });
   },
 
   async saveSetting(key, value) {

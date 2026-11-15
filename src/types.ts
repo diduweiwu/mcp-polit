@@ -108,6 +108,16 @@ export interface LogEntry {
   message: string;
 }
 
+/** 历史调用记录：CallResult + 定位元数据（所有工具共用一份全局列表） */
+export interface HistoryEntry extends CallResult {
+  /** 被调用 server 的树节点 ID */
+  node_id: number;
+  /** server 别名（冗余存储，跨项目可读） */
+  server_name: string;
+  /** 本地时间 HH:MM:SS */
+  timestamp: string;
+}
+
 /** 工具调用结果 */
 export interface CallResult {
   /** 调用序号（前端生成，用于结果对照） */
