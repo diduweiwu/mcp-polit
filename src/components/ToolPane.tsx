@@ -184,6 +184,14 @@ export function ToolPane() {
 function ConnectedConfigBar({ node }: { node: TreeNode }) {
   const cfg = useAppStore((s) => s.serverConfigs[node.id]);
   const [open, setOpen] = useState(false);
+  /* 配置尚未异步加载完成时只渲染骨架条 */
+  if (!cfg) {
+    return (
+      <div className="mb-1">
+        <div className="h-[30px] animate-pulse rounded-md border border-line bg-panel2" />
+      </div>
+    );
+  }
   return (
     <div className="mb-1">
       <button
@@ -271,16 +279,17 @@ function rowsOf(json?: string | null): Array<[string, string]> {
  * 环境切换器：显示 Base + 全部环境，点击切换激活环境（写入配置）。
  * 若当前已连接，切换后自动断开（提示重新连接以应用新环境）。
  */
-function EnvSwitcher({ node, cfg, connected }: { node: TreeNode; cfg: ServerConfig; connected: boolean }) {
+function EnvSwitcher({ node, cfg, connected }: { node: TreeNode; cfg?: ServerConfig; connected: boolean }) {
   const updateConfigCache = useAppStore((s) => s.updateConfigCache);
   const disconnect = useAppStore((s) => s.disconnect);
   const envNames = useMemo(() => {
     try {
-      return Object.keys(JSON.parse(cfg.envs ?? "{}") as Record<string, unknown>);
+      return Object.keys(JSON.parse(cfg?.envs ?? "{}") as Record<string, unknown>);
     } catch {
       return [];
     }
-  }, [cfg.envs]);
+  }, [cfg?.envs]);
+  if (!cfg) return null;
   const active = cfg.active_env?.trim() || "";
 
   /** 切换激活环境 */
@@ -439,20 +448,25 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
 
       {/* 操作：已连接 -> 重新连接 / 断开；未连接 -> 连接 / 编辑配置 */}
       {connected ? (
-        <div className="grid grid-cols-2 gap-1.5">
-          <button
-            className="btn-primary h-9"
-            disabled={connecting}
-            onClick={() => void refreshTools(node.id)}
-            title="断开并重新连接（刷新工具列表）"
-          >
-            <RefreshCw size={14} className={connecting ? "animate-spin" : ""} />
-            {connecting ? "连接中…" : "重新连接"}
+        <>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              className="btn-primary h-9"
+              disabled={connecting}
+              onClick={() => void refreshTools(node.id)}
+              title="断开并重新连接（刷新工具列表）"
+            >
+              <RefreshCw size={14} className={connecting ? "animate-spin" : ""} />
+              {connecting ? "连接中…" : "重新连接"}
+            </button>
+            <button className="btn-ghost h-9" onClick={() => void disconnect(node.id)}>
+              <Unplug size={14} /> 断开
+            </button>
+          </div>
+          <button className="btn-ghost mt-1.5 h-8 w-full" onClick={() => setEditOpen(true)}>
+            <Pencil size={13} /> 编辑配置
           </button>
-          <button className="btn-ghost h-9" onClick={() => void disconnect(node.id)}>
-            <Unplug size={14} /> 断开
-          </button>
-        </div>
+        </>
       ) : (
         <>
           <button
