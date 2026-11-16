@@ -1,6 +1,6 @@
 [package]
 name = "mcpilot"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCPilot — 本地 MCP 调试工作台（MCP Inspector 客户端）"
 authors = ["MCPilot"]
 edition = "2024"
@@ -40,8 +40,10 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
-codegen-units = 1
-lto = true
+# 编译速度取舍：codegen-units=16 让代码生成并行执行，lto="thin" 比全量 LTO 快很多；
+# 代价是二进制略大（约几个百分点）、运行性能差异可忽略（CI 打包提速明显）
+codegen-units = 16
+lto = "thin"
 opt-level = 3
 panic = "abort"
 strip = true

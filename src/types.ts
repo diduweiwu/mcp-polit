@@ -114,12 +114,14 @@ export interface JsonSchema {
 /** 日志级别 */
 export type LogLevel = "info" | "warn" | "error";
 
-/** 日志条目（同步等操作的执行记录） */
+/** 日志条目（同步、连接等操作的执行记录） */
 export interface LogEntry {
   /** 前端写入时生成的显示时间 HH:MM:SS */
   time: string;
   level: LogLevel;
   message: string;
+  /** 归属的 server 节点 ID；缺省表示全局日志（项目操作、Git 同步等） */
+  node_id?: number;
 }
 
 /** 历史调用记录：CallResult + 定位元数据（所有工具共用一份全局列表） */

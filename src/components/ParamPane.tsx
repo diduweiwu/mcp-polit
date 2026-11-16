@@ -7,9 +7,10 @@ import { useEffect, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { json } from "@codemirror/lang-json";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { BookmarkPlus, Play, Table2, Braces, Loader2, X } from "lucide-react";
+import { BookmarkPlus, Play, Table2, Braces, Loader2, SlidersHorizontal } from "lucide-react";
 import { useAppStore } from "../store";
 import { buildDefaults, pruneArgs, SchemaForm, type FormValue } from "./SchemaForm";
+import { Modal } from "./ui";
 
 /** 参数栏 */
 export function ParamPane() {
@@ -20,7 +21,6 @@ export function ParamPane() {
     selectedToolName,
     running,
     runTool,
-    themeMode,
     toolParams,
     cases,
     saveToolParam,
@@ -46,6 +46,24 @@ export function ParamPane() {
   /** 保存 Case 的命名输入态 */
   const [caseName, setCaseName] = useState("");
   const [namingCase, setNamingCase] = useState(false);
+  /** Case 管理弹窗开关 */
+  const [caseMgrOpen, setCaseMgrOpen] = useState(false);
+
+  /* 实际生效的暗色态：跟随系统时以 html.dark 类为准（applyThemeMode 维护），
+     用 MutationObserver 监听类变化，保证 light/dark/system 三态下编辑器主题都正确 */
+  const [isDark, setIsDark] = useState(() =>
+    document.documentElement.classList.contains("dark"),
+  );
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setIsDark(document.documentElement.classList.contains("dark")),
+    );
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    return () => observer.disconnect();
+  }, []);
 
   /* 切换工具时：优先恢复缓存的参数（跨切换/重启保留），否则用 schema 默认值 */
   useEffect(() => {
@@ -99,6 +117,18 @@ export function ParamPane() {
     setMode(m);
   };
 
+  /** 带入一个 Case 的入参快照（同步到表单与 JSON 文本）；损坏的 Case 静默忽略 */
+  const applyCase = (argsJson: string) => {
+    try {
+      const parsed = JSON.parse(argsJson) as FormValue;
+      setValue(parsed);
+      setJsonText(JSON.stringify(parsed, null, 2));
+      setJsonError("");
+    } catch {
+      /* 忽略损坏的 case */
+    }
+  };
+
   /** 运行：按当前模式组装入参并调用 */
   const doRun = () => {
     if (selectedNodeId == null || !selectedToolName) return;
@@ -128,39 +158,33 @@ export function ParamPane() {
       <PaneHeader title={`参数 · ${tool.name}`} tool={tool} mode={mode} setMode={switchMode} />
 
       <div key={selectedToolName ?? "empty"} className="anim-fade-in flex-1 overflow-y-auto p-3">
-        {/* 参数 Case 条：保存的入参快照，点击一键带入 */}
+        {/* 参数 Case 条：下拉选择一键带入，「管理」打开弹窗查看/删除 */}
         {myCases.length > 0 && (
-          <div className="mb-3 flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] text-inksoft/70">Case：</span>
-            {myCases.map((c) => (
-              <span
-                key={c.name}
-                className="group inline-flex items-center gap-1 rounded-full border border-line bg-panel px-2 py-0.5 text-[11.5px] transition-colors hover:border-primary"
-              >
-                <button
-                  title={`带入参数（保存于 ${c.saved_at}）`}
-                  onClick={() => {
-                    try {
-                      const parsed = JSON.parse(c.args) as FormValue;
-                      setValue(parsed);
-                      setJsonText(JSON.stringify(parsed, null, 2));
-                      setJsonError("");
-                    } catch {
-                      /* 忽略损坏的 case */
-                    }
-                  }}
-                >
+          <div className="mb-3 flex items-center gap-1.5">
+            <span className="shrink-0 text-[11px] text-inksoft/70">Case：</span>
+            <select
+              className="field h-7 max-w-[220px] !py-0 text-[12px]"
+              value=""
+              title="选择 Case 一键带入参数"
+              onChange={(e) => {
+                const hit = myCases.find((c) => c.name === e.target.value);
+                if (hit) applyCase(hit.args);
+              }}
+            >
+              <option value="">选择 Case 带入…</option>
+              {myCases.map((c) => (
+                <option key={c.name} value={c.name}>
                   {c.name}
-                </button>
-                <button
-                  className="text-inksoft/50 hover:text-err"
-                  title="删除该 Case"
-                  onClick={() => paramKey && void deleteParamCase(paramKey, c.name)}
-                >
-                  <X size={10} />
-                </button>
-              </span>
-            ))}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn-ghost h-7 shrink-0 gap-1 !px-2 text-[11.5px]"
+              title="查看全部 Case，可带入或删除"
+              onClick={() => setCaseMgrOpen(true)}
+            >
+              <SlidersHorizontal size={12} /> 管理
+            </button>
           </div>
         )}
         {mode === "form" ? (
@@ -179,7 +203,7 @@ export function ParamPane() {
               value={jsonText}
               height="320px"
               extensions={[json()]}
-              theme={themeMode === "dark" ? oneDark : "light"}
+              theme={isDark ? oneDark : "light"}
               basicSetup={{ foldGutter: false, lineNumbers: true }}
               onChange={(v) => {
                 setJsonText(v);
@@ -261,6 +285,56 @@ export function ParamPane() {
           </div>
         )}
       </div>
+
+      {/* Case 管理弹窗：查看该工具全部 Case，可带入或删除 */}
+      <Modal
+        open={caseMgrOpen}
+        title={`参数 Case · ${tool.name}`}
+        onClose={() => setCaseMgrOpen(false)}
+        width={520}
+      >
+        {myCases.length === 0 ? (
+          <p className="py-8 text-center text-[13px] leading-relaxed text-inksoft">
+            还没有保存的 Case。
+            <br />
+            填写参数后点击底部 <BookmarkPlus size={13} className="inline align-[-2px]" /> 按钮即可把当前参数保存为 Case。
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {myCases.map((c) => (
+              <div key={c.name} className="rounded-md border border-line bg-panel2/50 p-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="min-w-0 truncate font-mono text-[12.5px] font-medium text-ink">
+                    {c.name}
+                  </span>
+                  <span className="shrink-0 text-[10.5px] text-inksoft/70">保存于 {c.saved_at}</span>
+                  <span className="flex-1" />
+                  <button
+                    className="btn-ghost h-6 shrink-0 !px-2 text-[11px]"
+                    title="带入该 Case 的参数"
+                    onClick={() => {
+                      applyCase(c.args);
+                      setCaseMgrOpen(false);
+                    }}
+                  >
+                    带入
+                  </button>
+                  <button
+                    className="h-6 shrink-0 rounded px-2 text-[11px] text-inksoft transition-colors hover:bg-err/10 hover:text-err"
+                    title="删除该 Case"
+                    onClick={() => paramKey && void deleteParamCase(paramKey, c.name)}
+                  >
+                    删除
+                  </button>
+                </div>
+                <div className="mt-1 truncate font-mono text-[11px] text-inksoft" title={c.args}>
+                  {c.args}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

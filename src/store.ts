@@ -127,10 +127,10 @@ interface AppState {
   /** 触发四栏均分布局 */
   equalizeLayout: () => void;
 
-  /** 追加一条日志 */
-  addLog: (level: LogLevel, message: string) => void;
-  /** 批量追加后端返回的日志（补时间戳） */
-  addLogs: (entries: Array<{ level: string; message: string }>) => void;
+  /** 追加一条日志；nodeId 可选，缺省为全局日志（项目操作、Git 同步等） */
+  addLog: (level: LogLevel, message: string, nodeId?: number) => void;
+  /** 批量追加后端返回的日志（补时间戳）；nodeId 可选，缺省为全局日志 */
+  addLogs: (entries: Array<{ level: string; message: string }>, nodeId?: number) => void;
   /** 清空日志 */
   clearLogs: () => void;
   /** 清空全部调用历史 */
@@ -488,17 +488,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ layoutEqualizeSignal: s.layoutEqualizeSignal + 1 }));
   },
 
-  addLog(level, message) {
+  addLog(level, message, nodeId) {
     const now = new Date();
     const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
       .map((n) => String(n).padStart(2, "0"))
       .join(":");
     set((s) => ({
-      logs: [...s.logs, { time, level, message }].slice(-200),
+      logs: [...s.logs, { time, level, message, ...(nodeId != null ? { node_id: nodeId } : {}) }].slice(-200),
     }));
   },
 
-  addLogs(entries) {
+  addLogs(entries, nodeId) {
     const now = new Date();
     const time = [now.getHours(), now.getMinutes(), now.getSeconds()]
       .map((n) => String(n).padStart(2, "0"))
@@ -507,6 +507,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       time,
       level: (["info", "warn", "error"].includes(e.level) ? e.level : "info") as LogLevel,
       message: e.message,
+      ...(nodeId != null ? { node_id: nodeId } : {}),
     }));
     set((s) => ({ logs: [...s.logs, ...mapped].slice(-200) }));
   },
@@ -601,10 +602,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       connStates: { ...s.connStates, [ev.node_id]: ev.status },
       connErrors: { ...s.connErrors, [ev.node_id]: ev.message ?? "" },
     }));
-    // 连接错误同时写入日志面板
+    // 连接错误同时写入日志面板（归属到对应 server）
     if (ev.status === "error" && ev.message) {
       const name = get().nodes.find((n) => n.id === ev.node_id)?.name;
-      get().addLog("error", `连接失败${name ? `「${name}」` : ""}：${ev.message}`);
+      get().addLog("error", `连接失败${name ? `「${name}」` : ""}：${ev.message}`, ev.node_id);
     }
   },
 }));

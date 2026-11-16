@@ -303,12 +303,13 @@ function EnvSwitcher({ node, cfg, connected }: { node: TreeNode; cfg?: ServerCon
         useAppStore.getState().addLog(
           "info",
           `环境已切换为「${name || "Base"}」，连接已断开，点击「重新连接」以应用新环境`,
+          node.id,
         );
       } else {
-        useAppStore.getState().addLog("info", `环境已切换为「${name || "Base"}」`);
+        useAppStore.getState().addLog("info", `环境已切换为「${name || "Base"}」`, node.id);
       }
     } catch (e) {
-      useAppStore.getState().addLog("error", String(e));
+      useAppStore.getState().addLog("error", String(e), node.id);
     }
   };
 

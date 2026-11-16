@@ -5,7 +5,7 @@
  * - 历史：全部调用记录，支持关键字搜索 + 范围过滤（全部/当前 Server/当前工具），
  *   条目点击展开完整详情（复用结果卡片）
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Braces,
   Check,
@@ -271,11 +271,19 @@ function TabBtn({
   );
 }
 
-/** 单条结果卡片 */
+/** 单条结果卡片；isNew=true（最新一条）默认展开，其余默认折叠，点击头部可展开/收起 */
 function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) {
   const [view, setView] = useState<"tree" | "raw">("tree");
   const [tab, setTab] = useState<"content" | "structured" | "args">("content");
   const [copied, setCopied] = useState(false);
+  /** 折叠态：非最新结果默认只显示摘要行，手动展开查看详情 */
+  const [collapsed, setCollapsed] = useState(!isNew);
+
+  /* 新结果入列后，本卡片从「最新」退化为历史时自动折叠；
+     useState 初始值只在挂载时生效，需要跟随 isNew 变化补一次折叠 */
+  useEffect(() => {
+    if (!isNew) setCollapsed(true);
+  }, [isNew]);
 
   const structured = result.structured_content ?? null;
 
@@ -312,9 +320,19 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
 
   return (
     <div className={`card overflow-hidden ${isNew ? "anim-slide-up mb-2" : "mb-1"}`}>
-      {/* 卡片头 */}
-      <div className="flex h-8 items-center justify-between border-b border-line bg-panel2 px-2.5">
-        <div className="flex items-center gap-2 text-[11.5px]">
+      {/* 卡片头：整行可点击切换折叠；折叠时隐藏右侧视图/复制按钮 */}
+      <div
+        className={`flex h-8 items-center justify-between border-b border-line bg-panel2 px-2.5 ${
+          collapsed ? "cursor-pointer select-none" : ""
+        }`}
+        onClick={() => setCollapsed((v) => !v)}
+        title={collapsed ? "展开详情" : undefined}
+      >
+        <div className="flex min-w-0 items-center gap-2 text-[11.5px]">
+          <ChevronUp
+            size={13}
+            className={`shrink-0 text-inksoft transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`}
+          />
           {result.is_error ? (
             <span className="chip bg-err/10 text-err">
               <XCircle size={11} /> 失败
@@ -322,28 +340,30 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
           ) : (
             <span className="chip bg-ok/10 text-ok">成功</span>
           )}
-          <span className="font-mono text-ink">{result.tool_name}</span>
-          <span className="text-inksoft">{result.duration_ms} ms</span>
+          <span className="truncate font-mono text-ink">{result.tool_name}</span>
+          <span className="shrink-0 text-inksoft">{result.duration_ms} ms</span>
         </div>
-        <div className="flex items-center gap-0.5">
-          <ViewToggle active={view === "tree"} onClick={() => setView("tree")} icon={<ListTree size={12} />}>
-            树
-          </ViewToggle>
-          <ViewToggle active={view === "raw"} onClick={() => setView("raw")} icon={<Braces size={12} />}>
-            原始
-          </ViewToggle>
-          <button
-            className="rounded p-1 text-inksoft hover:bg-panel hover:text-ink"
-            title="复制"
-            onClick={() => void copy()}
-          >
-            {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
-          </button>
-        </div>
+        {!collapsed && (
+          <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+            <ViewToggle active={view === "tree"} onClick={() => setView("tree")} icon={<ListTree size={12} />}>
+              树
+            </ViewToggle>
+            <ViewToggle active={view === "raw"} onClick={() => setView("raw")} icon={<Braces size={12} />}>
+              原始
+            </ViewToggle>
+            <button
+              className="rounded p-1 text-inksoft hover:bg-panel hover:text-ink"
+              title="复制"
+              onClick={() => void copy()}
+            >
+              {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* 选项卡 */}
-      {structured !== null && (
+      {!collapsed && structured !== null && (
         <div className="flex gap-1 border-b border-line px-2 py-1">
           <TabBtn active={tab === "content"} onClick={() => setTab("content")}>内容</TabBtn>
           <TabBtn active={tab === "structured"} onClick={() => setTab("structured")}>结构化</TabBtn>
@@ -351,7 +371,8 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
         </div>
       )}
 
-      {/* 内容区 */}
+      {/* 内容区（折叠时不渲染，避免隐藏的树展开开销） */}
+      {!collapsed && (
       <div className="max-h-[300px] overflow-y-auto p-2.5">
         {tab === "args" ? (
           <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed text-inksoft selectable">
@@ -377,6 +398,7 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
           </pre>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -387,9 +409,9 @@ interface LogPanelProps {
   toggle: () => void;
 }
 
-/** 可折叠日志面板：展示同步操作、连接错误等运行日志（仅内存，不落盘） */
+/** 可折叠日志面板：展示当前选中 server 的日志 + 全局日志（同步等，仅内存，不落盘） */
 function LogPanel({ open, toggle }: LogPanelProps) {
-  const { logs, clearLogs } = useAppStore();
+  const { logs, clearLogs, selectedNodeId, nodes } = useAppStore();
   const levelCls: Record<LogLevel, string> = {
     info: "text-inksoft",
     warn: "text-warn",
@@ -400,6 +422,14 @@ function LogPanel({ open, toggle }: LogPanelProps) {
     warn: "bg-warn",
     error: "bg-err",
   };
+  /** 只显示全局日志 + 当前选中 server 的日志（切换 server 时面板内容跟随切换） */
+  const visibleLogs = useMemo(
+    () => logs.filter((l) => l.node_id == null || l.node_id === selectedNodeId),
+    [logs, selectedNodeId],
+  );
+  /** 选中 server 时在标题中显示其名称，便于辨识日志归属 */
+  const serverName =
+    selectedNodeId != null ? nodes.find((n) => n.id === selectedNodeId)?.name : null;
   return (
     <div className="shrink-0 border-t border-line">
       <button
@@ -407,16 +437,16 @@ function LogPanel({ open, toggle }: LogPanelProps) {
         onClick={toggle}
       >
         <span className="flex items-center gap-1.5">
-          <ScrollText size={13} /> 日志
-          {logs.length > 0 && (
-            <span className="chip bg-panel2 text-[10px] text-inksoft">{logs.length}</span>
+          <ScrollText size={13} /> 日志{serverName ? ` · ${serverName}` : ""}
+          {visibleLogs.length > 0 && (
+            <span className="chip bg-panel2 text-[10px] text-inksoft">{visibleLogs.length}</span>
           )}
         </span>
         <ChevronUp size={14} className={`transition-transform duration-200 ${open ? "" : "rotate-180"}`} />
       </button>
       {open && (
         <div className="anim-fade-in max-h-44 overflow-y-auto border-t border-line px-3 py-1.5">
-          {logs.length === 0 ? (
+          {visibleLogs.length === 0 ? (
             <div className="py-2 text-[11.5px] text-inksoft/60">
               暂无日志。Git 同步、连接失败等操作的记录会显示在这里（仅保留在本会话内存中）。
             </div>
@@ -425,12 +455,13 @@ function LogPanel({ open, toggle }: LogPanelProps) {
               <div className="mb-1 flex justify-end">
                 <button
                   className="rounded px-1.5 py-0.5 text-[11px] text-inksoft hover:bg-panel2 hover:text-err"
+                  title="清空全部日志"
                   onClick={clearLogs}
                 >
                   清空
                 </button>
               </div>
-              {logs.map((l, i) => (
+              {visibleLogs.map((l, i) => (
                 <div key={i} className="flex items-start gap-2 py-0.5 font-mono text-[11.5px] leading-relaxed selectable">
                   <span className="shrink-0 text-inksoft/50">{l.time}</span>
                   <span className={`mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full ${dotCls[l.level]}`} />
