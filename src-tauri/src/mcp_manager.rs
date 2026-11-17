@@ -204,6 +204,64 @@ impl McpManager {
         Self::connect(app, db, node_id).await
     }
 
+    /// 用一份（未落库的）配置做连通性探测：握手 -> 拉取工具列表 -> 立即断开。
+    ///
+    /// 与 [`McpManager::connect`] 的区别：不写入连接表、不广播 `conn-state`、
+    /// 不影响该节点可能已存在的正式连接，专供 Server 表单的「测试连通性」按钮。
+    ///
+    /// 成功返回探测到的工具列表（前端展示数量即可）。
+    pub async fn probe_config(config: ServerConfig) -> CmdResult<Vec<ToolInfo>> {
+        match config.transport_type {
+            TransportType::Stdio => {
+                let transport = build_stdio_transport(&config)?;
+                Self::probe_with(transport, config).await
+            }
+            TransportType::StreamableHttp => {
+                let transport = build_http_transport(&config)?;
+                Self::probe_with(transport, config).await
+            }
+        }
+    }
+
+    /// 连通性探测的通用执行段（泛型覆盖 stdio 与 streamable_http 两种传输）。
+    async fn probe_with<T, E, A>(transport: T, config: ServerConfig) -> CmdResult<Vec<ToolInfo>>
+    where
+        T: IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        // 握手 + 初始化，固定 30 秒上限，与正式连接一致
+        let served = tokio::time::timeout(Duration::from_secs(30), ().serve(transport)).await;
+        let service = match served {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                let msg = sanitize(format!("连接失败：{e}"), &config);
+                return Err(AppError::new(msg));
+            }
+            Err(_) => return Err(AppError::new("连接超时（30 秒）")),
+        };
+        // 拉取工具列表
+        let listed = service.peer().list_tools(None).await;
+        let tools = match listed {
+            Ok(result) => result
+                .tools
+                .into_iter()
+                .map(|t| ToolInfo {
+                    name: t.name.to_string(),
+                    title: t.title.map(|x| x.to_string()),
+                    description: t.description.map(|x| x.to_string()),
+                    input_schema: serde_json::to_value(&*t.input_schema).unwrap_or(Value::Null),
+                })
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                let msg = sanitize(format!("获取工具列表失败：{e}"), &config);
+                return Err(AppError::new(msg));
+            }
+        };
+        // 探测完成即断开（stdio 子进程随之回收）
+        service.cancellation_token().cancel();
+        Ok(tools)
+    }
+
     /// 获取已缓存的工具列表；未连接时报错。
     pub fn cached_tools(&self, node_id: i64) -> CmdResult<Vec<ToolInfo>> {
         let conns = self.conns.lock().unwrap();

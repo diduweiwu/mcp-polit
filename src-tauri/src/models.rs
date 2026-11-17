@@ -163,3 +163,22 @@ pub struct LogEntry {
     /// 日志内容
     pub message: String,
 }
+
+/// 工具调用历史记录：落盘 SQLite，跨会话保留（全局，不限项目）。
+///
+/// `result` 通过 serde flatten 展开，前端看到的形态为
+/// `{ id, node_id, server_name, created_at, ...CallResult 字段 }`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoryRecord {
+    /// 记录 ID：自增主键；前端新增时传 0，由后端落库生成
+    pub id: i64,
+    /// 被调用 Server 的树节点 ID：仅作展示关联，节点删除后历史仍保留
+    pub node_id: i64,
+    /// Server 别名：冗余存储，节点删除后仍可读
+    pub server_name: String,
+    /// 调用时间：本地时间字符串（YYYY-MM-DD HH:MM:SS）；前端新增时传空串，由后端生成
+    pub created_at: String,
+    /// 调用结果主体（工具名、是否出错、content、耗时、入参快照等）
+    #[serde(flatten)]
+    pub result: CallResult,
+}

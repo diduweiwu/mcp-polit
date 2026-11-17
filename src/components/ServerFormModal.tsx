@@ -13,7 +13,7 @@ import { Modal } from "./ui";
 function defaultConfig(nodeId: number): ServerConfig {
   return {
     node_id: nodeId,
-    transport_type: "stdio",
+    transport_type: "streamable_http",
     command: "",
     args: "",
     env: "",
@@ -51,6 +51,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  /** 连通性测试进行中 */
+  const [testing, setTesting] = useState(false);
+  /** 连通性测试结果：ok=成功（绿色提示），否则红色错误 */
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   // 编辑模式：加载既有配置
   useEffect(() => {
@@ -63,26 +67,22 @@ export function ServerFormModal({ parentId, onClose }: Props) {
 
   const ready = !editNode || loaded;
 
-  /** 更新配置某字段 */
-  const patch = (p: Partial<ServerConfig>) => setCfg((c) => ({ ...c, ...p }));
+  /** 更新配置某字段（配置变化后旧的测试结果不再可信，一并清除） */
+  const patch = (p: Partial<ServerConfig>) => {
+    setCfg((c) => ({ ...c, ...p }));
+    setTestMsg(null);
+  };
 
-  /** 提交：新建走 createNode + saveServerConfig；编辑走 renameNode + saveServerConfig */
-  const submit = async () => {
-    setError("");
-    if (!name.trim()) {
-      setError("请填写别名");
-      return;
-    }
+  /** 校验配置有效性：返回错误文案，通过时返回空串 */
+  const validateConfig = (): string => {
     if (cfg.transport_type === "stdio" && !cfg.command?.trim()) {
-      setError("stdio 模式必须填写启动命令");
-      return;
+      return "stdio 模式必须填写启动命令";
     }
     if (
       cfg.transport_type === "streamable_http" &&
       !/^https?:\/\//.test(cfg.url?.trim() ?? "")
     ) {
-      setError("Streamable HTTP 模式必须填写 http(s):// 开头的服务地址");
-      return;
+      return "Streamable HTTP 模式必须填写 http(s):// 开头的服务地址";
     }
     // JSON 字段预校验，给出友好提示
     for (const [label, raw] of [
@@ -95,10 +95,43 @@ export function ServerFormModal({ parentId, onClose }: Props) {
         try {
           JSON.parse(s);
         } catch (e) {
-          setError(`${label} 不是合法的 JSON：${e}`);
-          return;
+          return `${label} 不是合法的 JSON：${e}`;
         }
       }
+    }
+    return "";
+  };
+
+  /** 测试连通性：用当前表单配置（无需先保存）握手并拉取工具列表 */
+  const testConn = async () => {
+    const err = validateConfig();
+    if (err) {
+      setTestMsg({ ok: false, text: err });
+      return;
+    }
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      const tools = await api.testServerConfig(cfg);
+      setTestMsg({ ok: true, text: `连接成功，发现 ${tools.length} 个工具` });
+    } catch (e) {
+      setTestMsg({ ok: false, text: String(e) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  /** 提交：新建走 createNode + saveServerConfig；编辑走 renameNode + saveServerConfig */
+  const submit = async () => {
+    setError("");
+    if (!name.trim()) {
+      setError("请填写别名");
+      return;
+    }
+    const err = validateConfig();
+    if (err) {
+      setError(err);
+      return;
     }
     setSaving(true);
     try {
@@ -139,6 +172,14 @@ export function ServerFormModal({ parentId, onClose }: Props) {
       width={640}
       footer={
         <>
+          <button
+            className="btn-ghost mr-auto"
+            disabled={testing || saving || !ready}
+            onClick={() => void testConn()}
+            title="用当前表单配置（无需先保存）尝试握手并拉取工具列表"
+          >
+            {testing ? "测试中…" : "测试连通性"}
+          </button>
           <button className="btn-ghost" onClick={onClose}>
             取消
           </button>
@@ -288,6 +329,17 @@ export function ServerFormModal({ parentId, onClose }: Props) {
           {error && (
             <div className="rounded-md border border-err/30 bg-err/10 px-3 py-2 text-[12px] text-err">
               {error}
+            </div>
+          )}
+
+          {testMsg && (
+            <div
+              className={`text-[12px] leading-relaxed break-all ${
+                testMsg.ok ? "text-emerald-600 dark:text-emerald-400" : "text-err"
+              }`}
+            >
+              {testMsg.ok ? "✓ " : "✗ "}
+              {testMsg.text}
             </div>
           )}
         </div>

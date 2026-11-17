@@ -122,7 +122,27 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "rename_node": { const n = nodes.find((x) => x.id === args.id); if (n) n.name = args.name as string; return n; }
     case "move_node": { const n = nodes.find((x) => x.id === args.id); if (n) n.parent_id = (args.newParentId as number) ?? null; return n; }
     case "delete_node": { const i = nodes.findIndex((x) => x.id === args.id); if (i >= 0) nodes.splice(i, 1); return []; }
-    case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "stdio", command: "", args: "", env: "", working_dir: "", url: "", headers: "", timeout_ms: 30000, enabled: true, note: "" };
+    case "duplicate_node": {
+      // 递归复制子树 + 各 server 配置；根副本用传入名称并保持原父，子孙副本父指向新副本
+      const clone = (srcId: number, parentId: number | null, name: string | null): number => {
+        const src = nodes.find((x) => x.id === srcId);
+        if (!src) throw new Error("节点不存在");
+        nodeSeq += 1;
+        nodes.push({ ...src, id: nodeSeq, parent_id: parentId, name: name ?? src.name });
+        if (configs[srcId]) configs[nodeSeq] = { ...configs[srcId], node_id: nodeSeq };
+        for (const c of [...nodes].filter((x) => x.parent_id === srcId)) clone(c.id, nodeSeq, null);
+        return nodeSeq;
+      };
+      const srcNode = nodes.find((x) => x.id === args.id);
+      const nid = clone(args.id as number, srcNode?.parent_id ?? null, args.name as string);
+      return nodes.find((x) => x.id === nid) ?? null;
+    }
+    case "test_server_config": return [{ name: "echo", title: "Echo", description: "演示模式：探测成功", input_schema: {} }];
+    case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "streamable_http", command: "", args: "", env: "", working_dir: "", url: "", headers: "", timeout_ms: 30000, enabled: true, note: "" };
+    // 调用历史：浏览器演示模式不落盘，仅返回空列表保证启动流程畅通
+    case "append_history": return null;
+    case "list_history": return [];
+    case "clear_history": return null;
     case "save_server_config": {
       const cfg = args.config as { node_id: number };
       configs[cfg.node_id] = args.config;

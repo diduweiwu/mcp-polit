@@ -10,7 +10,7 @@ use crate::db::Db;
 use crate::error::CmdResult;
 use crate::mcp_manager::McpManager;
 use crate::models::{
-    CallResult, NodeType, Project, ServerConfig, ToolInfo, TreeNode,
+    CallResult, HistoryRecord, NodeType, Project, ServerConfig, ToolInfo, TreeNode,
 };
 
 /* ---------- 项目 ---------- */
@@ -363,4 +363,51 @@ pub fn project_checkout(db: State<'_, Db>, project_id: i64, branch: String) -> C
         .ok_or_else(|| crate::error::AppError::new("该项目未开启同步"))?;
     crate::sync::git_checkout(std::path::Path::new(&dir), &branch)
         .map_err(crate::error::AppError::new)
+}
+
+/// 复制节点：目录连同整棵子树（含各 Server 连接配置）一起复制。
+///
+/// # 参数
+///
+/// - `node_id`: 源节点 ID
+/// - `name`: 副本名称（前端生成，如「原名-a3f2」随机后缀避免重名）
+#[tauri::command]
+pub fn duplicate_node(db: State<'_, Db>, node_id: i64, name: String) -> CmdResult<TreeNode> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(crate::error::AppError::new("副本名称不能为空"));
+    }
+    let conn = db.0.lock().unwrap();
+    crate::db::duplicate_node(&conn, node_id, &name)
+}
+
+/// 用表单中的（未落库）配置测试连通性：握手 → 拉取工具列表 → 立即断开。
+///
+/// 不写入连接表、不广播状态、不影响该节点可能已存在的正式连接。
+#[tauri::command]
+pub async fn test_server_config(config: ServerConfig) -> CmdResult<Vec<ToolInfo>> {
+    McpManager::probe_config(config).await
+}
+
+/* ---------- 调用历史 ---------- */
+
+/// 追加一条调用历史记录（id / created_at 由后端生成，传入值被忽略）。
+#[tauri::command]
+pub fn append_history(db: State<'_, Db>, record: HistoryRecord) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    crate::db::insert_history(&conn, &record)
+}
+
+/// 读取最近的调用历史（新 → 旧）。
+#[tauri::command]
+pub fn list_history(db: State<'_, Db>, limit: i64) -> CmdResult<Vec<HistoryRecord>> {
+    let conn = db.0.lock().unwrap();
+    crate::db::list_history(&conn, limit)
+}
+
+/// 清空全部调用历史。
+#[tauri::command]
+pub fn clear_history(db: State<'_, Db>) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    crate::db::clear_history(&conn)
 }

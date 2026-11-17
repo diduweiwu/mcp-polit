@@ -87,7 +87,7 @@ export function ResultPane() {
           {results.length === 0 && !running ? (
             <EmptyState
               icon={<Braces size={36} strokeWidth={1.2} />}
-              text="填写参数后点击「运行」，调用结果会显示在这里。本会话的历史结果仅保留在内存中，不会写入磁盘。"
+              text="填写参数后点击「运行」，调用结果会显示在这里。历史调用记录已写入本机数据库，重启后仍可查看。"
             />
           ) : (
             results.map((r) => (

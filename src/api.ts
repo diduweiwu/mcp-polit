@@ -60,6 +60,10 @@ export const moveNode = (id: number, newParentId: number | null) =>
 /** 删除节点（级联） */
 export const deleteNode = (id: number) => invoke<void>("delete_node", { id });
 
+/** 复制节点：目录连同整棵子树（含 Server 配置）一起复制，副本排在同级末尾 */
+export const duplicateNode = (id: number, name: string) =>
+  invoke<TreeNode>("duplicate_node", { id, name });
+
 /* ---------- Server 配置 ---------- */
 
 /** 读取 Server 配置 */
@@ -69,6 +73,10 @@ export const getServerConfig = (nodeId: number) =>
 /** 保存 Server 配置 */
 export const saveServerConfig = (config: ServerConfig) =>
   invoke<void>("save_server_config", { config });
+
+/** 测试连通性：用表单中的未保存配置握手 + 拉取工具列表，成功返回工具列表 */
+export const testServerConfig = (config: ServerConfig) =>
+  invoke<ToolInfo[]>("test_server_config", { config });
 
 /* ---------- 连接与调用 ---------- */
 
@@ -115,6 +123,31 @@ export const getSettings = () =>
 /** 写入一个设置项 */
 export const saveSetting = (key: string, value: string) =>
   invoke<void>("save_setting", { key, value });
+
+/* ---------- 调用历史 ---------- */
+
+/** 后端落盘的历史记录行（serde flatten 展开 CallResult 字段后的形态） */
+export interface StoredHistoryRow extends CallResult {
+  /** 记录 ID：后端自增主键 */
+  id: number;
+  /** 被调用 server 的树节点 ID */
+  node_id: number;
+  /** server 别名（冗余存储） */
+  server_name: string;
+  /** 调用时间：完整本地时间串（YYYY-MM-DD HH:MM:SS） */
+  created_at: string;
+}
+
+/** 追加一条调用历史（id / created_at 由后端生成，传 0 和空串即可） */
+export const appendHistory = (record: StoredHistoryRow) =>
+  invoke<void>("append_history", { record });
+
+/** 读取最近的调用历史（新 → 旧） */
+export const listHistory = (limit: number) =>
+  invoke<StoredHistoryRow[]>("list_history", { limit });
+
+/** 清空全部调用历史 */
+export const clearHistory = () => invoke<void>("clear_history");
 
 /* ---------- Git 同步 ---------- */
 

@@ -1,13 +1,14 @@
 /**
  * 第一栏：目录 + MCP Server 树形列表。
  *
- * 支持：目录无限嵌套、右键菜单（新建/重命名/删除/编辑配置）、拖拽移动、连接状态点。
+ * 支持：目录无限嵌套、右键菜单（新建/复制/重命名/删除/编辑配置/断开）、拖拽移动、连接状态点。
  */
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Check,
   ChevronDown,
+  Copy,
   Download,
   Folder,
   FolderOpen,
@@ -18,6 +19,7 @@ import {
   PanelLeftClose,
   Pencil,
   Plug,
+  PlugZap,
   Server,
   Settings2,
   Terminal,
@@ -40,7 +42,7 @@ interface CtxMenu {
 
 /** 树形栏 */
 export function TreePane() {
-  const { nodes, activeProjectId } = useAppStore();
+  const { nodes, activeProjectId, connStates } = useAppStore();
   const tree = useMemo(() => buildTree(nodes), [nodes]);
   /** 未选择项目：全部增删入口禁用（按钮置灰、右键不弹菜单） */
   const noProject = activeProjectId == null;
@@ -189,6 +191,14 @@ export function TreePane() {
             {ctx.node?.node_type === "server" && (
               <>
                 <CtxItem icon={<Plug size={13} />} label="连接" onClick={runMenu(() => void useAppStore.getState().connect(ctx.node!.id))} />
+                {(() => {
+                  // 已在连接中/已连接：提供快捷断开入口（连接失败状态无会话可断，不显示）
+                  const st = connStates[ctx.node!.id];
+                  if (st !== "connected" && st !== "connecting") return null;
+                  return (
+                    <CtxItem icon={<PlugZap size={13} />} label="断开连接" onClick={runMenu(() => void useAppStore.getState().disconnect(ctx.node!.id))} />
+                  );
+                })()}
                 <CtxItem icon={<Settings2 size={13} />} label="编辑配置" onClick={runMenu(() => {
                   void useAppStore.getState().selectNode(ctx.node!.id, { autoConnect: false });
                   setFormParent(null);
@@ -199,6 +209,7 @@ export function TreePane() {
             )}
             {ctx.node && (
               <>
+                <CtxItem icon={<Copy size={13} />} label="复制" onClick={runMenu(() => void useAppStore.getState().duplicateNode(ctx.node!.id))} />
                 <CtxItem icon={<Pencil size={13} />} label="重命名" onClick={runMenu(() => {
                   // 闭包内 TS 无法保留 ctx.node 的非空收窄，此处断言安全（位于 ctx.node && 分支内）
                   const target = ctx.node!;

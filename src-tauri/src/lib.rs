@@ -5,6 +5,7 @@
 
 mod commands;
 mod db;
+mod diag;
 mod error;
 mod mcp_manager;
 mod models;
@@ -22,7 +23,7 @@ fn on_exit(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(mcp_manager::McpManager::new())
         // 在线更新：走 GitHub Release 的 latest.json（签名校验），安装后由 process 插件重启
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -38,6 +39,11 @@ pub fn run() {
             let db_path = data_dir.join("mcpilot.db");
             let conn = db::init(&db_path)?;
             app.manage(Db(std::sync::Mutex::new(conn)));
+
+            // 诊断留痕：panic 闪退无系统崩溃报告，写入本地 crash.log 供事后定位
+            let crash_log = data_dir.join("crash.log");
+            diag::install_panic_logger(crash_log.clone());
+            app.manage(diag::DiagLog(crash_log));
 
             // 主窗口手动构建
             let builder = tauri::WebviewWindowBuilder::new(
@@ -92,12 +98,14 @@ pub fn run() {
             commands::rename_node,
             commands::move_node,
             commands::delete_node,
+            commands::duplicate_node,
             // Server 配置
             commands::get_server_config,
             commands::save_server_config,
             // 连接与调用
             commands::connect_server,
             commands::disconnect_server,
+            commands::test_server_config,
             commands::refresh_tools,
             commands::call_tool,
             commands::get_conn_state,
@@ -105,6 +113,10 @@ pub fn run() {
             // 应用设置
             commands::get_settings,
             commands::save_setting,
+            // 调用历史
+            commands::append_history,
+            commands::list_history,
+            commands::clear_history,
             // Git 同步
             commands::sync_export,
             commands::sync_import,
@@ -113,6 +125,18 @@ pub fn run() {
             commands::project_branches,
             commands::project_checkout,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("MCPilot 启动失败");
+    // 事件循环：退出事件留痕——与 PANIC 日志配合区分「闪退（panic）」与「被正常退出路径带走」
+    app.run(|app_handle, event| match event {
+        tauri::RunEvent::ExitRequested { code, .. } => {
+            let path = app_handle.state::<diag::DiagLog>().0.clone();
+            diag::append_diag(&path, "EXIT", &format!("收到退出请求 code={code:?}"));
+        }
+        tauri::RunEvent::Exit => {
+            let path = app_handle.state::<diag::DiagLog>().0.clone();
+            diag::append_diag(&path, "EXIT", "进程退出");
+        }
+        _ => {}
+    });
 }

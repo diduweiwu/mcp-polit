@@ -61,7 +61,7 @@ interface AppState {
   /* 日志（结果面板底部展示；最多保留 200 条） */
   logs: LogEntry[];
 
-  /* 调用历史（全局，跨工具/项目；最多保留 200 条，仅内存） */
+  /* 调用历史（全局，跨工具/项目；最多保留 200 条，落盘 SQLite 跨会话保留） */
   history: HistoryEntry[];
 
   /* 应用设置缓存（键值对） */
@@ -96,6 +96,8 @@ interface AppState {
   createNode: (parentId: number | null, type: NodeType, name: string) => Promise<void>;
   renameNode: (id: number, name: string) => Promise<void>;
   deleteNode: (id: number) => Promise<void>;
+  /** 复制节点：目录含整棵子树与各 Server 配置；副本名称自动追加随机后缀 */
+  duplicateNode: (id: number) => Promise<void>;
   moveNode: (id: number, newParentId: number | null) => Promise<void>;
   /** 展开目录（含沿路祖先） */
   expandNode: (id: number) => void;
@@ -219,6 +221,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (active != null) {
       await get().setActiveProject(active);
     }
+    // 3. 调用历史：从 SQLite 恢复跨会话记录（新 → 旧，条数与内存上限一致）
+    try {
+      const rows = await api.listHistory(200);
+      const history = rows.map((r, i) => ({
+        // 落盘无 seq，按新→旧分配唯一值（历史列表以 seq 作 React key）
+        seq: rows.length - i,
+        tool_name: r.tool_name,
+        is_error: r.is_error,
+        content: r.content,
+        structured_content: r.structured_content,
+        duration_ms: r.duration_ms,
+        arguments: r.arguments,
+        node_id: r.node_id,
+        server_name: r.server_name,
+        // 完整时间串截取 HH:MM:SS 段
+        timestamp: r.created_at.length >= 19 ? r.created_at.slice(11, 19) : r.created_at,
+      }));
+      set({ history });
+    } catch {
+      /* 历史读取失败不影响启动 */
+    }
   },
 
   async setThemeMode(mode) {
@@ -326,6 +349,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   async moveNode(id, newParentId) {
     await api.moveNode(id, newParentId);
+    await get().reloadNodes();
+  },
+
+  async duplicateNode(id) {
+    const src = get().nodes.find((n) => n.id === id);
+    if (!src) return;
+    // 副本名称 = 原名 + 4 位随机 base36 后缀，避免同级重名
+    const suffix = Math.random().toString(36).slice(2, 6);
+    await api.duplicateNode(id, `${src.name}-${suffix}`);
     await get().reloadNodes();
   },
 
@@ -444,7 +476,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       .join(":");
     const server_name = get().nodes.find((n) => n.id === nodeId)?.name ?? "";
 
-    /** 结果入列：当前工具结果面板 + 全局历史 */
+    /** 结果入列：当前工具结果面板 + 全局历史（含落盘） */
     const commit = (result: CallResult) => {
       const entry: HistoryEntry = {
         ...result,
@@ -457,6 +489,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         results: [result, ...s.results].slice(0, MAX_RESULTS),
         history: [entry, ...s.history].slice(0, 200),
       }));
+      // 落盘留痕：失败静默，不影响调用主流程展示
+      void api
+        .appendHistory({
+          id: 0,
+          node_id: nodeId,
+          server_name,
+          created_at: "",
+          seq: result.seq,
+          tool_name: result.tool_name,
+          is_error: result.is_error,
+          content: result.content,
+          structured_content: result.structured_content,
+          duration_ms: result.duration_ms,
+          arguments: result.arguments,
+        })
+        .catch(() => {});
     };
 
     try {
@@ -518,6 +566,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearHistory() {
     set({ history: [] });
+    void api.clearHistory().catch(() => {});
   },
 
   /** 记住工具参数（写入内存；300ms 防抖持久化到 settings 表） */

@@ -12,7 +12,9 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 
 use crate::error::{AppError, CmdResult};
-use crate::models::{NodeType, Project, ServerConfig, TreeNode, TransportType};
+use crate::models::{
+    CallResult, HistoryRecord, NodeType, Project, ServerConfig, TreeNode, TransportType,
+};
 
 /// 数据库访问句柄：内部包一把互斥锁，保证多线程串行访问 SQLite。
 pub struct Db(pub Mutex<Connection>);
@@ -113,6 +115,30 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
             key TEXT PRIMARY KEY,
             -- 设置值：字符串（JSON/纯文本均可，由调用方解释）
             value TEXT NOT NULL
+        );
+
+        -- 工具调用历史表：跨会话保留的调用记录（全局，不限项目）
+        CREATE TABLE IF NOT EXISTS call_history (
+            -- 记录 ID：自增主键
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            -- 被调用 Server 的节点 ID：仅作展示关联，不设外键（节点删除后历史仍保留）
+            node_id INTEGER NOT NULL,
+            -- Server 别名：冗余存储，节点删除后仍可读
+            server_name TEXT NOT NULL DEFAULT '',
+            -- 工具名称
+            tool_name TEXT NOT NULL,
+            -- 调用是否出错。枚举：0-正常；1-出错
+            is_error INTEGER NOT NULL DEFAULT 0,
+            -- MCP content 数组：JSON 字符串，原样透传
+            content TEXT NOT NULL DEFAULT '[]',
+            -- MCP 结构化结果：JSON 字符串，NULL 表示无
+            structured_content TEXT,
+            -- 入参快照：JSON 字符串
+            arguments TEXT NOT NULL DEFAULT '',
+            -- 调用耗时：毫秒
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            -- 调用时间：本地时间
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
         );
 
         COMMIT;
@@ -342,6 +368,82 @@ pub fn rename_node(conn: &Connection, id: i64, name: &str) -> CmdResult<TreeNode
     get_node(conn, id)
 }
 
+/// 复制节点：目录连同整棵子树（含各 Server 的连接配置）一起复制，副本排在同级末尾。
+///
+/// # 参数
+///
+/// - `node_id`: 待复制的源节点 ID。
+/// - `new_name`: 副本根节点名称（前端生成，如「原目录-a3f2」）。
+///
+/// # 返回
+///
+/// 副本根节点。
+///
+/// # 异常
+///
+/// 源节点不存在或任一行写入失败时返回 [`AppError`]；复制全程在事务内进行，
+/// 任一步失败整体回滚，不会留下半棵子树。
+pub fn duplicate_node(conn: &Connection, node_id: i64, new_name: &str) -> CmdResult<TreeNode> {
+    let src = get_node(conn, node_id)?;
+    let tx = conn.unchecked_transaction()?;
+    let new_id = copy_subtree(&tx, src.id, src.parent_id, Some(new_name))?;
+    tx.commit()?;
+    get_node(conn, new_id)
+}
+
+/// 递归复制单个子树，返回新节点 ID。
+///
+/// - `new_parent_id`: 副本挂载的父节点（根副本=沿用源父节点，子孙副本=其父的副本 ID）。
+/// - `new_name`: 仅用于副本根节点（`None` 表示沿用原名）。
+fn copy_subtree(
+    conn: &Connection,
+    src_id: i64,
+    new_parent_id: Option<i64>,
+    new_name: Option<&str>,
+) -> CmdResult<i64> {
+    let src = get_node(conn, src_id)?;
+    let next_sort = next_sort_order(conn, new_parent_id)?;
+    let name = new_name.unwrap_or(&src.name);
+    conn.execute(
+        "INSERT INTO tree_nodes (project_id, parent_id, node_type, name, sort_order)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            src.project_id,
+            new_parent_id,
+            node_type_to_str(src.node_type),
+            name,
+            next_sort
+        ],
+    )?;
+    let new_id = conn.last_insert_rowid();
+
+    // server 节点：连带复制连接配置（无配置行则跳过）
+    if src.node_type == NodeType::Server {
+        conn.execute(
+            "INSERT INTO server_configs
+                    (node_id, transport_type, command, args, env, working_dir, url, headers,
+                     timeout_ms, enabled, note, envs, active_env)
+             SELECT ?1, transport_type, command, args, env, working_dir, url, headers,
+                    timeout_ms, enabled, note, envs, active_env
+             FROM server_configs WHERE node_id = ?2",
+            rusqlite::params![new_id, src_id],
+        )?;
+    }
+
+    // 子节点逐个复制（保持同级排序，父指向新副本）
+    let mut stmt = conn.prepare(
+        "SELECT id FROM tree_nodes WHERE parent_id = ?1 ORDER BY sort_order ASC, id ASC",
+    )?;
+    let child_ids = stmt
+        .query_map(rusqlite::params![src_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for child_id in child_ids {
+        copy_subtree(conn, child_id, Some(new_id), None)?;
+    }
+    Ok(new_id)
+}
+
 /// 移动节点到新的父目录（支持拖拽）。
 ///
 /// 校验：目标父节点必须是目录；不能移动到自己或自己的后代里（防环）。
@@ -425,7 +527,7 @@ pub fn get_server_config(conn: &Connection, node_id: i64) -> CmdResult<ServerCon
         Ok(cfg) => Ok(cfg),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(ServerConfig {
             node_id,
-            transport_type: TransportType::Stdio,
+            transport_type: TransportType::StreamableHttp,
             command: None,
             args: None,
             env: None,
@@ -538,6 +640,108 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> CmdResult<()> {
     Ok(())
 }
 
+/* ---------- 调用历史 ---------- */
+
+/// 落盘保留的最大历史条数：比前端展示上限（200）多留余量。
+const HISTORY_KEEP: i64 = 500;
+
+/// 追加一条调用历史并裁剪总量（仅保留最新 [`HISTORY_KEEP`] 条）。
+///
+/// `record.id` 与 `record.created_at` 由后端生成，传入值会被忽略。
+///
+/// # 异常
+///
+/// content / structured_content 序列化失败，或 SQLite 写入失败时返回 [`AppError`]。
+pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<()> {
+    let content = serde_json::to_string(&record.result.content)?;
+    let structured = match &record.result.structured_content {
+        Some(v) => Some(serde_json::to_string(v)?),
+        None => None,
+    };
+    conn.execute(
+        "INSERT INTO call_history
+                (node_id, server_name, tool_name, is_error, content, structured_content,
+                 arguments, duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            record.node_id,
+            record.server_name,
+            record.result.tool_name,
+            record.result.is_error,
+            content,
+            structured,
+            record.result.arguments,
+            record.result.duration_ms
+        ],
+    )?;
+    // 总量裁剪：防止表无限膨胀（大响应场景尤甚）
+    conn.execute(
+        "DELETE FROM call_history WHERE id NOT IN
+                (SELECT id FROM call_history ORDER BY id DESC LIMIT ?1)",
+        rusqlite::params![HISTORY_KEEP],
+    )?;
+    Ok(())
+}
+
+/// 按时间倒序读取最近的调用历史。
+///
+/// # 参数
+///
+/// - `limit`: 最多返回条数（前端与内存上限一致，传 200）。
+pub fn list_history(conn: &Connection, limit: i64) -> CmdResult<Vec<HistoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, node_id, server_name, tool_name, is_error, content,
+                structured_content, arguments, duration_ms, created_at
+         FROM call_history ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![limit], map_history_row)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 清空全部调用历史。
+pub fn clear_history(conn: &Connection) -> CmdResult<()> {
+    conn.execute("DELETE FROM call_history", [])?;
+    Ok(())
+}
+
+/// 历史表行映射。SELECT 列序：
+/// `id, node_id, server_name, tool_name, is_error, content, structured_content,
+///  arguments, duration_ms, created_at`。
+fn map_history_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryRecord> {
+    let content_raw: String = row.get(5)?;
+    let structured_raw: Option<String> = row.get(6)?;
+    let content: serde_json::Value = serde_json::from_str(&content_raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let structured_content = structured_raw
+        .map(|s| {
+            serde_json::from_str::<serde_json::Value>(&s).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+            })
+        })
+        .transpose()?;
+    Ok(HistoryRecord {
+        id: row.get(0)?,
+        node_id: row.get(1)?,
+        server_name: row.get(2)?,
+        created_at: row.get(9)?,
+        result: CallResult {
+            // seq 为前端会话内序号，落盘无意义，读取时置 0
+            seq: 0,
+            tool_name: row.get(3)?,
+            is_error: row.get(4)?,
+            content,
+            structured_content,
+            duration_ms: row.get(8)?,
+            arguments: row.get(7)?,
+        },
+    })
+}
+
 /* ---------- 测试 ---------- */
 
 #[cfg(test)]
@@ -600,6 +804,64 @@ mod tests {
         assert!(move_node(&conn, a.id, Some(b.id)).is_err());
         // b 移到根层应成功
         move_node(&conn, b.id, None).unwrap();
+    }
+
+    /// 复制目录：整棵子树与各 Server 配置一起复制，层级与配置内容保持一致。
+    #[test]
+    fn 复制目录连同子树和配置() {
+        let conn = mem_db();
+        let p = create_project(&conn, "p", None).unwrap();
+        // 结构：目录A / 子目录A1 / 服务器S（配置含 envs）
+        let a = create_node(&conn, p.id, None, NodeType::Folder, "目录A").unwrap();
+        let sub = create_node(&conn, p.id, Some(a.id), NodeType::Folder, "子目录A1").unwrap();
+        let server = create_node(&conn, p.id, Some(sub.id), NodeType::Server, "S").unwrap();
+        let cfg = ServerConfig {
+            node_id: server.id,
+            transport_type: TransportType::Stdio,
+            command: Some("npx".into()),
+            args: Some(r#"["-y","demo"]"#.into()),
+            env: Some(r#"{"DEBUG":"1"}"#.into()),
+            working_dir: None,
+            url: None,
+            headers: None,
+            timeout_ms: 15_000,
+            enabled: true,
+            note: None,
+            envs: Some(r#"{"dev":{"env":{"TOKEN":"t"},"headers":{}}}"#.into()),
+            active_env: Some("dev".into()),
+        };
+        upsert_server_config(&conn, &cfg).unwrap();
+
+        // 复制目录A
+        let copy = duplicate_node(&conn, a.id, "目录A-复制").unwrap();
+        assert_eq!(copy.name, "目录A-复制");
+        assert_eq!(copy.parent_id, None); // 根副本沿用原父层（根层）
+
+        // 节点数：3 源 + 3 副本
+        let nodes = list_nodes(&conn, p.id).unwrap();
+        assert_eq!(nodes.len(), 6);
+
+        // 副本层级：复制出的子目录父=副本根；复制出的 server 父=复制出的子目录
+        let copy_sub = nodes
+            .iter()
+            .find(|n| n.parent_id == Some(copy.id))
+            .expect("副本根下应有子目录");
+        assert_eq!(copy_sub.name, "子目录A1");
+        let copy_server = nodes
+            .iter()
+            .find(|n| n.parent_id == Some(copy_sub.id))
+            .expect("副本子目录下应有 server");
+        assert_ne!(copy_server.id, server.id);
+
+        // 副本配置：内容与源一致（含 envs / active_env），但挂在新节点上
+        let got = get_server_config(&conn, copy_server.id).unwrap();
+        assert_eq!(got.command.as_deref(), Some("npx"));
+        assert_eq!(got.timeout_ms, 15_000);
+        assert_eq!(got.envs.as_deref(), cfg.envs.as_deref());
+        assert_eq!(got.active_env.as_deref(), Some("dev"));
+
+        // 源节点不受影响
+        assert_eq!(get_server_config(&conn, server.id).unwrap().command.as_deref(), Some("npx"));
     }
 
     #[test]
