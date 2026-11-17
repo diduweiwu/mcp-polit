@@ -1,9 +1,11 @@
 # MCPilot 多平台打包工作流
 #
 # 产物与支持的最低系统版本：
-# - macOS (universal：Intel + Apple Silicon 合包)：macOS 10.15+（Apple Silicon 机型实际要求 11+）
+# - macOS：aarch64 / x86_64 / universal 三份 dmg（分架构更小，universal 双击即用），
+#   在线更新包走分架构（darwin-aarch64 / darwin-x86_64）；macOS 10.15+（Apple Silicon 实际 11+）
 # - Windows (x64，NSIS 安装包 + MSI)：Windows 10+（WebView2 运行时要求；Tauri 2.12 已放弃 Win7/8）
 # - Linux (x64，deb/rpm/AppImage)：glibc 2.35+（Ubuntu 22.04+ / Debian 12+ / Fedora 36+）
+# 另附各平台裸二进制（bare-bin，macOS 按 target 拆分）。
 #
 # 触发：推送 v* 标签（同时创建 GitHub Release 并附全部安装包），或手动 workflow_dispatch（仅上传构建产物）。
 
@@ -24,18 +26,36 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS：universal 合包（一次产出同时支持 Intel 与 Apple Silicon）
+          # macOS Apple Silicon 独立包（dmg + 在线更新包 darwin-aarch64）
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            rust_targets: aarch64-apple-darwin
+            bundles: "app,dmg,updater"
+            updater_json: true
+          # macOS Intel 独立包（dmg + 在线更新包 darwin-x86_64）
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            rust_targets: x86_64-apple-darwin
+            bundles: "app,dmg,updater"
+            updater_json: true
+          # macOS universal 合包（一个 dmg 通吃两种架构；在线更新用分架构包，universal 不参与）
           - os: macos-latest
             target: universal-apple-darwin
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            bundles: "dmg"
+            updater_json: false
           # Windows x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rust_targets: x86_64-pc-windows-msvc
+            bundles: "all"
+            updater_json: true
           # Linux x64：用 22.04 构建（glibc 2.35），让产物覆盖尽量多的发行版
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             rust_targets: x86_64-unknown-linux-gnu
+            bundles: "all"
+            updater_json: true
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -96,32 +116,21 @@ jobs:
           releaseDraft: false
           prerelease: false
           # tag 触发时生成 latest.json（含各平台更新包地址与签名）并上传，
-          # 应用内「检查更新」走 Releases/latest/download/latest.json
-          includeUpdaterJson: ${{ startsWith(github.ref, 'refs/tags/') }}
-          args: --target ${{ matrix.target }}
+          # 应用内「检查更新」走 Releases/latest/download/latest.json；
+          # universal job 不产更新包，不参与 latest.json（在线更新用分架构包）
+          includeUpdaterJson: ${{ startsWith(github.ref, 'refs/tags/') && matrix.updater_json }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
-      # tauri-action 只上传安装包，裸可执行文件单独整理上传：
-      # Linux/Windows 各一份；macOS 从 universal 构建中拆出 aarch64 / x86_64 两份分架构二进制
+      # tauri-action 只上传安装包，裸可执行文件单独整理上传；按 matrix.target 精确取本 job 的产物
       - name: 整理裸二进制（分架构可执行文件）
         shell: bash
         run: |
           mkdir -p bare-bin
-          case "${{ runner.os }}" in
-            macOS)
-              for t in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
-                f="src-tauri/target/$t/release/mcpilot"
-                if [ -f "$f" ]; then cp "$f" "bare-bin/MCPilot-$t"; fi
-              done
-              ;;
-            Windows)
-              f="src-tauri/target/x86_64-pc-windows-msvc/release/mcpilot.exe"
-              if [ -f "$f" ]; then cp "$f" "bare-bin/MCPilot-x86_64-pc-windows-msvc.exe"; fi
-              ;;
-            Linux)
-              f="src-tauri/target/x86_64-unknown-linux-gnu/release/mcpilot"
-              if [ -f "$f" ]; then cp "$f" "bare-bin/MCPilot-x86_64-unknown-linux-gnu"; fi
-              ;;
-          esac
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "src-tauri/target/${{ matrix.target }}/release/mcpilot.exe" "bare-bin/MCPilot-${{ matrix.target }}.exe"
+          else
+            cp "src-tauri/target/${{ matrix.target }}/release/mcpilot" "bare-bin/MCPilot-${{ matrix.target }}"
+          fi
           ls -l bare-bin
 
       # tag 触发：裸二进制附加到 Release（gh 已随 runner 预装，checkout 后可识别当前仓库）
