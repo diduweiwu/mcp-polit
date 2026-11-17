@@ -116,7 +116,7 @@ replace_version src-tauri/tauri.conf.json "s/\"version\": \"${CURRENT_RE}\"/\"ve
 # Cargo.toml 的 [package] version（文件中唯一）
 replace_version src-tauri/Cargo.toml "s/^version = \"${CURRENT_RE}\"/version = \"${NEW}\"/"
 # Cargo.lock 的 mcpilot 块：定位 name = "mcpilot" 的下一行
-LOCK_LINE="$(grep -n 'name = "mcpilot"' src-tauri/Cargo.lock | head -1 | cut -d: -f1)"
+LOCK_LINE="$(( $(grep -n 'name = "mcpilot"' src-tauri/Cargo.lock | head -1 | cut -d: -f1) + 1 ))  # version 行 = name 行的下一行"
 if [ -z "$LOCK_LINE" ]; then
   echo "!! Cargo.lock 中找不到 mcpilot 块，请先跑一次 cargo check 生成"
   exit 1
