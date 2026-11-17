@@ -52,20 +52,21 @@ const BASE_URL = `https://github.com/${args.repo}/releases/download/${args.tag}`
 /**
  * 平台条目映射。
  *
- * - key：Tauri updater 的平台键。插件按「无后缀」与「安装器后缀」两种键查找
- *   （macOS 安装器形态是 -app，如报错信息中的 fallback 顺序
- *   ["darwin-aarch64-app", "darwin-aarch64"]），两键内容一致。
+ * - key：Tauri updater 的平台键。插件按「安装器后缀键 → 无后缀键」顺序查找
+ *   （如报错信息中的 fallback 顺序 ["darwin-aarch64-app", "darwin-aarch64"]），
+ *   故同一份产物挂双键兜底。
  * - artifact：更新包文件名（Release asset 名）。
  * - signature：对应的 .sig 签名文件名（GitHub Actions 上传的 minisign 签名）。
  *
- * macOS 更新包不带版本号（{productName}_{arch}.app.tar.gz），其余平台带
- * （tauri bundle 默认命名）。
+ * macOS：CI 只构建 universal 单包，darwin 两种架构（含 -app 后缀键）都指向
+ * 同一份 MCPilot_universal.app.tar.gz；不带版本号（{productName}_{arch}.app.tar.gz
+ * 命名中 universal 即 arch 段），其余平台带版本号（tauri bundle 默认命名）。
+ * Windows：只发 NSIS——历史上用 MSI 安装的用户更新时会 fallback 到无后缀键
+ * 拿到 NSIS 安装包，覆盖安装可用，仅卸载列表可能残留旧 MSI 记录，可接受。
  */
 const ARTIFACTS = [
-  { keys: ["darwin-aarch64-app", "darwin-aarch64"], artifact: `MCPilot_aarch64.app.tar.gz`, signature: `MCPilot_aarch64.app.tar.gz.sig` },
-  { keys: ["darwin-x86_64-app", "darwin-x86_64"], artifact: `MCPilot_x64.app.tar.gz`, signature: `MCPilot_x64.app.tar.gz.sig` },
-  { keys: ["windows-x86_64-msi", "windows-x86_64"], artifact: `MCPilot_${VERSION}_x64_en-US.msi`, signature: `MCPilot_${VERSION}_x64_en-US.msi.sig` },
-  { keys: ["windows-x86_64-nsis"], artifact: `MCPilot_${VERSION}_x64-setup.exe`, signature: `MCPilot_${VERSION}_x64-setup.exe.sig` },
+  { keys: ["darwin-aarch64-app", "darwin-aarch64", "darwin-x86_64-app", "darwin-x86_64"], artifact: `MCPilot_universal.app.tar.gz`, signature: `MCPilot_universal.app.tar.gz.sig` },
+  { keys: ["windows-x86_64-nsis", "windows-x86_64"], artifact: `MCPilot_${VERSION}_x64-setup.exe`, signature: `MCPilot_${VERSION}_x64-setup.exe.sig` },
   { keys: ["linux-x86_64-appimage", "linux-x86_64"], artifact: `MCPilot_${VERSION}_amd64.AppImage`, signature: `MCPilot_${VERSION}_amd64.AppImage.sig` },
   { keys: ["linux-x86_64-deb"], artifact: `MCPilot_${VERSION}_amd64.deb`, signature: `MCPilot_${VERSION}_amd64.deb.sig` },
   { keys: ["linux-x86_64-rpm"], artifact: `MCPilot-${VERSION}-1.x86_64.rpm`, signature: `MCPilot-${VERSION}-1.x86_64.rpm.sig` },

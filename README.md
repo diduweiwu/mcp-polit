@@ -87,7 +87,7 @@ pnpm app:build    # 只打包不运行
 | 平台 | 产物 | 最低系统版本 |
 |---|---|---|
 | macOS | `.app` / `.dmg`（universal：Intel + Apple Silicon 合包） | macOS 10.15+（Apple Silicon 机型实际要求 11+） |
-| Windows | NSIS 安装包 / MSI（x64） | Windows 10+（WebView2 运行时要求） |
+| Windows | NSIS 安装包（x64） | Windows 10+（WebView2 运行时要求） |
 | Linux | `.deb` / `.rpm` / `.AppImage`（x64） | glibc 2.35+（Ubuntu 22.04+ / Debian 12+ / Fedora 36+） |
 
 macOS 图标需保留官方网格边距（主体 824 居中）：`tauri icon` 后再执行 `node scripts/gen-macos-icns.mjs <1024源图>` 重新覆盖 `icon.icns`（`tauri icon` 会裁掉透明边距导致 Dock 图标偏大）。

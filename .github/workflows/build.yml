@@ -1,11 +1,11 @@
 # MCPilot 多平台打包工作流
 #
 # 产物与支持的最低系统版本：
-# - macOS：aarch64 / x86_64 / universal 三份 dmg（分架构更小，universal 双击即用），
-#   在线更新包走分架构（darwin-aarch64 / darwin-x86_64）；macOS 10.15+（Apple Silicon 实际 11+）
-# - Windows (x64，NSIS 安装包 + MSI)：Windows 10+（WebView2 运行时要求；Tauri 2.12 已放弃 Win7/8）
+# - macOS：universal 单包（dmg + 在线更新包，Intel + Apple Silicon 合一，双击即用、
+#   更新免选架构）；macOS 10.15+（Apple Silicon 实际 11+）
+# - Windows (x64，NSIS 安装包)：Windows 10+（WebView2 运行时要求；Tauri 2.12 已放弃 Win7/8）
 # - Linux (x64，deb/rpm/AppImage)：glibc 2.35+（Ubuntu 22.04+ / Debian 12+ / Fedora 36+）
-# 另附各平台裸二进制（bare-bin，macOS 按 target 拆分）。
+# 另附各平台裸二进制（bare-bin）。
 #
 # 触发：推送 v* 标签（同时创建 GitHub Release 并附全部安装包），或手动 workflow_dispatch（仅上传构建产物）。
 
@@ -26,26 +26,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS Apple Silicon 独立包（dmg + 在线更新包 darwin-aarch64）
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            rust_targets: aarch64-apple-darwin
-            bundles: "app,dmg,updater"
-          # macOS Intel 独立包（dmg + 在线更新包 darwin-x86_64）
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            rust_targets: x86_64-apple-darwin
-            bundles: "app,dmg,updater"
-          # macOS universal 合包（一个 dmg 通吃两种架构；在线更新用分架构包，universal 不参与）
+          # macOS universal 合包：一个 dmg + 一份在线更新包通吃两种架构
+          # （latest.json 的 darwin-aarch64 / darwin-x86_64 都指向 universal 更新包，
+          # 代价是更新包体积为双架构合计；换来 CI 只编一轮、下载免选架构）
           - os: macos-latest
             target: universal-apple-darwin
             rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            bundles: "dmg"
-          # Windows x64（--bundles 无 "all" 合法值，须显式列出，v0.1.3 实证）
+            bundles: "app,dmg,updater"
+          # Windows x64（--bundles 无 "all" 合法值，须显式列出，v0.1.3 实证）；
+          # 只留 NSIS 普通安装器——MSI 仅企业批量部署场景，已收敛掉
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rust_targets: x86_64-pc-windows-msvc
-            bundles: "msi,nsis,updater"
+            bundles: "nsis,updater"
           # Linux x64：用 22.04 构建（glibc 2.35），让产物覆盖尽量多的发行版
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
