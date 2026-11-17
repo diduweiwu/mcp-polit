@@ -13,6 +13,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# cargo 不一定在非交互 shell 的 PATH 里（~/.zshrc 的 PATH 配置只对交互 shell 生效）
+[ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
+
 MODE="release"
 RUN_AFTER_BUILD=1
 for arg in "$@"; do
@@ -22,6 +25,14 @@ for arg in "$@"; do
     *) echo "未知参数：$arg（支持 --dev / --build-only）"; exit 1 ;;
   esac
 done
+
+# 在线更新签名（tauri.conf.json 开了 createUpdaterArtifacts，release 打包必需）：
+# 本地用 tauri signer generate 生成的私钥文件；CI 由 GitHub Secrets 提供同名变量。
+# 私钥无密码，PASSWORD 显式置空，避免误读到环境里残留的值。
+if [ -f "$HOME/.tauri/mcpilot.key" ]; then
+  export TAURI_SIGNING_PRIVATE_KEY="$HOME/.tauri/mcpilot.key"
+  export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+fi
 
 # dev 模式：直接交给 tauri dev（Ctrl+C 退出）
 if [ "$MODE" = "dev" ]; then
