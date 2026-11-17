@@ -44,6 +44,10 @@ function handleDragMouseDown(e: React.MouseEvent<HTMLElement>) {
   if (e.button !== 0) return;
   const target = e.target as HTMLElement;
   if (target.closest("button, input, select, textarea, [role='menu']")) return;
+  /* 顶栏里挂载的弹窗（Modal）portal 到 body：React 合成事件仍会沿组件树
+     冒泡到 header，但 DOM 上弹窗不在 header 内——按下属正常文本选择等
+     交互，必须排除，否则弹窗里拖选文本会误拖窗口 */
+  if (!(e.currentTarget as HTMLElement).contains(target)) return;
   void getCurrentWindow().startDragging();
 }
 

@@ -101,7 +101,8 @@ export function Modal({ open, title, onClose, children, footer, width = 520 }: M
             <X size={16} />
           </button>
         </div>
-        <div className="max-h-[62vh] overflow-y-auto px-4 py-3">{children}</div>
+        {/* selectable：弹窗正文（说明文字等）允许拖选复制；输入框本就可选中 */}
+        <div className="selectable max-h-[62vh] overflow-y-auto px-4 py-3">{children}</div>
         {footer && (
           <div className="flex justify-end gap-2 border-t border-line bg-panel2 px-4 py-3">
             {footer}
