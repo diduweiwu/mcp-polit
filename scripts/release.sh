@@ -41,7 +41,7 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [ "$BRANCH" != "master" ]; then
-  echo "!! 当前分支是 $BRANCH，发版请在 master 上执行"
+  echo "!! 当前分支不是 master，发版请在 master 上执行"
   exit 1
 fi
 
@@ -82,12 +82,11 @@ sed_inplace() {
   if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi
 }
 
-# 替换单个文件中的版本号（sed_expr 内 $CURRENT_RE / $NEW 由调用方展开）；
-# 替换后校验新版本已存在，失败立即退出（set -e 兜底）
+# 替换单个文件中的版本号；替换后校验新版本已存在，失败立即退出（set -e 兜底）
 replace_version() {
   local file="$1" sed_expr="$2"
   if ! grep -q "$CURRENT_RE" "$file"; then
-    echo "!! $file 中找不到当前版本 $CURRENT，中止（文件内容可能已变化）"
+    echo "!! $file 中找不到当前版本 $CURRENT，中止"
     exit 1
   fi
   sed_inplace "$sed_expr" "$file"
@@ -95,22 +94,22 @@ replace_version() {
     echo "!! $file 替换后未找到新版本 $NEW，请手动检查"
     exit 1
   fi
-  echo "    已更新 $file：$CURRENT -> $NEW"
+  echo "    updated $file: $CURRENT -> $NEW"
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "==> [dry-run] 版本 $CURRENT -> $NEW（$TAG），将要执行的改动："
+  echo "==> [dry-run] version $CURRENT -> $NEW ($TAG)"
   echo "    package.json:              \"version\": \"$NEW\""
   echo "    src-tauri/tauri.conf.json: \"version\": \"$NEW\""
   echo "    src-tauri/Cargo.toml:      version = \"$NEW\""
-  echo "    src-tauri/Cargo.lock:      mcpilot 块 version = \"$NEW\""
-  echo "    git commit: chore: bump 版本 $NEW"
+  echo "    src-tauri/Cargo.lock:      mcpilot block version = \"$NEW\""
+  echo "    git commit: chore: bump version $NEW"
   echo "    git push origin master && git push origin $TAG"
   exit 0
 fi
 
 # ---------- 更新四处版本号 ----------
-echo "==> 版本号 $CURRENT -> $NEW"
+echo "==> version $CURRENT -> $NEW"
 # JSON 顶层版本（两文件中当前版本字符串仅出现一次，普通替换安全）
 replace_version package.json "s/\"version\": \"${CURRENT_RE}\"/\"version\": \"${NEW}\"/"
 replace_version src-tauri/tauri.conf.json "s/\"version\": \"${CURRENT_RE}\"/\"version\": \"${NEW}\"/"
@@ -125,14 +124,13 @@ fi
 replace_version src-tauri/Cargo.lock "${LOCK_LINE}s/version = \"${CURRENT_RE}\"/version = \"${NEW}\"/"
 
 # ---------- 提交、打 tag、推送 ----------
-echo "==> 提交版本号并打标签 $TAG"
+echo "==> commit & tag $TAG"
 git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "chore: bump 版本 $NEW"
+git commit -m "chore: bump version $NEW"
 git tag "$TAG"
 
-echo "==> 推送 master 与 $TAG（触发 GitHub Actions 打包）"
+echo "==> push master + $TAG (triggers GitHub Actions build)"
 git push origin master
 git push origin "$TAG"
 
-echo "==> 发版完成：$TAG 已推送，CI 打包进行中（Actions 页查看进度；"
-echo "    完成后 Release 将附安装包、裸二进制与在线更新用的 latest.json）"
+echo "==> done: $TAG pushed. See Actions page for build progress."
