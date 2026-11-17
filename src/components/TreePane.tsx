@@ -42,6 +42,8 @@ interface CtxMenu {
 export function TreePane() {
   const { nodes, activeProjectId } = useAppStore();
   const tree = useMemo(() => buildTree(nodes), [nodes]);
+  /** 未选择项目：全部增删入口禁用（按钮置灰、右键不弹菜单） */
+  const noProject = activeProjectId == null;
 
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -107,8 +109,8 @@ export function TreePane() {
         closing ? "anim-fade-out" : "anim-pane-in"
       }`}
       onContextMenu={(e) => {
-        // 空白区域右键：根层新建
-        if (e.target === e.currentTarget) openCtx(e, null);
+        // 空白区域右键：根层新建（未选项目时禁用）
+        if (!noProject && e.target === e.currentTarget) openCtx(e, null);
       }}
     >
       {/* 栏头 */}
@@ -118,15 +120,17 @@ export function TreePane() {
         </span>
         <div className="flex items-center gap-0.5">
           <button
-            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
             title="新建根目录"
+            disabled={noProject}
             onClick={() => newFolderUnder(null)}
           >
             <FolderPlus size={14} />
           </button>
           <button
-            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
             title="新建 Server"
+            disabled={noProject}
             onClick={() => newUnder(null)}
           >
             <Server size={14} />
@@ -148,6 +152,7 @@ export function TreePane() {
       <div
         className="flex-1 overflow-y-auto p-1.5"
         onContextMenu={(e) => {
+          if (noProject) return;
           if ((e.target as HTMLElement).closest("[data-tree-item]")) return;
           openCtx(e, null);
         }}

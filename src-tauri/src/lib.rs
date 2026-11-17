@@ -24,6 +24,9 @@ fn on_exit(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .manage(mcp_manager::McpManager::new())
+        // 在线更新：走 GitHub Release 的 latest.json（签名校验），安装后由 process 插件重启
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // 数据库文件位置：系统应用数据目录/<identifier>/mcpilot.db
             let data_dir = app.path().app_data_dir()?;

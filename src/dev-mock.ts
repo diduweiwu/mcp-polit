@@ -167,10 +167,15 @@ if (!("__TAURI_INTERNALS__" in window)) {
     metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
     plugins: {},
     transformCallback: (cb: unknown) => cb,
-    invoke: (cmd: string, args?: Record<string, unknown>) =>
-      cmd === "plugin:event|listen" || cmd === "plugin:event|unlisten"
-        ? Promise.resolve(1)
-        : Promise.resolve(handle(cmd, args)),
+    invoke: (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "plugin:event|listen" || cmd === "plugin:event|unlisten") {
+        return Promise.resolve(1);
+      }
+      // 演示模式的版本与更新检查：显示固定版本、检查更新视为「已是最新」
+      if (cmd === "plugin:app|version") return Promise.resolve("0.1.2");
+      if (cmd === "plugin:updater|check") return Promise.resolve(null);
+      return Promise.resolve(handle(cmd, args));
+    },
   };
 }
 export {};

@@ -84,6 +84,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # macOS：部署目标 10.15（Tauri v2 官方最低；universal 合包时取最小值）
           MACOSX_DEPLOYMENT_TARGET: 10.15
+          # 在线更新包签名私钥（GitHub Secrets 配置；泄露即失效，见 README）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: .
           # tag 推送时创建 Release 并附安装包；手动触发时仅上传构建产物
@@ -92,4 +95,47 @@ jobs:
           releaseBody: "MCPilot 桌面客户端安装包。详见 README 的系统版本要求。"
           releaseDraft: false
           prerelease: false
+          # tag 触发时生成 latest.json（含各平台更新包地址与签名）并上传，
+          # 应用内「检查更新」走 Releases/latest/download/latest.json
+          includeUpdaterJson: ${{ startsWith(github.ref, 'refs/tags/') }}
           args: --target ${{ matrix.target }}
+
+      # tauri-action 只上传安装包，裸可执行文件单独整理上传：
+      # Linux/Windows 各一份；macOS 从 universal 构建中拆出 aarch64 / x86_64 两份分架构二进制
+      - name: 整理裸二进制（分架构可执行文件）
+        shell: bash
+        run: |
+          mkdir -p bare-bin
+          case "${{ runner.os }}" in
+            macOS)
+              for t in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+                f="src-tauri/target/$t/release/mcpilot"
+                if [ -f "$f" ]; then cp "$f" "bare-bin/MCPilot-$t"; fi
+              done
+              ;;
+            Windows)
+              f="src-tauri/target/x86_64-pc-windows-msvc/release/mcpilot.exe"
+              if [ -f "$f" ]; then cp "$f" "bare-bin/MCPilot-x86_64-pc-windows-msvc.exe"; fi
+              ;;
+            Linux)
+              f="src-tauri/target/x86_64-unknown-linux-gnu/release/mcpilot"
+              if [ -f "$f" ]; then cp "$f" "bare-bin/MCPilot-x86_64-unknown-linux-gnu"; fi
+              ;;
+          esac
+          ls -l bare-bin
+
+      # tag 触发：裸二进制附加到 Release（gh 已随 runner 预装，checkout 后可识别当前仓库）
+      - name: 上传裸二进制到 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: gh release upload "${GITHUB_REF_NAME}" bare-bin/* --clobber
+
+      # 手动触发：无 Release，裸二进制作为 workflow Artifacts 供下载
+      - name: 上传裸二进制到 Artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bare-bin-${{ matrix.target }}
+          path: bare-bin/

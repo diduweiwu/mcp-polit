@@ -2,7 +2,7 @@
  * Server 新建 / 编辑弹窗：别名、传输类型（stdio / Streamable HTTP）、
  * 命令/URL、参数、环境变量、自定义请求头（含鉴权）、超时等。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Info, Plus, Trash2, X } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
@@ -337,8 +337,8 @@ interface KVProps {
 
 /** 键值对编辑器：环境变量 / 自定义请求头用，输出 JSON 对象字符串 */
 export function KVEditor({ title, json, onChange, keyPlaceholder, valuePlaceholder }: KVProps) {
-  /** 解析为行数组（非法 JSON 时显示原文于提示） */
-  const rows: Array<[string, string]> = (() => {
+  /** 从 JSON 解析出键值行（非法 JSON 时显示为空，合法性由父级提交校验提示） */
+  const parsed: Array<[string, string]> = useMemo(() => {
     if (!json.trim()) return [];
     try {
       const obj = JSON.parse(json) as Record<string, unknown>;
@@ -346,12 +346,33 @@ export function KVEditor({ title, json, onChange, keyPlaceholder, valuePlacehold
     } catch {
       return [];
     }
-  })();
+  }, [json]);
 
-  /** 行变化时回写 JSON */
-  const writeBack = (next: Array<[string, string]>) => {
-    const filtered = next.filter(([k]) => k.trim() !== "");
-    onChange(filtered.length === 0 ? "" : JSON.stringify(Object.fromEntries(filtered)));
+  /**
+   * 草稿行：承载「已添加但 key 尚未填写」的空行。
+   * 空行不能写回 JSON（写回时必须过滤空 key），而展示行又由 json 派生，
+   * 纯受控会让空行刚加上就消失——故用本地草稿保存，外部 json 变化时丢弃。
+   */
+  const [draft, setDraft] = useState<Array<[string, string]> | null>(null);
+  /** 最近一次本组件写出的 JSON；用于区分自身写回与外部变化（避免误清草稿） */
+  const lastWritten = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (lastWritten.current !== null && lastWritten.current === json) return;
+    lastWritten.current = null;
+    setDraft(null);
+  }, [json]);
+
+  /** 展示行：优先草稿（含待填写的空行），否则为 JSON 解析结果 */
+  const rows = draft ?? parsed;
+
+  /** 行变化：有效行写回 JSON；含空 key 行时保留在草稿中供继续填写 */
+  const setRows = (next: Array<[string, string]>) => {
+    const valid = next.filter(([k]) => k.trim() !== "");
+    const out = valid.length === 0 ? "" : JSON.stringify(Object.fromEntries(valid));
+    lastWritten.current = out;
+    onChange(out);
+    setDraft(next.some(([k]) => k.trim() === "") ? next : null);
   };
 
   return (
@@ -360,7 +381,7 @@ export function KVEditor({ title, json, onChange, keyPlaceholder, valuePlacehold
         <label className="label !mb-0">{title}</label>
         <button
           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[12px] text-inksoft hover:bg-panel2 hover:text-ink"
-          onClick={() => writeBack([...rows, ["", ""]])}
+          onClick={() => setRows([...rows, ["", ""]])}
         >
           <Plus size={12} /> 添加
         </button>
@@ -380,7 +401,7 @@ export function KVEditor({ title, json, onChange, keyPlaceholder, valuePlacehold
               onChange={(e) => {
                 const next = [...rows];
                 next[i] = [e.target.value, v];
-                writeBack(next);
+                setRows(next);
               }}
             />
             <input
@@ -390,13 +411,13 @@ export function KVEditor({ title, json, onChange, keyPlaceholder, valuePlacehold
               onChange={(e) => {
                 const next = [...rows];
                 next[i] = [k, e.target.value];
-                writeBack(next);
+                setRows(next);
               }}
             />
             <button
               className="rounded p-1 text-inksoft hover:bg-err/10 hover:text-err"
               title="删除"
-              onClick={() => writeBack(rows.filter((_, idx) => idx !== i))}
+              onClick={() => setRows(rows.filter((_, idx) => idx !== i))}
             >
               <Trash2 size={13} />
             </button>

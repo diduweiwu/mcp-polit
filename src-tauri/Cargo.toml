@@ -1,6 +1,6 @@
 [package]
 name = "mcpilot"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCPilot — 本地 MCP 调试工作台（MCP Inspector 客户端）"
 authors = ["MCPilot"]
 edition = "2024"
@@ -33,9 +33,18 @@ rmcp = { version = "3.9", features = [
 # HTTP 头构造（HeaderName/HeaderValue）
 http = "1"
 # 与 rmcp 内部一致的 reqwest 版本（仅为命名 StreamableHttpClientTransport<reqwest::Client> 类型）
-reqwest = { version = "0.13", default-features = false }
+# 显式启用 gzip/brotli/zstd/deflate 解压：部分网关会压缩响应体，未启用时收到压缩字节
+# 会导致 rmcp 报「could not parse JSON response」+ 乱码（特性统一后 rmcp 内部 client 同样生效）
+reqwest = { version = "0.13", default-features = false, features = [
+  "gzip",
+  "brotli",
+  "zstd",
+  "deflate",
+] }
 # 本地 SQLite 持久化（bundled：静态编译，无系统依赖）
 rusqlite = { version = "0.41", features = ["bundled"] }
+tauri-plugin-updater = "2.14.1"
+tauri-plugin-process = "2.4.0"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

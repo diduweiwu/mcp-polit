@@ -1,16 +1,21 @@
 /**
- * 设置弹窗：外观（明暗三态 + 主色调）、Git 同步（仓库路径/脱敏/导入导出）、关于。
+ * 设置弹窗：外观（明暗三态 + 主色调）、Git 同步（仓库路径/脱敏/导入导出）、关于与在线更新。
  */
 import { useEffect, useState } from "react";
 import {
   Download,
   FolderSync,
   Info,
+  Loader2,
   Monitor,
   Moon,
+  RefreshCw,
   Sun,
   Upload,
 } from "lucide-react";
+import { getVersion } from "@tauri-apps/api/app";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
 import { type ThemeMode } from "../theme";
 import { Modal } from "./ui";
@@ -43,6 +48,14 @@ export function SettingsModal({ open, onClose }: Props) {
 
   const [repoPath, setRepoPath] = useState("");
   const [includeSecrets, setIncludeSecrets] = useState(false);
+  /** 当前应用版本（浏览器演示模式下取不到，显示为空） */
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => setVersion(""));
+  }, []);
 
   /* 打开时从设置缓存回填 */
   useEffect(() => {
@@ -147,18 +160,142 @@ export function SettingsModal({ open, onClose }: Props) {
 
       <div className="my-4 border-t border-line" />
 
-      {/* ---------- 关于 ---------- */}
+      {/* ---------- 关于与在线更新 ---------- */}
       <section>
-        <SectionTitle>关于</SectionTitle>
+        <SectionTitle>关于与更新</SectionTitle>
         <div className="flex items-start gap-1.5 text-[12px] leading-relaxed text-inksoft">
           <Info size={14} className="mt-0.5 shrink-0" />
           <span>
-            MCPilot v0.1.0 — 本地 MCP 调试工作台。全部数据仅保存在本机应用数据目录的
-            SQLite 中，除你配置的 MCP Server 与同步仓库外不发起任何网络请求。
+            MCPilot {version ? `v${version}` : ""} — 本地 MCP 调试工作台。全部数据仅保存在本机应用数据目录的
+            SQLite 中，除你配置的 MCP Server、同步仓库与检查更新（GitHub Releases）外不发起任何网络请求。
           </span>
         </div>
+        <UpdaterSection />
       </section>
     </Modal>
+  );
+}
+
+/** 更新状态机 */
+type UpdateState = "idle" | "checking" | "available" | "downloading" | "installed";
+
+/**
+ * 在线更新区：检查 GitHub Releases 最新版本（updater 插件做签名校验），
+ * 发现新版本后下载安装（带进度），完成后可一键重启应用。
+ */
+function UpdaterSection() {
+  const [state, setState] = useState<UpdateState>("idle");
+  /** 已是最新 / 出错时的提示文案 */
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  /** 待安装的新版本号 */
+  const [newVersion, setNewVersion] = useState("");
+  /** 下载进度 */
+  const [progress, setProgress] = useState({ received: 0, total: 0 });
+  /** 检查到的更新对象（downloadAndInstall 用） */
+  const [update, setUpdate] = useState<Update | null>(null);
+
+  /** 检查更新：请求 latest.json（GitHub Release 最新版），版本更高才返回更新对象 */
+  const doCheck = async () => {
+    setError("");
+    setNote("");
+    setUpdate(null);
+    setNewVersion("");
+    setState("checking");
+    try {
+      const found = await check();
+      if (found) {
+        setUpdate(found);
+        setNewVersion(found.version);
+        setState("available");
+      } else {
+        setNote("已是最新版本。");
+        setState("idle");
+      }
+    } catch (e) {
+      setError(String(e));
+      setState("idle");
+    }
+  };
+
+  /** 下载并安装：完成后提示重启（macOS/Linux 直接替换应用文件） */
+  const install = async () => {
+    if (!update) return;
+    setError("");
+    setState("downloading");
+    setProgress({ received: 0, total: 0 });
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          setProgress({ received: 0, total: event.data.contentLength ?? 0 });
+        } else if (event.event === "Progress") {
+          setProgress((p) => ({ ...p, received: p.received + event.data.chunkLength }));
+        }
+        // Finished：安装落盘完成，等用户点重启
+      });
+      setState("installed");
+    } catch (e) {
+      setError(String(e));
+      setState("available");
+    }
+  };
+
+  const pct =
+    progress.total > 0 ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : 0;
+
+  return (
+    <div className="mt-2.5">
+      <div className="flex items-center gap-2">
+        {state === "idle" && (
+          <button className="btn-ghost h-8 gap-1.5" onClick={() => void doCheck()}>
+            <RefreshCw size={13} /> 检查更新
+          </button>
+        )}
+        {state === "checking" && (
+          <span className="flex h-8 items-center gap-1.5 text-[12.5px] text-inksoft">
+            <Loader2 size={14} className="animate-spin" /> 正在检查更新…
+          </span>
+        )}
+        {state === "available" && (
+          <button className="btn-primary h-8 gap-1.5" onClick={() => void install()}>
+            <Download size={13} /> 下载并安装 v{newVersion}
+          </button>
+        )}
+        {state === "downloading" && (
+          <span className="flex h-8 items-center gap-1.5 text-[12.5px] text-inksoft">
+            <Loader2 size={14} className="animate-spin" />
+            正在下载… {pct}%
+          </span>
+        )}
+        {state === "installed" && (
+          <button className="btn-primary h-8 gap-1.5" onClick={() => void relaunch()}>
+            <RefreshCw size={13} /> 安装完成，重启应用
+          </button>
+        )}
+        {note && state === "idle" && (
+          <span className="text-[12px] text-ok">{note}</span>
+        )}
+      </div>
+
+      {state === "downloading" && progress.total > 0 && (
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-panel2">
+          <div
+            className="h-full rounded-full bg-[var(--c-primary-strong)] transition-[width] duration-200"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+      {error && (
+        <div className="mt-2 rounded-md border border-err/30 bg-err/10 px-2.5 py-1.5 text-[12px] leading-relaxed text-err">
+          {error}
+        </div>
+      )}
+      {state === "idle" && !note && !error && (
+        <p className="mt-1.5 text-[11.5px] leading-relaxed text-inksoft/70">
+          检查 GitHub Releases 获取最新版本，下载前会校验更新包签名。
+        </p>
+      )}
+    </div>
   );
 }
 
