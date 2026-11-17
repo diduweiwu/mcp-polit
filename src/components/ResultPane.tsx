@@ -3,7 +3,7 @@
  *
  * - 结果：当前选中工具的结果卡片（最新在顶）
  * - 历史：全部调用记录，支持关键字搜索 + 范围过滤（全部/当前 Server/当前工具），
- *   条目点击展开完整详情（复用结果卡片）
+ *   最近一条默认展开，新调用完成后自动改为展开新条目；条目点击展开完整详情（复用结果卡片）
  */
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -108,13 +108,22 @@ export function ResultPane() {
 /** 历史过滤范围 */
 type HistoryScope = "all" | "server" | "tool";
 
-/** 历史面板：搜索 + 范围过滤 + 可展开详情列表 */
+/** 历史面板：搜索 + 范围过滤 + 可展开详情列表（最近一条默认展开，新调用完成后旧条目自动折叠） */
 function HistoryPanel() {
   const { history, selectedNodeId, selectedToolName, nodes } = useAppStore();
   const [keyword, setKeyword] = useState("");
   const [scope, setScope] = useState<HistoryScope>("all");
   /** 当前展开的条目（单开模式） */
   const [expandedSeq, setExpandedSeq] = useState<number | null>(null);
+
+  /** 最近一条记录的 seq（历史为空时为 null） */
+  const latestSeq = history[0]?.seq ?? null;
+
+  /* 最近一条变化（启动恢复历史 / 新调用完成入列）时，自动展开最近一条；
+     单开模式下之前的条目随之自动折叠。latestSeq 未变时不触发，手动展开/收起不受影响 */
+  useEffect(() => {
+    setExpandedSeq(latestSeq);
+  }, [latestSeq]);
 
   /** 过滤：范围 + 关键字（匹配工具名 / Server 别名 / 入参） */
   const filtered = useMemo(() => {

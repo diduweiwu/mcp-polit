@@ -238,7 +238,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         // 完整时间串截取 HH:MM:SS 段
         timestamp: r.created_at.length >= 19 ? r.created_at.slice(11, 19) : r.created_at,
       }));
-      set({ history });
+      // 会话内 seq 从恢复条数续起：避免新执行的 seq 与恢复历史的 seq 重复（列表 key / 展开标识需唯一）
+      set({ history, seq: rows.length });
     } catch {
       /* 历史读取失败不影响启动 */
     }
