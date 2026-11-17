@@ -63,7 +63,7 @@ case "$BUMP" in
     NEW="${BUMP#v}"
     case "$NEW" in
       *.*) : ;;
-      *) echo "!! 版本号格式不对：$BUMP（应为 patch|minor|major 或 X.Y.Z）"; exit 1 ;;
+      *) echo "!! 版本号格式不对：${BUMP}（应为 patch|minor|major 或 X.Y.Z）"; exit 1 ;;
     esac
     ;;
 esac
@@ -86,12 +86,12 @@ sed_inplace() {
 replace_version() {
   local file="$1" sed_expr="$2"
   if ! grep -q "$CURRENT_RE" "$file"; then
-    echo "!! $file 中找不到当前版本 $CURRENT，中止"
+    echo "!! $file 中找不到当前版本 ${CURRENT}，中止"
     exit 1
   fi
   sed_inplace "$sed_expr" "$file"
   if ! grep -q "$NEW" "$file"; then
-    echo "!! $file 替换后未找到新版本 $NEW，请手动检查"
+    echo "!! $file 替换后未找到新版本 ${NEW}，请手动检查"
     exit 1
   fi
   echo "    updated $file: $CURRENT -> $NEW"
