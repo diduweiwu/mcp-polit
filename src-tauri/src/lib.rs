@@ -27,6 +27,11 @@ pub fn run() {
         // 在线更新：走 GitHub Release 的 latest.json（签名校验），安装后由 process 插件重启
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // macOS 红绿灯定位：decorum 插件（社区方案，Hoppscotch 生产同款机制）。
+        // 仅注册即可：macOS 上插件在 on_window_ready 自动挪按钮（默认 inset 12,16）
+        // 并挂 NSWindowDelegate 在 resize/退出全屏时重钉；Windows/Linux 为空操作。
+        // 纯 Rust API，无需 capabilities 权限与前端 binding。
+        .plugin(tauri_plugin_decorum::init())
         .setup(|app| {
             // 数据库文件位置：系统应用数据目录/<identifier>/mcpilot.db
             let data_dir = app.path().app_data_dir()?;
@@ -44,17 +49,28 @@ pub fn run() {
             .inner_size(1360.0, 840.0)
             .min_inner_size(1000.0, 620.0)
             .center();
-            // macOS：Overlay 标题栏 + 红绿灯垂直定位
-            //
-            // 实测（见 git 历史）：按钮固定在标题栏容器内 origin.y=6、高 16（中心距容器底 14），
-            // 容器高度 = 16 + y（wry 的 y 参数只调容器高度、不动按钮 y）。
-            // 要按钮中心距窗口顶 24（与 48px 顶栏垂直居中）：容器高 = 14 + 24 = 38 → y = 22。
+            // macOS：Overlay 标题栏 + 隐藏标题文字。
+            // 历史定论（见 git 历史）：2026-11-17 曾两次自研挪按钮均回滚——
+            // traffic_light_position 被 wry 布局重置冲掉（wry#1747），
+            // 复刻 wry 重钉则因新系统标题栏容器结构变化直接错位。
+            // 本次换 tauri-plugin-decorum 第三次尝试（同为「挪按钮 + delegate
+            // 重钉」机制，社区维护、Hoppscotch 生产验证）。若仍错位，
+            // 回滚 = 删 decorum 注册、下方 inset 调用与 Cargo 依赖三处。
             #[cfg(target_os = "macos")]
             let builder = builder
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .hidden_title(true)
-                .traffic_light_position(tauri::LogicalPosition::new(20.0, 22.0));
+                .hidden_title(true);
             let _win = builder.build()?;
+            // macOS：红绿灯与 48px 顶栏垂直居中（按钮中心距窗口顶 24）。
+            // decorum 几何推导（按钮高 16 实测）：中心距顶 = y/2 + 12 → y = 24；
+            // x = 12 保持默认水平位（TopBar pl-[84px] 避让不变）。
+            // 已知缺陷：插件 resize 重钉硬编码默认 inset(12,16)，窗口缩放后
+            // 按钮会回落 4pt——先验证初始定位可行，回落问题后续再补。
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_decorum::WebviewWindowExt as _;
+                _win.set_traffic_lights_inset(12.0, 24.0)?;
+            }
 
             Ok(())
         })

@@ -45,6 +45,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 rusqlite = { version = "0.41", features = ["bundled"] }
 tauri-plugin-updater = "2.14.1"
 tauri-plugin-process = "2.4.0"
+tauri-plugin-decorum = "1.1.1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
