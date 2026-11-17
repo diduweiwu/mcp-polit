@@ -224,7 +224,7 @@ function HistoryPanel() {
   );
 }
 
-/** 视图切换小按钮 */
+/** 视图切换小按钮（icon 可选：纯文字切换如「内容/结构化」可不带图标） */
 function ViewToggle({
   active,
   onClick,
@@ -233,7 +233,7 @@ function ViewToggle({
 }: {
   active: boolean;
   onClick: () => void;
-  icon: React.ReactNode;
+  icon?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -271,11 +271,19 @@ function TabBtn({
   );
 }
 
-/** 单条结果卡片；isNew=true（最新一条）默认展开，其余默认折叠，点击头部可展开/收起 */
+/**
+ * 单条结果卡片；isNew=true（最新一条）默认展开，其余默认折叠，点击头部可展开/收起。
+ *
+ * 展开后内容分「请求 · 入参」与「响应」上下两段独立显示，各带复制按钮，
+ * 便于分别复制请求数据与响应数据。
+ */
 function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) {
   const [view, setView] = useState<"tree" | "raw">("tree");
-  const [tab, setTab] = useState<"content" | "structured" | "args">("content");
+  const [tab, setTab] = useState<"content" | "structured">("content");
+  /** 响应复制成功的短暂标记 */
   const [copied, setCopied] = useState(false);
+  /** 请求入参复制成功的短暂标记 */
+  const [argsCopied, setArgsCopied] = useState(false);
   /** 折叠态：非最新结果默认只显示摘要行，手动展开查看详情 */
   const [collapsed, setCollapsed] = useState(!isNew);
 
@@ -311,8 +319,30 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
     }
   }, [textBody]);
 
-  const copy = async () => {
-    const raw = tab === "args" ? result.arguments : textBody || JSON.stringify(result.content, null, 2);
+  /** 入参格式化展示：合法 JSON 缩进美化便于阅读，损坏/非 JSON 时显示原文 */
+  const formattedArgs = useMemo(() => {
+    const raw = result.arguments;
+    if (!raw) return "{}";
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      return raw;
+    }
+  }, [result.arguments]);
+
+  /** 复制请求入参（格式化后的 JSON） */
+  const copyArgs = async () => {
+    await navigator.clipboard.writeText(formattedArgs).catch(() => {});
+    setArgsCopied(true);
+    setTimeout(() => setArgsCopied(false), 1200);
+  };
+
+  /** 复制当前响应视图：内容 tab 复制文本体（无文本时回退原始 content），结构化 tab 复制美化 JSON */
+  const copyResult = async () => {
+    const raw =
+      tab === "structured"
+        ? JSON.stringify(structured, null, 2)
+        : textBody || JSON.stringify(result.content, null, 2);
     await navigator.clipboard.writeText(raw).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1200);
@@ -320,7 +350,7 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
 
   return (
     <div className={`card overflow-hidden ${isNew ? "anim-slide-up mb-2" : "mb-1"}`}>
-      {/* 卡片头：整行可点击切换折叠；折叠时隐藏右侧视图/复制按钮 */}
+      {/* 卡片头：整行可点击切换折叠 */}
       <div
         className={`flex h-8 items-center justify-between border-b border-line bg-panel2 px-2.5 ${
           collapsed ? "cursor-pointer select-none" : ""
@@ -343,61 +373,84 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
           <span className="truncate font-mono text-ink">{result.tool_name}</span>
           <span className="shrink-0 text-inksoft">{result.duration_ms} ms</span>
         </div>
-        {!collapsed && (
-          <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
-            <ViewToggle active={view === "tree"} onClick={() => setView("tree")} icon={<ListTree size={12} />}>
-              树
-            </ViewToggle>
-            <ViewToggle active={view === "raw"} onClick={() => setView("raw")} icon={<Braces size={12} />}>
-              原始
-            </ViewToggle>
-            <button
-              className="rounded p-1 text-inksoft hover:bg-panel hover:text-ink"
-              title="复制"
-              onClick={() => void copy()}
-            >
-              {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
-            </button>
-          </div>
-        )}
       </div>
 
-      {/* 选项卡 */}
-      {!collapsed && structured !== null && (
-        <div className="flex gap-1 border-b border-line px-2 py-1">
-          <TabBtn active={tab === "content"} onClick={() => setTab("content")}>内容</TabBtn>
-          <TabBtn active={tab === "structured"} onClick={() => setTab("structured")}>结构化</TabBtn>
-          <TabBtn active={tab === "args"} onClick={() => setTab("args")}>入参</TabBtn>
-        </div>
-      )}
-
-      {/* 内容区（折叠时不渲染，避免隐藏的树展开开销） */}
+      {/* 展开后：请求 / 响应两段分开显示，各自独立复制（折叠时不渲染，避免隐藏的树展开开销） */}
       {!collapsed && (
-      <div className="max-h-[300px] overflow-y-auto p-2.5">
-        {tab === "args" ? (
-          <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed text-inksoft selectable">
-            {result.arguments || "{}"}
-          </pre>
-        ) : tab === "structured" ? (
-          view === "tree" ? (
-            <JsonNode value={structured} />
-          ) : (
-            <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed selectable">
-              {JSON.stringify(structured, null, 2)}
+        <>
+          {/* 请求段：格式化入参 JSON，独立复制按钮 */}
+          <div className="border-b border-line">
+            <div className="flex h-7 items-center justify-between bg-panel2/60 pl-2.5 pr-1">
+              <span className="text-[10.5px] font-semibold tracking-wide text-inksoft/80">
+                请求 · 入参
+              </span>
+              <button
+                className="rounded p-1 text-inksoft hover:bg-panel hover:text-ink"
+                title="复制入参 JSON"
+                onClick={() => void copyArgs()}
+              >
+                {argsCopied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+              </button>
+            </div>
+            <pre className="max-h-[120px] overflow-y-auto whitespace-pre-wrap break-all px-2.5 py-2 font-mono text-[12px] leading-relaxed text-inksoft selectable">
+              {formattedArgs}
             </pre>
-          )
-        ) : parsed !== null && view === "tree" ? (
-          <JsonNode value={parsed} />
-        ) : (
-          <pre
-            className={`whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed selectable ${
-              result.is_error ? "text-err" : ""
-            }`}
-          >
-            {textBody || JSON.stringify(result.content, null, 2)}
-          </pre>
-        )}
-      </div>
+          </div>
+
+          {/* 响应段：内容/结构化切换 + 树/原始视图 + 独立复制按钮 */}
+          <div>
+            <div className="flex h-7 items-center gap-0.5 bg-panel2/60 pl-2.5 pr-1">
+              <span className="mr-auto text-[10.5px] font-semibold tracking-wide text-inksoft/80">
+                响应
+              </span>
+              {structured !== null && (
+                <>
+                  <ViewToggle active={tab === "content"} onClick={() => setTab("content")}>
+                    内容
+                  </ViewToggle>
+                  <ViewToggle active={tab === "structured"} onClick={() => setTab("structured")}>
+                    结构化
+                  </ViewToggle>
+                  <span className="mx-1 h-3.5 w-px bg-line" />
+                </>
+              )}
+              <ViewToggle active={view === "tree"} onClick={() => setView("tree")} icon={<ListTree size={12} />}>
+                树
+              </ViewToggle>
+              <ViewToggle active={view === "raw"} onClick={() => setView("raw")} icon={<Braces size={12} />}>
+                原始
+              </ViewToggle>
+              <button
+                className="rounded p-1 text-inksoft hover:bg-panel hover:text-ink"
+                title="复制响应"
+                onClick={() => void copyResult()}
+              >
+                {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+              </button>
+            </div>
+            <div className="max-h-[300px] overflow-y-auto p-2.5">
+              {tab === "structured" ? (
+                view === "tree" ? (
+                  <JsonNode value={structured} />
+                ) : (
+                  <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed selectable">
+                    {JSON.stringify(structured, null, 2)}
+                  </pre>
+                )
+              ) : parsed !== null && view === "tree" ? (
+                <JsonNode value={parsed} />
+              ) : (
+                <pre
+                  className={`whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed selectable ${
+                    result.is_error ? "text-err" : ""
+                  }`}
+                >
+                  {textBody || JSON.stringify(result.content, null, 2)}
+                </pre>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

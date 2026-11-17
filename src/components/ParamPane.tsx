@@ -10,7 +10,7 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { BookmarkPlus, Play, Table2, Braces, Loader2, SlidersHorizontal } from "lucide-react";
 import { useAppStore } from "../store";
 import { buildDefaults, pruneArgs, SchemaForm, type FormValue } from "./SchemaForm";
-import { Modal } from "./ui";
+import { Modal, SearchSelect } from "./ui";
 
 /** 参数栏 */
 export function ParamPane() {
@@ -158,26 +158,18 @@ export function ParamPane() {
       <PaneHeader title={`参数 · ${tool.name}`} tool={tool} mode={mode} setMode={switchMode} />
 
       <div key={selectedToolName ?? "empty"} className="anim-fade-in flex-1 overflow-y-auto p-3">
-        {/* 参数 Case 条：下拉选择一键带入，「管理」打开弹窗查看/删除 */}
+        {/* 参数 Case 条：可搜索下拉一键带入（输入关键字过滤），「管理」打开弹窗查看/删除 */}
         {myCases.length > 0 && (
           <div className="mb-3 flex items-center gap-1.5">
             <span className="shrink-0 text-[11px] text-inksoft/70">Case：</span>
-            <select
-              className="field h-7 max-w-[220px] !py-0 text-[12px]"
-              value=""
-              title="选择 Case 一键带入参数"
-              onChange={(e) => {
-                const hit = myCases.find((c) => c.name === e.target.value);
+            <SearchSelect
+              placeholder="选择 Case 带入…"
+              options={myCases.map((c) => ({ value: c.name, label: c.name }))}
+              onSelect={(name) => {
+                const hit = myCases.find((c) => c.name === name);
                 if (hit) applyCase(hit.args);
               }}
-            >
-              <option value="">选择 Case 带入…</option>
-              {myCases.map((c) => (
-                <option key={c.name} value={c.name}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+            />
             <button
               className="btn-ghost h-7 shrink-0 gap-1 !px-2 text-[11.5px]"
               title="查看全部 Case，可带入或删除"

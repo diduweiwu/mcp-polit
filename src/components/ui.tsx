@@ -5,12 +5,13 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { ChevronDown, Search, X } from "lucide-react";
 import type { ConnStatus } from "../types";
 
 /** 点击元素外部时触发回调（用于下拉/弹窗关闭） */
@@ -237,5 +238,132 @@ export function MenuItem({
       {icon}
       {label}
     </button>
+  );
+}
+
+/** 可搜索下拉选择器的选项 */
+export interface SearchSelectOption {
+  /** 选项值（选中后回调给 onSelect） */
+  value: string;
+  /** 选项显示文本（同时参与关键字过滤） */
+  label: string;
+}
+
+/** 可搜索下拉选择器属性 */
+interface SearchSelectProps {
+  /** 未选中时触发按钮上显示的占位文本 */
+  placeholder: string;
+  /** 选项列表（为空时触发按钮禁用） */
+  options: SearchSelectOption[];
+  /** 选中某个选项后的回调（value 为选项值） */
+  onSelect: (value: string) => void;
+  /** 触发按钮宽度（px），下拉面板宽度取 max(width, 220)；默认 220 */
+  width?: number;
+}
+
+/**
+ * 可搜索下拉选择器：替代原生 <select> 的项目风格下拉，支持关键字过滤。
+ *
+ * 交互：点击触发按钮展开面板（顶部搜索框自动聚焦），输入即时过滤选项
+ * （匹配 label/value，不区分大小写），点击选项回调并关闭；Esc / 点击
+ * 外部关闭并清空过滤词。
+ *
+ * 使用示例：
+ * ```tsx
+ * <SearchSelect
+ *   placeholder="选择 Case 带入…"
+ *   options={[{ value: "a", label: "case-a" }]}
+ *   onSelect={(v) => applyCase(v)}
+ * />
+ * ```
+ */
+export function SearchSelect({
+  placeholder,
+  options,
+  onSelect,
+  width = 220,
+}: SearchSelectProps) {
+  const [open, setOpen] = useState(false);
+  /** 过滤关键字 */
+  const [kw, setKw] = useState("");
+  const ref = useClickOutside<HTMLDivElement>(() => setOpen(false));
+
+  /** 关闭面板并清空过滤词（下次打开是完整列表） */
+  const close = () => {
+    setOpen(false);
+    setKw("");
+  };
+
+  /** 按关键字过滤选项（匹配显示文本或值，不区分大小写） */
+  const filtered = useMemo(() => {
+    const k = kw.trim().toLowerCase();
+    if (!k) return options;
+    return options.filter(
+      (o) => o.label.toLowerCase().includes(k) || o.value.toLowerCase().includes(k),
+    );
+  }, [options, kw]);
+
+  return (
+    <div className="relative" ref={ref}>
+      {/* 触发按钮：复用 .field 外观（与原 <select> 视觉一致）+ 旋转箭头 */}
+      <button
+        className="field flex h-7 items-center justify-between gap-1.5 !py-0 text-left text-[12px] disabled:cursor-default disabled:opacity-60"
+        style={{ width }}
+        disabled={options.length === 0}
+        title={placeholder}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="truncate text-inksoft">{placeholder}</span>
+        <ChevronDown
+          size={12}
+          className={`shrink-0 text-inksoft transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      {open && (
+        <div
+          className="card anim-pop-in absolute top-full z-40 mt-1 overflow-hidden shadow-xl"
+          style={{ width: Math.max(width, 220) }}
+        >
+          {/* 搜索框：打开即聚焦，直接输入即可过滤 */}
+          <div className="relative border-b border-line p-1.5">
+            <Search
+              size={12}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-inksoft"
+            />
+            <input
+              className="field h-6 !py-0 pl-7 text-[12px]"
+              autoFocus
+              placeholder="输入关键字过滤…"
+              value={kw}
+              onChange={(e) => setKw(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") close();
+              }}
+            />
+          </div>
+          {/* 选项列表 */}
+          <div className="max-h-[220px] overflow-y-auto py-1">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-[12px] text-inksoft">无匹配的选项</div>
+            ) : (
+              filtered.map((o) => (
+                <button
+                  key={o.value}
+                  className="flex w-full items-center gap-2 truncate px-3 py-1.5 text-left font-mono text-[12px] text-ink hover:bg-panel2"
+                  title={o.label}
+                  onClick={() => {
+                    onSelect(o.value);
+                    close();
+                  }}
+                >
+                  {o.label}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
