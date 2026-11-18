@@ -63,6 +63,7 @@ export function TopBar() {
     setActiveProject,
     createProject,
     renameProject,
+    updateProjectSyncDir,
     deleteProject,
     setThemeMode,
   } = useAppStore();
@@ -71,8 +72,11 @@ export function TopBar() {
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newSyncDir, setNewSyncDir] = useState("");
-  const [renameOpen, setRenameOpen] = useState(false);
-  const [renameName, setRenameName] = useState("");
+  /** 编辑项目弹窗：名称 + 同步目录（重命名入口升级而来，随时可改基础信息） */
+  const [editOpen, setEditOpen] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editSyncDir, setEditSyncDir] = useState("");
+  const [editError, setEditError] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -107,11 +111,35 @@ export function TopBar() {
     }
   };
 
-  /** 提交重命名 */
-  const submitRename = async () => {
-    if (!active || !renameName.trim()) return;
-    await renameProject(active.id, renameName.trim());
-    setRenameOpen(false);
+  /** 打开编辑弹窗：带入当前项目基础信息 */
+  const openEdit = () => {
+    if (!active) return;
+    setEditName(active.name);
+    setEditSyncDir(active.sync_dir ?? "");
+    setEditError("");
+    setEditOpen(true);
+  };
+
+  /** 提交编辑：名称与同步目录分别按需保存；失败在弹窗顶部提示 */
+  const submitEdit = async () => {
+    if (!active) return;
+    setEditError("");
+    const name = editName.trim();
+    const dir = editSyncDir.trim();
+    if (!name) {
+      setEditError("请填写项目名称");
+      return;
+    }
+    try {
+      if (name !== active.name) await renameProject(active.id, name);
+      if (dir !== (active.sync_dir ?? "")) {
+        // 空串传 null：解除绑定（Git 同步条随之隐藏）
+        await updateProjectSyncDir(active.id, dir || null);
+      }
+      setEditOpen(false);
+    } catch (e) {
+      setEditError(String(e));
+    }
   };
 
   return (
@@ -188,10 +216,9 @@ export function TopBar() {
                 <>
                   <MenuItem
                     icon={<Pencil size={14} />}
-                    label="重命名当前项目"
+                    label="编辑当前项目"
                     onClick={() => {
-                      setRenameName(active.name);
-                      setRenameOpen(true);
+                      openEdit();
                       close();
                     }}
                   />
@@ -324,31 +351,53 @@ export function TopBar() {
         </p>
       </Modal>
 
-      {/* 重命名弹窗 */}
+      {/* 编辑项目弹窗：基础信息（名称 + 同步目录）随时可改 */}
       <Modal
-        open={renameOpen}
-        title="重命名项目"
-        onClose={() => setRenameOpen(false)}
-        width={420}
+        open={editOpen}
+        title="编辑项目"
+        onClose={() => setEditOpen(false)}
+        width={480}
         footer={
           <>
-            <button className="btn-ghost" onClick={() => setRenameOpen(false)}>
+            <button className="btn-ghost" onClick={() => setEditOpen(false)}>
               取消
             </button>
-            <button className="btn-primary" onClick={() => void submitRename()}>
+            <button className="btn-primary" onClick={() => void submitEdit()}>
               保存
             </button>
           </>
         }
       >
-        <label className="label">项目名称</label>
+        {editError && (
+          <div className="mb-3 rounded-md border border-err/30 bg-err/10 px-3 py-2 text-[12px] text-err">
+            {editError}
+          </div>
+        )}
+        <label className="label">
+          项目名称
+          <span className="ml-0.5 text-err" title="必填">*</span>
+        </label>
         <input
           className="field"
           autoFocus
-          value={renameName}
-          onChange={(e) => setRenameName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && void submitRename()}
+          value={editName}
+          onChange={(e) => setEditName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void submitEdit()}
         />
+        <div className="mt-3">
+          <label className="label">同步目录（可选，开启 Git 同步）</label>
+          <input
+            className="field font-mono"
+            placeholder="~/mcpilot-sync/backend 或本地 git 仓库路径"
+            value={editSyncDir}
+            onChange={(e) => setEditSyncDir(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void submitEdit()}
+          />
+          <p className="mt-1.5 text-[12px] leading-relaxed text-inksoft">
+            目录不存在会自动创建，非 git 目录会自动
+            <span className="font-mono"> git init</span>；清空并保存即解除绑定（原有仓库内容不受影响）。
+          </p>
+        </div>
       </Modal>
 
       {/* 删除确认 */}

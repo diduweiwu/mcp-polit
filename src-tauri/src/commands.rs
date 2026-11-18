@@ -58,6 +58,59 @@ pub fn rename_project(db: State<'_, Db>, id: i64, name: String) -> CmdResult<()>
     crate::db::rename_project(&conn, id, &name)
 }
 
+/// 更新项目同步目录（编辑项目用）：目录校验/自动创建并 git init（与创建时同规则），
+/// 传 null 或空串解除绑定。返回更新后的项目（sync_dir 为绝对路径）。
+#[tauri::command]
+pub fn update_project_sync_dir(
+    db: State<'_, Db>,
+    id: i64,
+    sync_dir: Option<String>,
+) -> CmdResult<Project> {
+    let dir = match sync_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(d) => Some(
+            crate::sync::prepare_sync_dir(d)
+                .map_err(crate::error::AppError::new)?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => None,
+    };
+    let conn = db.0.lock().unwrap();
+    crate::db::update_project_sync_dir(&conn, id, dir.as_deref())
+}
+
+/// 用系统文件管理器打开目录：macOS 用 open，Windows 用 explorer，Linux 用 xdg-open。
+/// 路径以参数数组传递，无拼接注入风险；目录不存在时报错。
+#[tauri::command]
+pub fn open_dir(path: String) -> CmdResult<()> {
+    let p = std::path::Path::new(&path);
+    if !p.is_dir() {
+        return Err(crate::error::AppError::new(format!("目录不存在：{path}")));
+    }
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(p);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(p);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(p);
+        c
+    };
+    // spawn 后不等待：文件管理器是常驻进程，等待会阻塞命令返回
+    cmd.spawn()
+        .map_err(|e| crate::error::AppError::new(format!("打开文件管理器失败：{e}")))?;
+    Ok(())
+}
+
 /// 删除项目：先断开其下全部连接，再级联删除数据。
 #[tauri::command]
 pub async fn delete_project(app: AppHandle, db: State<'_, Db>, id: i64) -> CmdResult<()> {

@@ -96,6 +96,8 @@ pub fn run() {
             commands::list_projects,
             commands::create_project,
             commands::rename_project,
+            commands::update_project_sync_dir,
+            commands::open_dir,
             commands::delete_project,
             // 树节点
             commands::list_nodes,

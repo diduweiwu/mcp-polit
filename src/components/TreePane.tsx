@@ -8,6 +8,8 @@ import { createPortal } from "react-dom";
 import {
   Check,
   ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Copy,
   Download,
   Folder,
@@ -130,6 +132,18 @@ export function TreePane() {
   const activeName = useAppStore(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.name,
   );
+  /** 当前项目绑定的同步目录（「打开项目目录」按钮用；未绑定时按钮禁用） */
+  const activeSyncDir = useAppStore(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.sync_dir ?? null,
+  );
+
+  /** 用系统文件管理器打开项目同步目录 */
+  const openProjectDir = () => {
+    if (!activeSyncDir) return;
+    api
+      .openDir(activeSyncDir)
+      .catch((e) => useAppStore.getState().addLog("error", `打开目录失败：${e}`));
+  };
 
   return (
     <div
@@ -162,6 +176,30 @@ export function TreePane() {
             onClick={() => newUnder(null)}
           >
             <Server size={14} />
+          </button>
+          <button
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            title={activeSyncDir ? "在文件管理器中打开项目目录" : "当前项目未绑定同步目录"}
+            disabled={noProject || !activeSyncDir}
+            onClick={openProjectDir}
+          >
+            <FolderOpen size={14} />
+          </button>
+          <button
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            title="展开全部目录"
+            disabled={noProject}
+            onClick={() => useAppStore.getState().expandAllFolders()}
+          >
+            <ChevronsUpDown size={14} />
+          </button>
+          <button
+            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            title="收起全部目录"
+            disabled={noProject}
+            onClick={() => useAppStore.getState().collapseAllFolders()}
+          >
+            <ChevronsDownUp size={14} />
           </button>
           <button
             className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
@@ -572,7 +610,7 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
             ? "bg-primarysoft text-primarystrong"
             : dragOver
               ? "bg-primarysoft ring-1 ring-primary"
-              : "hover:bg-panel2"
+              : "hover:bg-hover"
         }`}
         style={{ paddingLeft: 6 + depth * 14 }}
         onClick={() => (isFolder ? toggleExpand(node.id) : void selectNode(node.id))}

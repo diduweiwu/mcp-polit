@@ -12,7 +12,7 @@ MCPilot 是一个跨平台的 [MCP (Model Context Protocol)](https://modelcontex
 
 ### 项目与资源树
 
-- 多项目管理，左上角随时切换；项目可绑定 **Git 同步目录**（自动 git init）
+- 多项目管理，左上角随时切换；支持随时编辑名称与 **Git 同步目录**（自动 git init），资源树栏头可一键在文件管理器中打开项目目录
 - 目录无限嵌套、拖拽移动、右键管理；展开/收起带动画，整栏可折叠
 - Server 按协议类型着色标识（stdio 绿 / Streamable HTTP 紫）与连接状态点
 

@@ -219,6 +219,24 @@ pub fn rename_project(conn: &Connection, id: i64, name: &str) -> CmdResult<()> {
     Ok(())
 }
 
+/// 更新项目同步目录（`None` 表示解除绑定），返回更新后的项目。
+///
+/// 目录本身由命令层先做校验/创建/git init（与创建项目时同一规则）。
+pub fn update_project_sync_dir(
+    conn: &Connection,
+    id: i64,
+    sync_dir: Option<&str>,
+) -> CmdResult<Project> {
+    let changed = conn.execute(
+        "UPDATE projects SET sync_dir = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+        rusqlite::params![sync_dir, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::new(format!("项目不存在（id={id}）")));
+    }
+    get_project(conn, id)
+}
+
 /// 删除项目（级联删除其全部树节点与配置）。
 ///
 /// 返回该项目下全部 server 节点 ID，供上层先断开对应连接再删除。

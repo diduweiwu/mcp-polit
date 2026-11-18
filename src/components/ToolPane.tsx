@@ -4,9 +4,7 @@
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
-  Check,
   ChevronDown,
-  Layers,
   Clock,
   Globe,
   PanelLeftOpen,
@@ -21,24 +19,33 @@ import {
   Wrench,
 } from "lucide-react";
 import { useAppStore } from "../store";
-import type { ServerConfig, TreeNode } from "../types";
+import type { TreeNode } from "../types";
 import * as api from "../api";
-import { Dropdown, EmptyState, MenuItem, StatusDot } from "./ui";
+import { EmptyState, SearchSelect, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
+import { EnvEditModal } from "./EnvEditor";
 
 /** 工具列表栏 */
 export function ToolPane() {
-  const { selectedNodeId, nodes, tools, serverConfigs, connStates, connErrors, selectedToolName, selectTool, connect, disconnect, refreshTools, treeCollapsed, toggleTreeCollapsed } =
+  const { selectedNodeId, nodes, tools, connStates, connErrors, selectedToolName, selectTool, connect, disconnect, refreshTools, treeCollapsed, toggleTreeCollapsed } =
     useAppStore();
 
   const [keyword, setKeyword] = useState("");
+  /** 描述已展开的工具名集合（描述超两行截断，点角标查看全文） */
+  const [expandedDescs, setExpandedDescs] = useState<Set<string>>(new Set());
+
+  /** 切换某工具描述的展开/收起 */
+  const toggleDesc = (name: string) =>
+    setExpandedDescs((s) => {
+      const next = new Set(s);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
   const node = nodes.find((n) => n.id === selectedNodeId) ?? null;
   const list = selectedNodeId != null ? (tools[selectedNodeId] ?? []) : [];
   const status = selectedNodeId != null ? (connStates[selectedNodeId] ?? "disconnected") : "disconnected";
   const err = selectedNodeId != null ? (connErrors[selectedNodeId] ?? "") : "";
-  /** 选中 server 的配置缓存（状态条环境切换用；未加载时 EnvSwitcher 自行隐藏） */
-  const cfgCached = selectedNodeId != null ? serverConfigs[selectedNodeId] : undefined;
-
   /** 按关键词过滤（名称 + 描述） */
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
@@ -74,6 +81,7 @@ export function ToolPane() {
   return (
     <PaneWrap
       title={`工具列表 · ${node.name}`}
+      right={<EnvBar node={node} />}
       lead={
         treeCollapsed ? (
           <button
@@ -86,6 +94,13 @@ export function ToolPane() {
         ) : undefined
       }
     >
+      {/* 已连接：「Server 配置」折叠条紧跟栏头标题（固定，不随工具列表滚动） */}
+      {status === "connected" && (
+        <div className="shrink-0 px-1.5 pt-1.5">
+          <ConnectedConfigBar node={node} />
+        </div>
+      )}
+
       {/* 状态条 */}
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-2.5">
         <div className="flex min-w-0 items-center gap-1.5 text-[12px]">
@@ -101,9 +116,6 @@ export function ToolPane() {
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {/* 环境切换（仅已连接）：挪到状态条独立放置——原先嵌在「Server 配置」
-              折叠条按钮内部（button 套 button），点环境下拉会冒泡误触发折叠 */}
-          {status === "connected" && <EnvSwitcher node={node} cfg={cfgCached} connected />}
           <div className="flex items-center gap-0.5">
             {status === "connected" ? (
               <>
@@ -149,36 +161,68 @@ export function ToolPane() {
         </div>
       )}
 
-      {/* 未连接：显示配置摘要面板（单击节点即出现）；已连接：可折叠配置条 + 工具列表 */}
+      {/* 未连接：显示配置摘要面板（单击节点即出现）；已连接：工具列表 */}
       <div className="flex-1 overflow-y-auto p-1.5">
-        {status !== "connected" ? (
-          <ServerSummary node={node} status={status} />
-        ) : (
-          <ConnectedConfigBar node={node} />
-        )}
+        {status !== "connected" && <ServerSummary node={node} status={status} />}
         {status === "connected" &&
           (filtered.length === 0 ? (
             <EmptyState text={keyword ? "没有匹配的工具。" : "该 Server 未提供任何工具。"} />
           ) : (
           filtered.map((t) => {
             const active = selectedToolName === t.name;
+            const expanded = expandedDescs.has(t.name);
             return (
-              <button
+              // 容器用 div + role/button：卡片内还要嵌展开角标按钮，避免 button 套 button
+              <div
                 key={t.name}
+                role="button"
+                tabIndex={0}
                 onClick={() => selectTool(t.name)}
-                className={`mb-1 w-full rounded-md border p-2 text-left transition-colors ${
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    selectTool(t.name);
+                  }
+                }}
+                className={`group mb-1 w-full cursor-pointer select-none rounded-md border p-2 text-left transition-colors ${
                   active
                     ? "border-primary bg-primarysoft"
                     : "border-transparent hover:border-line hover:bg-panel2"
                 }`}
               >
-                <div className={`truncate font-mono text-[12.5px] font-medium ${active ? "text-primarystrong" : ""}`}>
-                  {t.name}
+                <div className="flex items-start gap-1">
+                  <div
+                    className={`min-w-0 flex-1 truncate font-mono text-[12.5px] font-medium ${active ? "text-primarystrong" : ""}`}
+                    title={t.name}
+                  >
+                    {t.name}
+                  </div>
+                  {/* 描述展开/收起角标：悬停卡片时出现，点击只切换展开不影响选中 */}
+                  {t.description && (
+                    <button
+                      className={`shrink-0 rounded p-0.5 text-inksoft/60 transition-all hover:bg-panel2 hover:text-ink ${
+                        expanded ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                      }`}
+                      title={expanded ? "收起描述" : "查看完整描述"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleDesc(t.name);
+                      }}
+                    >
+                      <ChevronDown
+                        size={13}
+                        className={`transition-transform duration-200 ${expanded ? "rotate-180" : ""}`}
+                      />
+                    </button>
+                  )}
                 </div>
-                <div className="mt-0.5 line-clamp-2 text-[11.5px] leading-snug text-inksoft">
+                <div
+                  className={`mt-0.5 text-[11.5px] leading-snug text-inksoft ${expanded ? "" : "line-clamp-2"}`}
+                  title={t.description || undefined}
+                >
                   {t.description || "（无描述）"}
                 </div>
-              </button>
+              </div>
             );
           })
         ))}
@@ -222,21 +266,25 @@ function ConnectedConfigBar({ node }: { node: TreeNode }) {
   );
 }
 
-/** 栏外壳：标题 + 内容（lead 为标题左侧的可选元素，如展开按钮） */
+/** 栏外壳：标题 + 内容（lead 为标题左侧可选元素；right 为标题右侧可选区域，如环境控件） */
 function PaneWrap({
   title,
   children,
   lead,
+  right,
 }: {
   title: string;
   children: React.ReactNode;
   lead?: React.ReactNode;
+  right?: React.ReactNode;
 }) {
   return (
     <div className="flex h-full flex-col overflow-hidden border-r border-line bg-panel/50">
       <div className="flex h-9 shrink-0 items-center border-b border-line px-3">
         {lead}
-        <span className="truncate text-[12px] font-semibold text-inksoft">{title}</span>
+        <span className="min-w-0 truncate text-[12px] font-semibold text-inksoft">{title}</span>
+        <span className="flex-1" />
+        {right}
       </div>
       {children}
     </div>
@@ -278,87 +326,6 @@ function rowsOf(json?: string | null): Array<[string, string]> {
     return [];
   }
 }
-
-/**
- * 环境切换器：显示 Base + 全部环境，点击切换激活环境（写入配置）。
- * 若当前已连接，切换后自动断开（提示重新连接以应用新环境）。
- */
-function EnvSwitcher({ node, cfg, connected }: { node: TreeNode; cfg?: ServerConfig; connected: boolean }) {
-  const updateConfigCache = useAppStore((s) => s.updateConfigCache);
-  const disconnect = useAppStore((s) => s.disconnect);
-  const envNames = useMemo(() => {
-    try {
-      return Object.keys(JSON.parse(cfg?.envs ?? "{}") as Record<string, unknown>);
-    } catch {
-      return [];
-    }
-  }, [cfg?.envs]);
-  if (!cfg) return null;
-  const active = cfg.active_env?.trim() || "";
-
-  /** 切换激活环境 */
-  const switchEnv = async (name: string) => {
-    const saved = { ...cfg, active_env: name };
-    try {
-      await api.saveServerConfig(saved);
-      updateConfigCache(saved);
-      if (connected) {
-        await disconnect(node.id);
-        useAppStore.getState().addLog(
-          "info",
-          `环境已切换为「${name || "Base"}」，连接已断开，点击「重新连接」以应用新环境`,
-          node.id,
-        );
-      } else {
-        useAppStore.getState().addLog("info", `环境已切换为「${name || "Base"}」`, node.id);
-      }
-    } catch (e) {
-      useAppStore.getState().addLog("error", String(e), node.id);
-    }
-  };
-
-  return (
-    <Dropdown
-      align="right"
-      trigger={(open, toggle) => (
-        <button
-          className="flex items-center gap-1 rounded-full border border-line bg-panel px-2 py-0.5 text-[11px] text-ink transition-colors hover:border-primary"
-          onClick={toggle}
-          title="切换环境（激活环境的 env/headers 会覆盖 Base）"
-        >
-          <Layers size={11} />
-          {active || "Base"}
-          <ChevronDown size={10} className={`transition-transform ${open ? "rotate-180" : ""}`} />
-        </button>
-      )}
-    >
-      {(close) => (
-        <>
-          <MenuItem
-            label="Base"
-            icon={active === "" ? <Check size={13} className="text-primarystrong" /> : <span className="w-[13px]" />}
-            onClick={() => {
-              void switchEnv("");
-              close();
-            }}
-          />
-          {envNames.map((n) => (
-            <MenuItem
-              key={n}
-              label={n}
-              icon={active === n ? <Check size={13} className="text-primarystrong" /> : <span className="w-[13px]" />}
-              onClick={() => {
-                void switchEnv(n);
-                close();
-              }}
-            />
-          ))}
-        </>
-      )}
-    </Dropdown>
-  );
-}
-
 /** 摘要行 */
 function SummaryRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -408,9 +375,6 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
           {isHttp ? "Streamable HTTP" : "stdio"}
         </span>
         {!cfg.enabled && <span className="chip bg-warn/10 text-warn">已停用</span>}
-        <span className="flex-1" />
-        {/* 环境切换仅在未连接时放这里；已连接时统一走顶部状态条的入口（切换即断开提示重连） */}
-        {!connected && <EnvSwitcher node={node} cfg={cfg} connected={false} />}
       </div>
 
       {/* 主要连接信息 */}
@@ -493,6 +457,73 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
       )}
 
       {editOpen && <ServerFormModal parentId={null} onClose={() => setEditOpen(false)} />}
+    </div>
+  );
+}
+
+/**
+ * 栏头环境控件：可搜索下拉切换激活环境 + 「编辑环境」入口（打开 EnvEditModal）。
+ * 切换即写配置；已连接时自动断开并提示重连以应用新环境。
+ */
+function EnvBar({ node }: { node: TreeNode }) {
+  const cfg = useAppStore((s) => s.serverConfigs[node.id]);
+  const status = useAppStore((s) => s.connStates[node.id] ?? "disconnected");
+  const [editOpen, setEditOpen] = useState(false);
+  const connected = status === "connected";
+
+  /** Base + 全部环境名（可搜索下拉选项） */
+  const envNames = useMemo(() => {
+    try {
+      return Object.keys(JSON.parse(cfg?.envs ?? "{}") as Record<string, unknown>);
+    } catch {
+      return [];
+    }
+  }, [cfg?.envs]);
+  const activeName = cfg?.active_env?.trim() || "Base";
+  const options = [
+    { value: "", label: "Base" },
+    ...envNames.map((n) => ({ value: n, label: n })),
+  ];
+
+  /** 切换激活环境：写配置；已连接则断开并提示重连（切回同一环境无操作） */
+  const switchEnv = async (name: string) => {
+    if (!cfg || (cfg.active_env?.trim() || "") === name) return;
+    const saved = { ...cfg, active_env: name };
+    try {
+      await api.saveServerConfig(saved);
+      useAppStore.getState().updateConfigCache(saved);
+      if (connected) {
+        await useAppStore.getState().disconnect(node.id);
+        useAppStore.getState().addLog(
+          "info",
+          `环境已切换为「${name || "Base"}」，连接已断开，请重新连接以应用新环境`,
+          node.id,
+        );
+      } else {
+        useAppStore.getState().addLog("info", `环境已切换为「${name || "Base"}」`, node.id);
+      }
+    } catch (e) {
+      useAppStore.getState().addLog("error", String(e), node.id);
+    }
+  };
+
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      <SearchSelect
+        placeholder={activeName}
+        options={options}
+        width={120}
+        align="right"
+        onSelect={(v) => void switchEnv(v)}
+      />
+      <button
+        className="rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
+        title="编辑环境（各环境的请求头 / 环境变量）"
+        onClick={() => setEditOpen(true)}
+      >
+        <Settings2 size={14} />
+      </button>
+      {editOpen && <EnvEditModal node={node} onClose={() => setEditOpen(false)} />}
     </div>
   );
 }

@@ -26,6 +26,13 @@ export const createProject = (name: string, syncDir?: string) =>
 export const renameProject = (id: number, name: string) =>
   invoke<void>("rename_project", { id, name });
 
+/** 更新项目同步目录（传 null 解除绑定；目录会校验/自动 git init），返回更新后的项目 */
+export const updateProjectSyncDir = (id: number, syncDir: string | null) =>
+  invoke<Project>("update_project_sync_dir", { id, syncDir });
+
+/** 用系统文件管理器打开目录（macOS Finder / Windows 资源管理器 / Linux 文件管理器） */
+export const openDir = (path: string) => invoke<void>("open_dir", { path });
+
 /** 删除项目（级联删除节点与配置，后端会先断开连接） */
 export const deleteProject = (id: number) => invoke<void>("delete_project", { id });
 

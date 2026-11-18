@@ -8,6 +8,7 @@
   --color-bg: var(--c-bg);
   --color-panel: var(--c-panel);
   --color-panel2: var(--c-panel2);
+  --color-hover: var(--c-hover);
   --color-line: var(--c-line);
   --color-ink: var(--c-ink);
   --color-inksoft: var(--c-ink-soft);
@@ -24,6 +25,8 @@
   --c-bg: #f4f6fa;
   --c-panel: #ffffff;
   --c-panel2: #f8fafc;
+  /* 悬浮反馈色：比 panel2 深一档，保证在浅灰面板上肉眼可辨 */
+  --c-hover: #eaeef5;
   --c-line: #e4e9f0;
   --c-ink: #1e2430;
   --c-ink-soft: #67748c;
@@ -42,6 +45,8 @@
   --c-bg: #12141a;
   --c-panel: #191d26;
   --c-panel2: #1f242f;
+  /* 悬浮反馈色：比 panel2 亮一档，暗色面板上足够醒目 */
+  --c-hover: #29303e;
   --c-line: #2b3240;
   --c-ink: #e6eaf2;
   --c-ink-soft: #8b95a8;

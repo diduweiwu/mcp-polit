@@ -13,6 +13,15 @@ disableNativeTextCorrection();
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());
 
+// 屏蔽 WebView 原生右键菜单（含「重新加载/Reload」等 WebView 调试项）；
+// 输入框 / 文本域 / 富文本编辑器（CodeMirror）保留系统菜单，复制粘贴不受影响。
+// 自绘右键菜单（资源树）在合成层已 stopPropagation，不会走到这里
+document.addEventListener("contextmenu", (e) => {
+  const target = e.target as HTMLElement | null;
+  if (target?.closest("input, textarea, [contenteditable]")) return;
+  e.preventDefault();
+});
+
 // 浏览器演示模式：纯浏览器打开时注入 mock IPC（仅 DEV，生产构建不含）
 if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
   await import("./dev-mock");

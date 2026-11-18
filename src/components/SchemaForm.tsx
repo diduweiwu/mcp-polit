@@ -4,6 +4,7 @@
  * 支持：string（含 enum 下拉、密码框）、number/integer、boolean、
  * 基础类型数组、嵌套对象；复杂结构回退为 JSON 文本编辑。
  */
+import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import type { JsonSchema } from "../types";
 
@@ -274,6 +275,8 @@ function Row({
   desc?: string;
   children: React.ReactNode;
 }) {
+  /** 描述默认两行截断，点击切换全文（行内本地态即可） */
+  const [descExpanded, setDescExpanded] = useState(false);
   return (
     <div>
       <label className="label">
@@ -286,7 +289,15 @@ function Row({
       </label>
       {children}
       {desc && (
-        <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-inksoft/80">{desc}</div>
+        <div
+          className={`mt-0.5 text-[11px] leading-snug text-inksoft/80 ${
+            descExpanded ? "selectable" : "cursor-pointer line-clamp-2"
+          }`}
+          title={descExpanded ? "点击收起" : desc}
+          onClick={() => setDescExpanded((v) => !v)}
+        >
+          {desc}
+        </div>
       )}
     </div>
   );

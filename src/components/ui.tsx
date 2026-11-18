@@ -265,6 +265,8 @@ interface SearchSelectProps {
   onSelect: (value: string) => void;
   /** 触发按钮宽度（px），下拉面板宽度取 max(width, 220)；默认 220 */
   width?: number;
+  /** 面板对齐方向：靠窗口/栏右缘的触发器传 right，防止面板溢出；默认 left */
+  align?: "left" | "right";
 }
 
 /**
@@ -288,6 +290,7 @@ export function SearchSelect({
   options,
   onSelect,
   width = 220,
+  align = "left",
 }: SearchSelectProps) {
   const [open, setOpen] = useState(false);
   /** 过滤关键字 */
@@ -328,7 +331,9 @@ export function SearchSelect({
 
       {open && (
         <div
-          className="card anim-pop-in absolute top-full z-40 mt-1 overflow-hidden shadow-xl"
+          className={`card anim-pop-in absolute top-full z-40 mt-1 overflow-hidden shadow-xl ${
+            align === "right" ? "right-0" : "left-0"
+          }`}
           style={{ width: Math.max(width, 220) }}
         >
           {/* 搜索框：打开即聚焦，直接输入即可过滤 */}

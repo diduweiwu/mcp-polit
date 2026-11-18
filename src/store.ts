@@ -123,6 +123,8 @@ interface AppState {
 
   createProject: (name: string, syncDir?: string) => Promise<void>;
   renameProject: (id: number, name: string) => Promise<void>;
+  /** 更新项目同步目录（null 解除绑定）；本地 projects 缓存同步更新 */
+  updateProjectSyncDir: (id: number, syncDir: string | null) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
 
   createNode: (parentId: number | null, type: NodeType, name: string) => Promise<void>;
@@ -135,6 +137,10 @@ interface AppState {
   expandNode: (id: number) => void;
   /** 折叠/展开切换 */
   toggleExpand: (id: number) => void;
+  /** 一键展开当前项目全部目录 */
+  expandAllFolders: () => void;
+  /** 一键收起当前项目全部目录 */
+  collapseAllFolders: () => void;
 
   /** 选中一个树节点：server 显示配置摘要，不自动连接（连接由双击/按钮触发） */
   selectNode: (id: number, opts?: { autoConnect?: boolean }) => Promise<void>;
@@ -332,6 +338,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
 
+  /** 更新项目同步目录：后端返回含绝对路径的项目，用它覆盖本地缓存（SyncBar 随之显隐） */
+  async updateProjectSyncDir(id, syncDir) {
+    const updated = await api.updateProjectSyncDir(id, syncDir);
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? updated : p)),
+    }));
+  },
+
   async deleteProject(id) {
     await api.deleteProject(id);
     const rest = get().projects.filter((p) => p.id !== id);
@@ -392,6 +406,22 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleExpand(id) {
     set((s) => ({ expandedIds: { ...s.expandedIds, [id]: !s.expandedIds[id] } }));
+  },
+
+  /** 一键展开：全部目录置为展开 */
+  expandAllFolders() {
+    set((s) => {
+      const expandedIds: Record<number, boolean> = {};
+      for (const n of s.nodes) {
+        if (n.node_type === "folder") expandedIds[n.id] = true;
+      }
+      return { expandedIds };
+    });
+  },
+
+  /** 一键收起：清空展开表（目录全部折叠） */
+  collapseAllFolders() {
+    set({ expandedIds: {} });
   },
 
   async selectNode(id, opts) {

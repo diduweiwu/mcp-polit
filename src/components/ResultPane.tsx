@@ -7,6 +7,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertCircle,
   Braces,
   Check,
   ChevronUp,
@@ -20,6 +21,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useAppStore } from "../store";
+import { copyText } from "../lib/clipboard";
 import type { CallResult, LogLevel } from "../types";
 import { EmptyState } from "./ui";
 import { JsonNode } from "./JsonView";
@@ -313,10 +315,10 @@ function TabBtn({
 function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) {
   const [view, setView] = useState<"tree" | "raw">("tree");
   const [tab, setTab] = useState<"content" | "structured">("content");
-  /** 响应复制成功的短暂标记 */
-  const [copied, setCopied] = useState(false);
-  /** 请求入参复制成功的短暂标记 */
-  const [argsCopied, setArgsCopied] = useState(false);
+  /** 响应复制反馈：ok=已复制，fail=失败（剪贴板受限时可见，不假成功） */
+  const [copyState, setCopyState] = useState<"idle" | "ok" | "fail">("idle");
+  /** 请求入参复制反馈：同上 */
+  const [argsCopyState, setArgsCopyState] = useState<"idle" | "ok" | "fail">("idle");
   /** 折叠态：非最新结果默认只显示摘要行，手动展开查看详情 */
   const [collapsed, setCollapsed] = useState(!isNew);
 
@@ -363,11 +365,10 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
     }
   }, [result.arguments]);
 
-  /** 复制请求入参（格式化后的 JSON） */
+  /** 复制请求入参（格式化后的 JSON）；失败时按钮短暂显示错误态 */
   const copyArgs = async () => {
-    await navigator.clipboard.writeText(formattedArgs).catch(() => {});
-    setArgsCopied(true);
-    setTimeout(() => setArgsCopied(false), 1200);
+    setArgsCopyState((await copyText(formattedArgs)) ? "ok" : "fail");
+    setTimeout(() => setArgsCopyState("idle"), 1200);
   };
 
   /** 复制当前响应视图：内容 tab 复制文本体（无文本时回退原始 content），结构化 tab 复制美化 JSON */
@@ -376,9 +377,8 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
       tab === "structured"
         ? JSON.stringify(structured, null, 2)
         : textBody || JSON.stringify(result.content, null, 2);
-    await navigator.clipboard.writeText(raw).catch(() => {});
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
+    setCopyState((await copyText(raw)) ? "ok" : "fail");
+    setTimeout(() => setCopyState("idle"), 1200);
   };
 
   return (
@@ -419,10 +419,16 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
               </span>
               <button
                 className="rounded p-1 text-inksoft hover:bg-panel hover:text-ink"
-                title="复制入参 JSON"
+                title={argsCopyState === "fail" ? "复制失败" : "复制入参 JSON"}
                 onClick={() => void copyArgs()}
               >
-                {argsCopied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+                {argsCopyState === "ok" ? (
+                  <Check size={13} className="text-ok" />
+                ) : argsCopyState === "fail" ? (
+                  <AlertCircle size={13} className="text-err" />
+                ) : (
+                  <Copy size={13} />
+                )}
               </button>
             </div>
             <pre className="max-h-[120px] overflow-y-auto whitespace-pre-wrap break-all px-2.5 py-2 font-mono text-[12px] leading-relaxed text-inksoft selectable">
@@ -455,10 +461,16 @@ function ResultCard({ result, isNew }: { result: CallResult; isNew?: boolean }) 
               </ViewToggle>
               <button
                 className="rounded p-1 text-inksoft hover:bg-panel hover:text-ink"
-                title="复制响应"
+                title={copyState === "fail" ? "复制失败" : "复制响应"}
                 onClick={() => void copyResult()}
               >
-                {copied ? <Check size={13} className="text-ok" /> : <Copy size={13} />}
+                {copyState === "ok" ? (
+                  <Check size={13} className="text-ok" />
+                ) : copyState === "fail" ? (
+                  <AlertCircle size={13} className="text-err" />
+                ) : (
+                  <Copy size={13} />
+                )}
               </button>
             </div>
             <div className="max-h-[300px] overflow-y-auto p-2.5">
