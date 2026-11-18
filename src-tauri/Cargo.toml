@@ -46,6 +46,10 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 tauri-plugin-updater = "2.14.1"
 tauri-plugin-process = "2.4.0"
 tauri-plugin-decorum = "1.1.1"
+# 系统「选择目录」对话框：项目同步目录可直接从文件系统挑选（新建/编辑/管理项目弹窗用）
+tauri-plugin-dialog = "2"
+# 系统默认浏览器/文件管理器打开 URL 与路径：顶栏、关于页的 GitHub 仓库入口
+tauri-plugin-opener = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

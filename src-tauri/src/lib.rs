@@ -33,6 +33,10 @@ pub fn run() {
         // 并挂 NSWindowDelegate 在 resize/退出全屏时重钉；Windows/Linux 为空操作。
         // 纯 Rust API，无需 capabilities 权限与前端 binding。
         .plugin(tauri_plugin_decorum::init())
+        // 系统目录选择对话框：项目同步目录「选择目录」按钮（前端 @tauri-apps/plugin-dialog）
+        .plugin(tauri_plugin_dialog::init())
+        // 系统默认浏览器打开 URL：顶栏、关于页的 GitHub 仓库入口（前端 @tauri-apps/plugin-opener）
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // 数据库文件位置：系统应用数据目录/<identifier>/mcpilot.db
             let data_dir = app.path().app_data_dir()?;
@@ -124,9 +128,7 @@ pub fn run() {
             commands::append_history,
             commands::list_history,
             commands::clear_history,
-            // Git 同步
-            commands::sync_export,
-            commands::sync_import,
+            // Git 同步（项目级：推送/拉取/分支）
             commands::project_sync_push,
             commands::project_sync_pull,
             commands::project_branches,

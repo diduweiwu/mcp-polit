@@ -114,6 +114,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       projects.push(p); return p;
     }
     case "rename_project": { const p = projects.find((x) => x.id === args.id); if (p) p.name = args.name as string; return null; }
+    // 更新同步目录：必须返回更新后的完整项目（store 用返回值覆盖本地缓存，返回 null 会导致渲染崩溃）
+    case "update_project_sync_dir": {
+      const p = projects.find((x) => x.id === args.id);
+      if (p) p.sync_dir = (args.syncDir as string) ?? null;
+      return p ?? null;
+    }
     case "delete_project": { const i = projects.findIndex((x) => x.id === args.id); if (i >= 0) projects.splice(i, 1); return null; }
     case "list_nodes": return nodes.filter((n) => n.project_id === args.projectId);
     case "create_node": {
@@ -161,14 +167,6 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       demoHistory.unshift({ ...result, node_id: args.nodeId, server_name: "GitHub Copilot", timestamp: "now" });
       return result;
     }
-    case "sync_export": return [
-      { level: "info", message: "项目「演示项目」已导出：5 个节点 / 3 个 Server（已脱敏）" },
-      { level: "info", message: "已提交到本地 git 仓库" },
-      { level: "info", message: "已推送到远端" },
-    ];
-    case "sync_import": return [
-      { level: "info", message: "项目「演示项目」导入完成：2 目录 / 3 Server（覆盖当前配置）" },
-    ];
     case "project_sync_push": return [
       { level: "info", message: "项目「演示项目」已导出：5 个节点 / 3 个 Server（已脱敏）" },
       { level: "info", message: "已提交到本地仓库" },
@@ -196,6 +194,13 @@ if (!("__TAURI_INTERNALS__" in window)) {
       // 演示模式的版本与更新检查：显示固定版本、检查更新视为「已是最新」
       if (cmd === "plugin:app|version") return Promise.resolve("0.1.2");
       if (cmd === "plugin:updater|check") return Promise.resolve(null);
+      // 演示模式的系统目录选择：返回固定假路径，便于演示「选择目录」的填入效果
+      if (cmd === "plugin:dialog|open") return Promise.resolve("/Users/demo/mcpilot-sync");
+      // 演示模式的仓库入口：桌面端由 opener 插件打开系统浏览器，这里直接用浏览器新标签打开
+      if (cmd === "plugin:opener|open_url") {
+        window.open(String(args?.url ?? ""), "_blank");
+        return Promise.resolve(null);
+      }
       return Promise.resolve(handle(cmd, args));
     },
   };

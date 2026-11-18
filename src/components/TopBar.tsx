@@ -7,20 +7,23 @@ import {
   Check,
   ChevronDown,
   Columns3,
+  FolderCog,
   FolderPlus,
   Monitor,
   Moon,
-  Pencil,
   Plus,
   Settings,
   Sun,
-  Trash2,
   Zap,
 } from "lucide-react";
 import { useAppStore } from "../store";
 import { THEME_MODE_OPTIONS, type ThemeMode } from "../theme";
-import { ConfirmDialog, Dropdown, MenuItem, Modal } from "./ui";
+import { openRepoPage, REPO_URL } from "../api";
+import { Dropdown, MenuItem, Modal } from "./ui";
+import { GithubIcon } from "./icons";
 import { SettingsModal } from "./SettingsModal";
+import { ProjectManageModal } from "./ProjectManageModal";
+import { SyncDirField } from "./SyncDirField";
 
 /** 风格模式 -> 图标 */
 function ModeIcon({ mode }: { mode: ThemeMode }) {
@@ -62,9 +65,6 @@ export function TopBar() {
     themeMode,
     setActiveProject,
     createProject,
-    renameProject,
-    updateProjectSyncDir,
-    deleteProject,
     setThemeMode,
   } = useAppStore();
 
@@ -72,12 +72,8 @@ export function TopBar() {
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newSyncDir, setNewSyncDir] = useState("");
-  /** 编辑项目弹窗：名称 + 同步目录（重命名入口升级而来，随时可改基础信息） */
-  const [editOpen, setEditOpen] = useState(false);
-  const [editName, setEditName] = useState("");
-  const [editSyncDir, setEditSyncDir] = useState("");
-  const [editError, setEditError] = useState("");
-  const [deleteOpen, setDeleteOpen] = useState(false);
+  /** 管理项目弹窗：全部项目的重命名 / 配置同步目录 / 删除集中在此 */
+  const [manageOpen, setManageOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   /* 全局快捷键：⌘,（macOS）/ Ctrl+,（其他平台）打开设置（桌面应用惯例键位）。
@@ -108,37 +104,6 @@ export function TopBar() {
       setNewOpen(false);
     } catch (e) {
       useAppStore.getState().addLog("error", `创建项目失败：${e}`);
-    }
-  };
-
-  /** 打开编辑弹窗：带入当前项目基础信息 */
-  const openEdit = () => {
-    if (!active) return;
-    setEditName(active.name);
-    setEditSyncDir(active.sync_dir ?? "");
-    setEditError("");
-    setEditOpen(true);
-  };
-
-  /** 提交编辑：名称与同步目录分别按需保存；失败在弹窗顶部提示 */
-  const submitEdit = async () => {
-    if (!active) return;
-    setEditError("");
-    const name = editName.trim();
-    const dir = editSyncDir.trim();
-    if (!name) {
-      setEditError("请填写项目名称");
-      return;
-    }
-    try {
-      if (name !== active.name) await renameProject(active.id, name);
-      if (dir !== (active.sync_dir ?? "")) {
-        // 空串传 null：解除绑定（Git 同步条随之隐藏）
-        await updateProjectSyncDir(active.id, dir || null);
-      }
-      setEditOpen(false);
-    } catch (e) {
-      setEditError(String(e));
     }
   };
 
@@ -212,27 +177,6 @@ export function TopBar() {
                   close();
                 }}
               />
-              {active && (
-                <>
-                  <MenuItem
-                    icon={<Pencil size={14} />}
-                    label="编辑当前项目"
-                    onClick={() => {
-                      openEdit();
-                      close();
-                    }}
-                  />
-                  <MenuItem
-                    icon={<Trash2 size={14} />}
-                    label="删除当前项目"
-                    danger
-                    onClick={() => {
-                      setDeleteOpen(true);
-                      close();
-                    }}
-                  />
-                </>
-              )}
             </>
           )}
         </Dropdown>
@@ -247,9 +191,18 @@ export function TopBar() {
         >
           <FolderPlus size={15} />
         </button>
+
+        {/* 管理项目：全部项目的重命名 / 配置同步目录 / 删除集中管理 */}
+        <button
+          className="btn-ghost h-8 !px-2"
+          title="管理项目（重命名 / 配置同步目录 / 删除）"
+          onClick={() => setManageOpen(true)}
+        >
+          <FolderCog size={15} />
+        </button>
       </div>
 
-      {/* 右侧：均分布局 + 设置 + 主题色 + 明暗切换 */}
+      {/* 右侧：均分布局 + 设置 + 主题色 + 明暗切换 + GitHub 仓库 */}
       <div className="flex items-center gap-1.5">
         <button
           className="btn-ghost h-8 !px-2"
@@ -305,6 +258,14 @@ export function TopBar() {
             </>
           )}
         </Dropdown>
+        {/* GitHub 仓库主页：系统默认浏览器打开 */}
+        <button
+          className="btn-ghost h-8 !px-2"
+          title={`GitHub 仓库（${REPO_URL}）`}
+          onClick={() => void openRepoPage()}
+        >
+          <GithubIcon size={15} />
+        </button>
       </div>
 
       {/* 新建项目弹窗 */}
@@ -335,15 +296,10 @@ export function TopBar() {
         />
         <div className="mt-3">
           <label className="label">同步目录（可选，开启 Git 同步）</label>
-          <input
-            className="field font-mono"
-            placeholder="~/mcpilot-sync/backend 或本地 git 仓库路径"
-            value={newSyncDir}
-            onChange={(e) => setNewSyncDir(e.target.value)}
-          />
+          <SyncDirField value={newSyncDir} onChange={setNewSyncDir} />
           <p className="mt-1.5 text-[12px] leading-relaxed text-inksoft">
-            填写后该项目与此目录绑定：目录不存在会自动创建，非 git 目录会自动
-            <span className="font-mono"> git init</span>。开启后可在资源树切换分支、推送/拉取配置。
+            填写后该项目与此目录绑定：目录必须是<b>空目录</b>（不存在会自动创建，非 git 目录会自动
+            <span className="font-mono"> git init</span>）。开启后可在资源树切换分支、推送/拉取配置。
           </p>
         </div>
         <p className="mt-2 text-[12px] text-inksoft">
@@ -351,66 +307,8 @@ export function TopBar() {
         </p>
       </Modal>
 
-      {/* 编辑项目弹窗：基础信息（名称 + 同步目录）随时可改 */}
-      <Modal
-        open={editOpen}
-        title="编辑项目"
-        onClose={() => setEditOpen(false)}
-        width={480}
-        footer={
-          <>
-            <button className="btn-ghost" onClick={() => setEditOpen(false)}>
-              取消
-            </button>
-            <button className="btn-primary" onClick={() => void submitEdit()}>
-              保存
-            </button>
-          </>
-        }
-      >
-        {editError && (
-          <div className="mb-3 rounded-md border border-err/30 bg-err/10 px-3 py-2 text-[12px] text-err">
-            {editError}
-          </div>
-        )}
-        <label className="label">
-          项目名称
-          <span className="ml-0.5 text-err" title="必填">*</span>
-        </label>
-        <input
-          className="field"
-          autoFocus
-          value={editName}
-          onChange={(e) => setEditName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && void submitEdit()}
-        />
-        <div className="mt-3">
-          <label className="label">同步目录（可选，开启 Git 同步）</label>
-          <input
-            className="field font-mono"
-            placeholder="~/mcpilot-sync/backend 或本地 git 仓库路径"
-            value={editSyncDir}
-            onChange={(e) => setEditSyncDir(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void submitEdit()}
-          />
-          <p className="mt-1.5 text-[12px] leading-relaxed text-inksoft">
-            目录不存在会自动创建，非 git 目录会自动
-            <span className="font-mono"> git init</span>；清空并保存即解除绑定（原有仓库内容不受影响）。
-          </p>
-        </div>
-      </Modal>
-
-      {/* 删除确认 */}
-      <ConfirmDialog
-        open={deleteOpen}
-        title="删除项目"
-        message={`确定删除项目「${active?.name}」吗？其下全部目录、Server 配置将被一并删除，且不可恢复。`}
-        onCancel={() => setDeleteOpen(false)}
-        onConfirm={() => {
-          if (active) void deleteProject(active.id);
-          setDeleteOpen(false);
-        }}
-      />
+      {/* 管理项目弹窗：重命名 / 配置同步目录（可选目录） / 删除，集中管理全部项目 */}
+      <ProjectManageModal open={manageOpen} onClose={() => setManageOpen(false)} />
 
       {/* 设置弹窗 */}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />

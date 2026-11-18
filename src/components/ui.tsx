@@ -37,6 +37,18 @@ interface ModalProps {
   footer?: ReactNode;
   width?: number;
   /**
+   * 固定高度（px，可选）：设置后弹窗整体高度恒定，正文占满剩余空间（flex-1）内部滚动，
+   * 适合内容长短不一的多页签弹窗（如设置页），切换页签时弹窗尺寸不跳变；
+   * 不传时保持原有行为——高度随内容自适应，正文以 max-h 限高滚动。
+   */
+  height?: number;
+  /**
+   * 是否允许 Esc 关闭（默认 true）。嵌套弹窗场景（如管理列表内再弹删除确认）
+   * 内层打开期间外层应传 false，避免按一次 Esc 把两层弹窗一起关闭；
+   * 点击遮罩关闭不受影响——内层遮罩盖住外层，点击天然只落在最上层。
+   */
+  escClose?: boolean;
+  /**
    * 内容滚动容器 ref（可选）：父组件可借此操作滚动位置，
    * 典型用途是校验错误出现在顶部时把内容滚回去，保证反馈可见。
    */
@@ -44,7 +56,17 @@ interface ModalProps {
 }
 
 /** 通用模态框：带淡入/缩放入出场动画、Esc 关闭、点击遮罩关闭 */
-export function Modal({ open, title, onClose, children, footer, width = 520, bodyRef }: ModalProps) {
+export function Modal({
+  open,
+  title,
+  onClose,
+  children,
+  footer,
+  width = 520,
+  height,
+  escClose = true,
+  bodyRef,
+}: ModalProps) {
   /** 退出动画播放中标记（动画结束后才真正回调 onClose 卸载） */
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
@@ -69,15 +91,15 @@ export function Modal({ open, title, onClose, children, footer, width = 520, bod
     }
   }, [open]);
 
-  /* Esc 关闭 */
+  /* Esc 关闭（escClose=false 时跳过，供嵌套弹窗的外层禁用） */
   useEffect(() => {
-    if (!open) return;
+    if (!open || !escClose) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open, requestClose]);
+  }, [open, escClose, requestClose]);
 
   if (!open) return null;
   /* Portal 到 body：避免渲染在 Allotment 分栏子树内时被 pane 的绘制层盖住 */
@@ -91,10 +113,10 @@ export function Modal({ open, title, onClose, children, footer, width = 520, bod
       }}
     >
       <div
-        className={`card max-h-[85vh] w-full overflow-hidden shadow-2xl ${
+        className={`card flex max-h-[85vh] w-full flex-col overflow-hidden shadow-2xl ${
           closing ? "anim-zoom-out" : "anim-zoom-in"
         }`}
-        style={{ maxWidth: width }}
+        style={{ maxWidth: width, ...(height ? { height } : {}) }}
       >
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <div className="text-[14px] font-semibold">{title}</div>
@@ -106,8 +128,14 @@ export function Modal({ open, title, onClose, children, footer, width = 520, bod
             <X size={16} />
           </button>
         </div>
-        {/* selectable：弹窗正文（说明文字等）允许拖选复制；输入框本就可选中 */}
-        <div ref={bodyRef} className="selectable max-h-[62vh] overflow-y-auto px-4 py-3">{children}</div>
+        {/* selectable：弹窗正文（说明文字等）允许拖选复制；输入框本就可选中。
+            固定高度时正文 flex-1 占满剩余空间内部滚动；否则沿用 max-h 自适应限高 */}
+        <div
+          ref={bodyRef}
+          className={`selectable overflow-y-auto px-4 py-3 ${height ? "min-h-0 flex-1" : "max-h-[62vh]"}`}
+        >
+          {children}
+        </div>
         {footer && (
           <div className="flex justify-end gap-2 border-t border-line bg-panel2 px-4 py-3">
             {footer}

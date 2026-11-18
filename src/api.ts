@@ -2,6 +2,8 @@
  * Tauri IPC 封装层：所有对 Rust 后端的调用集中在这里，带完整类型。
  */
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   BranchInfo,
   CallResult,
@@ -12,6 +14,9 @@ import type {
   TreeNode,
   NodeType,
 } from "./types";
+
+/** 项目 GitHub 仓库主页（顶栏与关于页的仓库入口共用） */
+export const REPO_URL = "https://github.com/diduweiwu/mcp-polit";
 
 /* ---------- 项目 ---------- */
 
@@ -26,15 +31,52 @@ export const createProject = (name: string, syncDir?: string) =>
 export const renameProject = (id: number, name: string) =>
   invoke<void>("rename_project", { id, name });
 
-/** 更新项目同步目录（传 null 解除绑定；目录会校验/自动 git init），返回更新后的项目 */
+/**
+ * 更新项目同步目录（传 null 解除绑定）。
+ *
+ * 目录规则：必须是空目录（不存在会自动创建并 git init），非空目录拒绝绑定；
+ * 绑定成功后项目已有数据会自动迁移到该目录并创建初始提交。
+ *
+ * @returns 元组：[更新后的项目，操作日志]——日志（迁移/错误信息）由调用方写入日志面板
+ */
 export const updateProjectSyncDir = (id: number, syncDir: string | null) =>
-  invoke<Project>("update_project_sync_dir", { id, syncDir });
+  invoke<[Project, Array<{ level: string; message: string }>]>("update_project_sync_dir", {
+    id,
+    syncDir,
+  });
 
 /** 用系统文件管理器打开目录（macOS Finder / Windows 资源管理器 / Linux 文件管理器） */
 export const openDir = (path: string) => invoke<void>("open_dir", { path });
 
 /** 删除项目（级联删除节点与配置，后端会先断开连接） */
 export const deleteProject = (id: number) => invoke<void>("delete_project", { id });
+
+/**
+ * 打开系统「选择目录」对话框（tauri-plugin-dialog），供同步目录字段一键填入。
+ * 不限制所选目录是否为 git 仓库——绑定后端会校验/创建并自动 git init。
+ *
+ * @param title 对话框标题（如「选择同步目录」）
+ * @returns 确认选择时返回目录绝对路径；取消或关闭对话框时返回 null
+ * @throws 插件调起失败时抛出异常（权限被拒等），调用方自行捕获
+ */
+export async function pickDirectory(title: string): Promise<string | null> {
+  const picked = await open({ directory: true, multiple: false, title });
+  return typeof picked === "string" ? picked : null;
+}
+
+/**
+ * 用系统默认浏览器打开项目 GitHub 仓库主页（tauri-plugin-opener）。
+ * 浏览器演示模式（无 Tauri 环境）下降级为 window.open 新标签页打开。
+ *
+ * @throws opener 插件调起失败时抛出异常，调用方自行捕获处理
+ */
+export async function openRepoPage(): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    window.open(REPO_URL, "_blank");
+    return;
+  }
+  await openUrl(REPO_URL);
+}
 
 /* ---------- 树节点 ---------- */
 
@@ -155,16 +197,6 @@ export const listHistory = (limit: number, offset: number) =>
 
 /** 清空全部调用历史 */
 export const clearHistory = () => invoke<void>("clear_history");
-
-/* ---------- Git 同步 ---------- */
-
-/** 导出全部项目到 git 仓库，返回操作日志 */
-export const syncExport = () =>
-  invoke<Array<{ level: string; message: string }>>("sync_export");
-
-/** 从 git 仓库导入全部项目（覆盖同名项目），返回操作日志 */
-export const syncImport = () =>
-  invoke<Array<{ level: string; message: string }>>("sync_import");
 
 /* ---------- 项目级同步 ---------- */
 

@@ -12,7 +12,7 @@ MCPilot 是一个跨平台的 [MCP (Model Context Protocol)](https://modelcontex
 
 ### 项目与资源树
 
-- 多项目管理，左上角随时切换；支持随时编辑名称与 **Git 同步目录**（自动 git init），资源树栏头可一键在文件管理器中打开项目目录
+- 多项目管理，左上角随时切换；「管理项目」弹窗集中完成全部项目的重命名、配置与删除；同步目录支持手动输入或**从文件系统挑选**（自动 git init），资源树栏头可一键在文件管理器中打开项目目录
 - 目录无限嵌套、拖拽移动、右键管理；展开/收起带动画，整栏可折叠
 - Server 按协议类型着色标识（stdio 绿 / Streamable HTTP 紫）与连接状态点
 
@@ -39,8 +39,8 @@ MCPilot 是一个跨平台的 [MCP (Model Context Protocol)](https://modelcontex
 
 ### Git 同步
 
-- **项目级**（资源树同步条）：分支切换、推送（导出+commit+push）、拉取（pull+覆盖导入）
-- **全局级**（设置页）：全部项目导出/导入到统一仓库
+- **项目级**（管理项目弹窗绑定同步目录 + 资源树同步条）：分支切换、推送（导出+commit+push）、拉取（pull+覆盖导入）
+- 推送脱敏开关在「管理项目」弹窗底部（全局生效）；仓库若同步到公开远端请保持关闭
 - 仓库结构即项目：`tree.json` + `servers/<别名>.json`；只扫描 `.json`，损坏文件记入日志并跳过不加载；同目录 Server 别名不允许重名；默认**脱敏导出**（headers/env → `***`）
 
 ### 外观
@@ -120,7 +120,7 @@ node examples/http-server.mjs
 - 所有 SQL 使用 prepared statement，防注入；git 命令参数数组执行
 - 请求头 / 环境变量等敏感值不写日志、不出现在错误信息中（自动脱敏，含激活环境合并后的值）
 - 已知取舍：敏感配置目前**明文存于本机数据库**（与官方 MCP Inspector 行为一致）；后续可接入操作系统 Keychain 做加密存储
-- Tauri capability 最小化（仅 `core:default` + 窗口拖动），生产构建启用严格 CSP
+- Tauri capability 最小化（仅 `core:default` + 窗口拖动 + updater/process/dialog 插件所需权限），生产构建启用严格 CSP
 
 ## 版权说明
 

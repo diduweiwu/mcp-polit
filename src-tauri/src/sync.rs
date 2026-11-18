@@ -1,9 +1,7 @@
 //! Git 同步模块：项目配置与 git 仓库之间的导入/导出。
 //!
-//! 两种模式：
-//! - **项目级**（主要入口）：每个项目可绑定自己的 git 仓库目录（`projects.sync_dir`），
-//!   资源树中直接推送/拉取/切分支。仓库根即项目根：`tree.json` + `servers/<别名>.json`。
-//! - **全局级**（设置页）：把全部项目导出到统一仓库的 `projects/<项目名>/` 子目录。
+//! **项目级同步**（唯一模式）：每个项目可绑定自己的 git 仓库目录（`projects.sync_dir`），
+//! 资源树中直接推送/拉取/切分支。仓库根即项目根：`tree.json` + `servers/<别名>.json`。
 //!
 //! 通用规则：
 //! - 只扫描/读写 `.json` 文件；解析失败的文件记入日志并跳过，绝不静默加载
@@ -170,89 +168,62 @@ pub async fn pull_project(app: &AppHandle, db: &Db, project_id: i64) -> Vec<LogE
     logs
 }
 
-/* ==================== 全局同步（设置页导出/导入全部） ==================== */
-
-/// 导出全部项目到统一仓库（settings 配置的 sync_repo_path）。
-pub async fn export_all(app: &AppHandle, db: &Db, repo: &Path, include_secrets: bool) -> Vec<LogEntry> {
+/// 项目绑定新的空同步目录后，把项目当前数据迁移进去：导出 JSON + 创建初始提交。
+///
+/// 与推送不同：不执行 git pull（新目录是空仓库，无历史可拉）、不执行 git push
+/// （新目录通常尚未配置远端），只做本地导出与提交；用户随后可正常推送/拉取。
+/// 项目没有任何节点与 Server 时跳过迁移（仅完成绑定），日志里给出说明。
+pub async fn migrate_project_to_dir(db: &Db, project_id: i64, dir: &Path) -> Vec<LogEntry> {
     let mut logs = Vec::new();
-    if !repo.is_dir() {
-        logs.push(entry("error", format!("仓库目录不存在：{}", repo.display())));
-        return logs;
-    }
-    ensure_git_repo(repo, &mut logs).await;
-    if let Err(e) = git_async(repo, &["pull", "--ff-only"]).await {
-        logs.push(entry("warn", format!("git pull 失败（继续导出本地内容）：{e}")));
-    }
-
-    let projects = {
+    let (project, include_secrets) = {
         let conn = db.0.lock().unwrap();
-        crate::db::list_projects(&conn).unwrap_or_default()
+        let p = match crate::db::get_project(&conn, project_id) {
+            Ok(p) => p,
+            Err(e) => {
+                logs.push(entry("error", format!("读取项目失败：{e}")));
+                return logs;
+            }
+        };
+        let secrets = crate::db::get_all_settings(&conn)
+            .unwrap_or_default()
+            .iter()
+            .any(|(k, v)| k == "sync_include_secrets" && v == "1");
+        (p, secrets)
     };
-    if projects.is_empty() {
-        logs.push(entry("warn", "没有任何项目可导出".into()));
+    let repo = dir.to_path_buf();
+    if !repo.is_dir() {
+        logs.push(entry("error", format!("同步目录不存在：{}", dir.display())));
         return logs;
     }
-    let projects_root = repo.join("projects");
-    for project in &projects {
-        let data = load_project_data(db, project, include_secrets, &mut logs);
-        let Some((nodes, servers)) = data else { continue };
-        let dir = projects_root.join(safe_name(&project.name));
-        if let Err(e) = write_project_files(&dir, &project.name, &nodes, &servers) {
-            logs.push(entry("error", format!("写入 {} 失败：{e}", dir.display())));
-            continue;
-        }
-        logs.push(entry("info", format!(
-            "项目「{}」已导出：{} 个节点 / {} 个 Server（{}）",
-            project.name,
-            nodes.len(),
-            servers.len(),
-            if include_secrets { "含敏感信息" } else { "已脱敏" }
-        )));
+
+    let data = load_project_data(db, &project, include_secrets, &mut logs);
+    let Some((nodes, servers)) = data else {
+        return logs;
+    };
+    if nodes.is_empty() && servers.is_empty() {
+        logs.push(entry("info", format!("项目「{}」暂无数据，同步目录已绑定（待首次推送生成内容）", project.name)));
+        return logs;
     }
 
-    let _ = git_async(repo, &["add", "-A"]).await;
-    match git_async(repo, &["-c", "user.name=MCPilot", "-c", "user.email=mcpilot@local", "commit", "-m", "MCPilot 配置同步"]).await {
-        Ok(_) => {
-            logs.push(entry("info", "已提交到本地 git 仓库".into()));
-            match git_async(repo, &["push"]).await {
-                Ok(_) => logs.push(entry("info", "已推送到远端".into())),
-                Err(e) => logs.push(entry("warn", format!("git push 失败（本地提交已完成）：{e}"))),
-            }
-        }
+    if let Err(e) = write_project_files(&repo, &project.name, &nodes, &servers) {
+        logs.push(entry("error", format!("迁移写入失败：{e}")));
+        return logs;
+    }
+    logs.push(entry("info", format!(
+        "项目「{}」数据已迁移到同步目录：{} 个节点 / {} 个 Server（{}）",
+        project.name,
+        nodes.len(),
+        servers.len(),
+        if include_secrets { "含敏感信息" } else { "已脱敏" }
+    )));
+
+    let _ = git_async(&repo, &["add", "-A"]).await;
+    match git_async(&repo, &["-c", "user.name=MCPilot", "-c", "user.email=mcpilot@local", "commit", "-m", "MCPilot 初始化项目同步"]).await {
+        Ok(_) => logs.push(entry("info", "已创建初始提交".into())),
         Err(e) => {
-            if e.contains("nothing to commit") {
-                logs.push(entry("info", "内容无变化，未产生新提交".into()));
-            } else {
+            if !e.contains("nothing to commit") {
                 logs.push(entry("error", format!("git commit 失败：{e}")));
             }
-        }
-    }
-    let _ = app;
-    logs
-}
-
-/// 从统一仓库导入全部项目（覆盖同名项目）。
-pub async fn import_all(app: &AppHandle, db: &Db, repo: &Path) -> Vec<LogEntry> {
-    let mut logs = Vec::new();
-    if !repo.is_dir() {
-        logs.push(entry("error", format!("仓库目录不存在：{}", repo.display())));
-        return logs;
-    }
-    if let Err(e) = git_async(repo, &["pull", "--ff-only"]).await {
-        logs.push(entry("warn", format!("git pull 失败（使用本地仓库当前内容）：{e}")));
-    }
-    let projects_root = repo.join("projects");
-    let entries = match std::fs::read_dir(&projects_root) {
-        Ok(e) => e,
-        Err(_) => {
-            logs.push(entry("warn", format!("仓库中没有 projects 目录（{}）", projects_root.display())));
-            return logs;
-        }
-    };
-    for entry_path in entries.flatten() {
-        let dir = entry_path.path();
-        if dir.is_dir() {
-            import_tree_dir(&dir, app, db, None, &mut logs).await;
         }
     }
     logs
@@ -510,9 +481,11 @@ async fn import_tree_dir(
         }
     }
 
-    // 建目录树（拓扑序：父节点先建；成环/缺父的节点跳过并记日志）
+    // 建目录树（拓扑序：父节点先建；成环/缺父的节点跳过并记日志）。
+    // 只重建目录节点——server 节点统一由下方「建 Server 配置」按 servers/*.json 创建，
+    // 否则 tree.json 里的 server 节点会先建出一份无配置的空壳，配置阶段再建一份造成重复。
     let mut id_map: HashMap<String, i64> = HashMap::new();
-    let mut pending: Vec<&SyncNode> = nodes.iter().collect();
+    let mut pending: Vec<&SyncNode> = nodes.iter().filter(|n| n.node_type == "folder").collect();
     let mut guard = 0;
     while !pending.is_empty() {
         guard += 1;
@@ -527,10 +500,9 @@ async fn import_tree_dir(
                 return true;
             }
             let parent_id = n.parent.as_deref().and_then(|p| id_map.get(p).copied());
-            let node_type = if n.node_type == "folder" { NodeType::Folder } else { NodeType::Server };
             let result = {
                 let conn = db.0.lock().unwrap();
-                crate::db::create_node(&conn, project_id, parent_id, node_type, &n.name)
+                crate::db::create_node(&conn, project_id, parent_id, NodeType::Folder, &n.name)
                     .map_err(|e| e.to_string())
             };
             match result {
@@ -553,6 +525,24 @@ async fn import_tree_dir(
         }
     }
 
+    // tree.json 里登记的 server 节点：恢复原名 + 检测缺配置文件的情况。
+    // servers/*.json 的文件名经过 safe_name 处理，这里按同样的规则映射回原名，
+    // 配置阶段用原名创建节点（名字保真）；tree 里有名字但 servers/ 缺文件的给 warn。
+    let server_names: HashMap<String, String> = nodes
+        .iter()
+        .filter(|n| n.node_type == "server")
+        .map(|n| (safe_name(&n.name), n.name.clone()))
+        .collect();
+    for n in nodes.iter().filter(|n| n.node_type == "server") {
+        let alias = safe_name(&n.name);
+        if !servers.iter().any(|(a, _)| a == &alias) {
+            logs.push(entry("warn", format!(
+                "Server「{}」缺少 servers/{alias}.json 配置文件，已跳过",
+                n.name
+            )));
+        }
+    }
+
     // 建 Server 配置
     let mut ok = 0;
     for (alias, ss) in &servers {
@@ -565,9 +555,11 @@ async fn import_tree_dir(
             }
         };
         let parent_db = ss.parent.as_deref().and_then(|p| id_map.get(p).copied());
+        /* 用 tree.json 里的原名创建节点：文件名经过安全化替换，原名才是真实 Server 名 */
+        let display_name = server_names.get(alias).map(String::as_str).unwrap_or(alias);
         let node = {
             let conn = db.0.lock().unwrap();
-            crate::db::create_node(&conn, project_id, parent_db, NodeType::Server, alias)
+            crate::db::create_node(&conn, project_id, parent_db, NodeType::Server, display_name)
                 .map_err(|e| e.to_string())
         };
         let node = match node {
@@ -663,22 +655,25 @@ fn scrub(raw: Option<&str>) -> Option<String> {
     serde_json::to_string(&Value::Object(out)).ok()
 }
 
-/// 从 settings 读取全局同步配置（仓库路径 / 是否含敏感信息）。
-pub fn read_sync_settings(conn: &rusqlite::Connection) -> (Option<std::path::PathBuf>, bool) {
-    let all = crate::db::get_all_settings(conn).unwrap_or_default();
-    let path = all
-        .iter()
-        .find(|(k, _)| k == "sync_repo_path")
-        .and_then(|(_, v)| if v.trim().is_empty() { None } else { Some(std::path::PathBuf::from(v)) });
-    let secrets = all
-        .iter()
-        .find(|(k, _)| k == "sync_include_secrets")
-        .map(|(_, v)| v == "1")
-        .unwrap_or(false);
-    (path, secrets)
+/// 检查目录是否含有实际内容（空目录校验用）。
+///
+/// 忽略 `.git`（用户自行 init 过的空仓库，绑定后照常使用）与 `.DS_Store`
+/// （macOS Finder 自动生成的系统文件，不代表用户数据）；其余任何条目都视为有内容。
+fn dir_has_content(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries.flatten().any(|e| {
+            let name = e.file_name();
+            name != ".git" && name != ".DS_Store"
+        }),
+        Err(_) => false,
+    }
 }
 
-/// 准备项目同步目录：展开 ~、创建目录、必要时 git init。返回可用的仓库路径。
+/// 准备项目同步目录：展开 ~、创建目录、校验必须为空目录、必要时 git init。返回可用的仓库路径。
+///
+/// 空目录规则：目录不存在视为合法（自动创建后即为空）；已存在的目录必须为空
+/// （忽略 `.git` / `.DS_Store`），否则拒绝绑定——防止把项目数据绑到已有内容的目录上
+/// 造成推送/拉取互相覆盖。
 pub fn prepare_sync_dir(raw: &str) -> Result<std::path::PathBuf, String> {
     let expanded = if let Some(rest) = raw.strip_prefix("~/") {
         let home = std::env::var("HOME").map_err(|_| "无法确定用户主目录".to_string())?;
@@ -691,6 +686,12 @@ pub fn prepare_sync_dir(raw: &str) -> Result<std::path::PathBuf, String> {
     }
     if !expanded.is_dir() {
         return Err(format!("{} 不是目录", expanded.display()));
+    }
+    if dir_has_content(&expanded) {
+        return Err(format!(
+            "同步目录必须是空目录：「{}」中已有内容。请换一个空目录，或清空该目录后重试",
+            expanded.display()
+        ));
     }
     if !expanded.join(".git").exists() {
         let out = std::process::Command::new("git")
@@ -741,5 +742,41 @@ mod tests {
         std::fs::write(dir.join("bad.json"), "{oops").unwrap();
         assert!(parse_tree(&dir.join("bad.json")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 空目录校验忽略git与系统残留() {
+        let base = std::env::temp_dir().join(format!("mcpilot-empty-test-{}", std::process::id()));
+        // 完全空目录
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        // 仅含 .git（用户自行 init 过的空仓库）
+        let gited = base.join("gited");
+        std::fs::create_dir_all(gited.join(".git")).unwrap();
+        // 仅含 .DS_Store（macOS 系统残留）
+        let dsstore = base.join("dsstore");
+        std::fs::create_dir_all(&dsstore).unwrap();
+        std::fs::write(dsstore.join(".DS_Store"), "").unwrap();
+        // 含实际内容
+        let full = base.join("full");
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(full.join("tree.json"), "{}").unwrap();
+
+        assert!(!dir_has_content(&empty));
+        assert!(!dir_has_content(&gited));
+        assert!(!dir_has_content(&dsstore));
+        assert!(dir_has_content(&full));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn 非空目录拒绝绑定() {
+        let base = std::env::temp_dir().join(format!("mcpilot-bind-test-{}", std::process::id()));
+        let full = base.join("full");
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(full.join("old.txt"), "x").unwrap();
+        let err = prepare_sync_dir(full.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("空目录"), "错误信息应说明必须为空目录：{err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

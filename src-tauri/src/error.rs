@@ -27,11 +27,6 @@ impl AppError {
             message: message.into(),
         }
     }
-
-    /// 构造「未配置同步仓库」的错误（供 `ok_or_else` 使用）。
-    pub fn new_sync_repo() -> Self {
-        Self::new("尚未配置同步仓库路径，请先在「设置 → 同步」中填写")
-    }
 }
 
 impl Serialize for AppError {

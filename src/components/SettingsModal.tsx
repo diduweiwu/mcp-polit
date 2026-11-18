@@ -1,25 +1,27 @@
 /**
- * 设置弹窗：分 tab 展示——外观（明暗三态）、Git 同步（仓库路径/脱敏/导入导出）、
+ * 设置弹窗：左侧竖排 tab 导航 + 右侧内容区——外观（明暗三态）、
  * 关于（版本信息 + 在线更新）。
+ * 弹窗固定高度（Modal height），切 tab 时尺寸不跳变，内容超长由右侧区域内部滚动。
  */
 import { useEffect, useState } from "react";
 import {
   Download,
-  FolderSync,
   Info,
   Loader2,
   Monitor,
   Moon,
+  Palette,
   RefreshCw,
   Sun,
-  Upload,
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore } from "../store";
 import { type ThemeMode } from "../theme";
+import { openRepoPage, REPO_URL } from "../api";
 import { Modal } from "./ui";
+import { GithubIcon } from "./icons";
 
 /** 明暗三态选项 */
 const MODE_OPTIONS: Array<{ key: ThemeMode; label: string; icon: React.ReactNode }> = [
@@ -29,13 +31,12 @@ const MODE_OPTIONS: Array<{ key: ThemeMode; label: string; icon: React.ReactNode
 ];
 
 /** 设置 tab 键 */
-type SettingsTab = "appearance" | "sync" | "about";
+type SettingsTab = "appearance" | "about";
 
-/** 设置 tab 定义（顺序即展示顺序） */
-const TABS: Array<{ key: SettingsTab; label: string }> = [
-  { key: "appearance", label: "外观" },
-  { key: "sync", label: "Git 同步" },
-  { key: "about", label: "关于" },
+/** 设置 tab 定义（顺序即展示顺序，icon 用于左侧导航） */
+const TABS: Array<{ key: SettingsTab; label: string; icon: React.ReactNode }> = [
+  { key: "appearance", label: "外观", icon: <Palette size={14} /> },
+  { key: "about", label: "关于", icon: <Info size={14} /> },
 ];
 
 /** 设置弹窗属性 */
@@ -44,32 +45,37 @@ interface Props {
   onClose: () => void;
 }
 
-/** 设置弹窗：tab 栏 + 各分区（tab 状态跨开关保留，重开停在上次页） */
+/** 设置弹窗：左侧 tab 导航 + 右侧分区（tab 状态跨开关保留，重开停在上次页） */
 export function SettingsModal({ open, onClose }: Props) {
   const [tab, setTab] = useState<SettingsTab>("appearance");
 
   return (
-    <Modal open={open} title="设置" onClose={onClose} width={560}>
-      {/* 分段控件式 tab 栏 */}
-      <div className="mb-4 flex gap-1 rounded-lg bg-panel2 p-1">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`flex-1 rounded-md px-2.5 py-1.5 text-[12.5px] font-medium transition-colors ${
-              tab === t.key
-                ? "bg-panel text-primarystrong shadow-sm"
-                : "text-inksoft hover:text-ink"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+    <Modal open={open} title="设置" onClose={onClose} width={680} height={520}>
+      <div className="flex h-full gap-3.5">
+        {/* 左侧竖排 tab 导航（选中态沿用原分段控件的样式语言） */}
+        <nav className="flex w-[116px] shrink-0 flex-col gap-0.5 rounded-lg bg-panel2 p-1.5">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`flex items-center gap-2 rounded-md px-2.5 py-2 text-[12.5px] font-medium transition-colors ${
+                tab === t.key
+                  ? "bg-panel text-primarystrong shadow-sm"
+                  : "text-inksoft hover:bg-panel/50 hover:text-ink"
+              }`}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          ))}
+        </nav>
 
-      {tab === "appearance" && <AppearanceSection />}
-      {tab === "sync" && <SyncSection />}
-      {tab === "about" && <AboutSection />}
+        {/* 右侧内容区：固定高度下内容各自滚动 */}
+        <div className="min-w-0 flex-1 overflow-y-auto">
+          {tab === "appearance" && <AppearanceSection />}
+          {tab === "about" && <AboutSection />}
+        </div>
+      </div>
     </Modal>
   );
 }
@@ -104,82 +110,6 @@ function AppearanceSection() {
   );
 }
 
-/** Git 同步 tab：全局仓库路径 / 脱敏开关 / 导入导出 */
-function SyncSection() {
-  const { settings, saveSetting, syncExport, syncImport, syncing, projects } =
-    useAppStore();
-
-  /* 初始值直接取自设置缓存（本组件仅在 tab 激活时挂载；改动即保存，切回不丢） */
-  const [repoPath, setRepoPath] = useState(settings["sync_repo_path"] ?? "");
-  const [includeSecrets, setIncludeSecrets] = useState(
-    settings["sync_include_secrets"] === "1",
-  );
-
-  /** 保存同步设置 */
-  const saveSyncSettings = async (secrets: boolean) => {
-    await saveSetting("sync_repo_path", repoPath.trim());
-    await saveSetting("sync_include_secrets", secrets ? "1" : "0");
-  };
-
-  return (
-    <section className="anim-fade-in">
-      <label className="label">仓库路径（本机已有的 git 仓库目录）</label>
-      <input
-        className="field mb-2 font-mono"
-        placeholder="/Users/you/mcpilot-sync（或已 clone 的私有仓库）"
-        value={repoPath}
-        onChange={(e) => setRepoPath(e.target.value)}
-        onBlur={() => void saveSyncSettings(includeSecrets)}
-      />
-      <label className="mb-3 flex cursor-pointer items-start gap-2 text-[12px] leading-relaxed text-inksoft">
-        <input
-          type="checkbox"
-          className="mt-0.5 accent-[var(--c-primary-strong)]"
-          checked={includeSecrets}
-          onChange={(e) => {
-            setIncludeSecrets(e.target.checked);
-            void saveSyncSettings(e.target.checked);
-          }}
-        />
-        <span>
-          导出包含敏感信息（请求头 / 环境变量的真实值）。
-          <span className="text-warn">关闭时这些值以 *** 脱敏导出</span>
-          ；仓库若为公开远端，请务必保持关闭。
-        </span>
-      </label>
-
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          className="btn-ghost h-9"
-          disabled={syncing}
-          onClick={() => {
-            void saveSyncSettings(includeSecrets).then(() => void syncExport());
-          }}
-        >
-          <Upload size={14} /> 导出到 Git
-        </button>
-        <button
-          className="btn-ghost h-9"
-          disabled={syncing}
-          onClick={() => void syncImport()}
-        >
-          <Download size={14} /> 从 Git 导入
-        </button>
-      </div>
-
-      <div className="mt-2.5 flex items-start gap-1.5 rounded-md bg-panel2 p-2.5 text-[11.5px] leading-relaxed text-inksoft">
-        <FolderSync size={14} className="mt-0.5 shrink-0" />
-        <span>
-          导出把{projects.length > 0 ? `全部 ${projects.length} 个项目` : "全部项目"}的目录树与
-          Server 配置写成 JSON 文件（只读写 .json）并 git commit/push；导入为
-          <b>覆盖语义</b>——同名项目会被仓库内容替换。损坏的文件会记录在日志面板并跳过，
-          不会加载；同目录下 Server 别名不允许重复。
-        </span>
-      </div>
-    </section>
-  );
-}
-
 /** 关于 tab：版本信息 + 在线更新 */
 function AboutSection() {
   /** 当前应用版本（浏览器演示模式下取不到，显示为空） */
@@ -193,14 +123,27 @@ function AboutSection() {
 
   return (
     <section className="anim-fade-in">
-      <div className="flex items-start gap-1.5 text-[12px] leading-relaxed text-inksoft">
+      {/* 版本与隐私说明：card 呈现 */}
+      <div className="flex items-start gap-1.5 rounded-md bg-panel2 p-3 text-[12px] leading-relaxed text-inksoft">
         <Info size={14} className="mt-0.5 shrink-0" />
         <span>
           MCPilot {version ? `v${version}` : ""} — 本地 MCP 调试工作台。全部数据仅保存在本机应用数据目录的
           SQLite 中，除你配置的 MCP Server、同步仓库与检查更新（GitHub Releases）外不发起任何网络请求。
         </span>
       </div>
-      <UpdaterSection />
+      {/* GitHub 仓库入口 + 更新状态机：同一行；说明/进度/错误由 UpdaterSection 在下方通栏展示 */}
+      <UpdaterSection
+        className="mt-2.5"
+        leading={
+          <button
+            className="btn-ghost h-8 shrink-0 gap-1.5"
+            title={`在浏览器打开 ${REPO_URL}`}
+            onClick={() => void openRepoPage()}
+          >
+            <GithubIcon size={13} /> GitHub 仓库
+          </button>
+        }
+      />
     </section>
   );
 }
@@ -211,8 +154,17 @@ type UpdateState = "idle" | "checking" | "available" | "downloading" | "installe
 /**
  * 在线更新区：检查 GitHub Releases 最新版本（updater 插件做签名校验），
  * 发现新版本后下载安装（带进度），完成后可一键重启应用。
+ *
+ * @param leading 按钮行最左侧的前置节点（如 GitHub 仓库入口），与更新状态按钮同行
+ * @param className 外层容器附加类名（与上方内容的间距由调用方控制）
  */
-function UpdaterSection() {
+function UpdaterSection({
+  leading,
+  className = "",
+}: {
+  leading?: React.ReactNode;
+  className?: string;
+}) {
   const [state, setState] = useState<UpdateState>("idle");
   /** 已是最新 / 出错时的提示文案 */
   const [note, setNote] = useState("");
@@ -273,8 +225,10 @@ function UpdaterSection() {
     progress.total > 0 ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : 0;
 
   return (
-    <div className="mt-2.5">
+    <div className={`min-w-0 ${className}`}>
+      {/* 第一行：前置节点（GitHub 仓库入口）+ 更新状态按钮/进度文案 */}
       <div className="flex items-center gap-2">
+        {leading}
         {state === "idle" && (
           <button className="btn-ghost h-8 gap-1.5" onClick={() => void doCheck()}>
             <RefreshCw size={13} /> 检查更新
@@ -320,7 +274,7 @@ function UpdaterSection() {
         </div>
       )}
       {state === "idle" && !note && !error && (
-        <p className="mt-1.5 text-[11.5px] leading-relaxed text-inksoft/70">
+        <p className="mt-2 text-[11.5px] leading-relaxed text-inksoft/70">
           检查 GitHub Releases 获取最新版本，下载前会校验更新包签名。
         </p>
       )}

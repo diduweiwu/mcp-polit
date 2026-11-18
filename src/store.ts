@@ -98,7 +98,6 @@ interface AppState {
 
   /* 应用设置缓存（键值对） */
   settings: Record<string, string>;
-  syncing: boolean;
 
   /** 工具参数缓存（key: "nodeId:toolName" -> 入参 JSON；跨切换/重启保留） */
   toolParams: Record<string, string>;
@@ -190,11 +189,6 @@ interface AppState {
   /** 保存一个设置项并同步缓存 */
   saveSetting: (key: string, value: string) => Promise<void>;
 
-  /** 导出到 git 仓库（日志写入面板） */
-  syncExport: () => Promise<void>;
-  /** 从 git 仓库导入（覆盖同名项目，日志写入面板，完成后刷新树） */
-  syncImport: () => Promise<void>;
-
   /** 合并后端推送的连接状态（Tauri event） */
   applyConnState: (ev: { node_id: number; status: ConnStatus; message: string | null }) => void;
 }
@@ -236,7 +230,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadingHistory: false,
   logs: [],
   settings: {},
-  syncing: false,
   toolParams: {},
   cases: {},
   lastToolByNode: {},
@@ -340,10 +333,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   /** 更新项目同步目录：后端返回含绝对路径的项目，用它覆盖本地缓存（SyncBar 随之显隐） */
   async updateProjectSyncDir(id, syncDir) {
-    const updated = await api.updateProjectSyncDir(id, syncDir);
+    const [updated, logs] = await api.updateProjectSyncDir(id, syncDir);
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? updated : p)),
     }));
+    /* 绑定新目录时的数据迁移日志（迁移详情 / 失败原因）写入日志面板 */
+    if (logs.length > 0) get().addLogs(logs);
   },
 
   async deleteProject(id) {
@@ -698,34 +693,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   async saveSetting(key, value) {
     await api.saveSetting(key, value);
     set((s) => ({ settings: { ...s.settings, [key]: value } }));
-  },
-
-  async syncExport() {
-    if (get().syncing) return;
-    set({ syncing: true });
-    try {
-      const logs = await api.syncExport();
-      get().addLogs(logs);
-    } catch (e) {
-      get().addLog("error", String(e));
-    } finally {
-      set({ syncing: false });
-    }
-  },
-
-  async syncImport() {
-    if (get().syncing) return;
-    set({ syncing: true });
-    try {
-      const logs = await api.syncImport();
-      get().addLogs(logs);
-      // 导入可能改动了树与项目，整体刷新
-      await get().init();
-    } catch (e) {
-      get().addLog("error", String(e));
-    } finally {
-      set({ syncing: false });
-    }
   },
 
   applyConnState(ev) {

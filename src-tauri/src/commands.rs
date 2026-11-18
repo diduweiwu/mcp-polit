@@ -58,14 +58,21 @@ pub fn rename_project(db: State<'_, Db>, id: i64, name: String) -> CmdResult<()>
     crate::db::rename_project(&conn, id, &name)
 }
 
-/// 更新项目同步目录（编辑项目用）：目录校验/自动创建并 git init（与创建时同规则），
-/// 传 null 或空串解除绑定。返回更新后的项目（sync_dir 为绝对路径）。
+/// 更新项目同步目录（编辑项目用）。
+///
+/// - 目录规则：必须是空目录（不存在时自动创建并 git init；忽略 `.git` / `.DS_Store`
+///   残留），非空目录拒绝绑定，防止项目数据与目录已有内容互相覆盖；
+/// - 数据迁移：绑定成功后，若项目已有数据（目录树 / Server 配置），
+///   会把数据导出到该目录并创建初始 git 提交（不 pull / 不 push）；
+/// - 传 null 或空串解除绑定（不涉及迁移）。
+///
+/// 返回（更新后的项目，操作日志）：日志由前端写入日志面板。
 #[tauri::command]
-pub fn update_project_sync_dir(
+pub async fn update_project_sync_dir(
     db: State<'_, Db>,
     id: i64,
     sync_dir: Option<String>,
-) -> CmdResult<Project> {
+) -> CmdResult<(Project, Vec<crate::models::LogEntry>)> {
     let dir = match sync_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(d) => Some(
             crate::sync::prepare_sync_dir(d)
@@ -75,8 +82,16 @@ pub fn update_project_sync_dir(
         ),
         None => None,
     };
-    let conn = db.0.lock().unwrap();
-    crate::db::update_project_sync_dir(&conn, id, dir.as_deref())
+    /* 锁作用域收窄：MutexGuard 不能跨 await（下方迁移是 async） */
+    let project = {
+        let conn = db.0.lock().unwrap();
+        crate::db::update_project_sync_dir(&conn, id, dir.as_deref())?
+    };
+    let mut logs = Vec::new();
+    if let Some(d) = &dir {
+        logs = crate::sync::migrate_project_to_dir(&db, id, std::path::Path::new(d)).await;
+    }
+    Ok((project, logs))
 }
 
 /// 用系统文件管理器打开目录：macOS 用 open，Windows 用 explorer，Linux 用 xdg-open。
@@ -336,34 +351,6 @@ pub fn get_settings(db: State<'_, Db>) -> CmdResult<Vec<(String, String)>> {
 pub fn save_setting(db: State<'_, Db>, key: String, value: String) -> CmdResult<()> {
     let conn = db.0.lock().unwrap();
     crate::db::set_setting(&conn, &key, &value)
-}
-
-/* ---------- Git 同步 ---------- */
-
-/// 导出全部项目到 git 仓库。仓库路径与脱敏开关从 settings 读取。
-///
-/// 返回操作日志列表（info/warn/error），由前端写入日志面板。
-#[tauri::command]
-pub async fn sync_export(app: AppHandle, db: State<'_, Db>) -> CmdResult<Vec<crate::models::LogEntry>> {
-    let (repo, include_secrets) = {
-        let conn = db.0.lock().unwrap();
-        crate::sync::read_sync_settings(&conn)
-    };
-    let repo = repo.ok_or_else(crate::error::AppError::new_sync_repo)?;
-    Ok(crate::sync::export_all(&app, &db, &repo, include_secrets).await)
-}
-
-/// 从 git 仓库导入全部项目（覆盖同名项目）。
-///
-/// 返回操作日志列表，由前端写入日志面板。
-#[tauri::command]
-pub async fn sync_import(app: AppHandle, db: State<'_, Db>) -> CmdResult<Vec<crate::models::LogEntry>> {
-    let (repo, _secrets) = {
-        let conn = db.0.lock().unwrap();
-        crate::sync::read_sync_settings(&conn)
-    };
-    let repo = repo.ok_or_else(crate::error::AppError::new_sync_repo)?;
-    Ok(crate::sync::import_all(&app, &db, &repo).await)
 }
 
 /* ---------- 项目级同步（资源树推送/拉取/分支） ---------- */
