@@ -1,7 +1,7 @@
 /**
  * 顶栏：左上角项目切换器 + 项目管理；右侧布局均分、设置与风格模式切换。
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Check,
@@ -32,6 +32,9 @@ function ModeIcon({ mode }: { mode: ThemeMode }) {
     <Sun size={14} />
   );
 }
+
+/** 是否 macOS（快捷键提示文案用：macOS 惯例 ⌘,，其余平台 Ctrl+,） */
+const IS_MAC = navigator.userAgent.includes("Mac");
 
 /**
  * 顶栏按下即拖动窗口。
@@ -72,6 +75,20 @@ export function TopBar() {
   const [renameName, setRenameName] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  /* 全局快捷键：⌘,（macOS）/ Ctrl+,（其他平台）打开设置（桌面应用惯例键位）。
+     已打开时重复触发幂等；Esc 关闭由 Modal 自带 */
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   /** 当前模式的中文名（下拉按钮显示） */
   const modeLabel =
@@ -216,7 +233,7 @@ export function TopBar() {
         </button>
         <button
           className="btn-ghost h-8 !px-2"
-          title="设置"
+          title={IS_MAC ? "设置（⌘,）" : "设置（Ctrl+,）"}
           onClick={() => setSettingsOpen(true)}
         >
           <Settings size={15} />
