@@ -28,7 +28,7 @@ import { ServerFormModal } from "./ServerFormModal";
 
 /** 工具列表栏 */
 export function ToolPane() {
-  const { selectedNodeId, nodes, tools, connStates, connErrors, selectedToolName, selectTool, connect, disconnect, refreshTools, treeCollapsed, toggleTreeCollapsed } =
+  const { selectedNodeId, nodes, tools, serverConfigs, connStates, connErrors, selectedToolName, selectTool, connect, disconnect, refreshTools, treeCollapsed, toggleTreeCollapsed } =
     useAppStore();
 
   const [keyword, setKeyword] = useState("");
@@ -36,6 +36,8 @@ export function ToolPane() {
   const list = selectedNodeId != null ? (tools[selectedNodeId] ?? []) : [];
   const status = selectedNodeId != null ? (connStates[selectedNodeId] ?? "disconnected") : "disconnected";
   const err = selectedNodeId != null ? (connErrors[selectedNodeId] ?? "") : "";
+  /** 选中 server 的配置缓存（状态条环境切换用；未加载时 EnvSwitcher 自行隐藏） */
+  const cfgCached = selectedNodeId != null ? serverConfigs[selectedNodeId] : undefined;
 
   /** 按关键词过滤（名称 + 描述） */
   const filtered = useMemo(() => {
@@ -86,9 +88,9 @@ export function ToolPane() {
     >
       {/* 状态条 */}
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-2.5">
-        <div className="flex items-center gap-1.5 text-[12px]">
+        <div className="flex min-w-0 items-center gap-1.5 text-[12px]">
           <StatusDot status={status} />
-          <span className="text-inksoft">
+          <span className="truncate text-inksoft">
             {status === "connected"
               ? `已连接 · ${list.length} 个工具`
               : status === "connecting"
@@ -98,25 +100,30 @@ export function ToolPane() {
                   : "未连接"}
           </span>
         </div>
-        <div className="flex items-center gap-0.5">
-          {status === "connected" ? (
-            <>
-              <IconBtn title="刷新工具列表（重连）" onClick={() => void refreshTools(node.id)}>
-                <RefreshCw size={14} />
+        <div className="flex shrink-0 items-center gap-1.5">
+          {/* 环境切换（仅已连接）：挪到状态条独立放置——原先嵌在「Server 配置」
+              折叠条按钮内部（button 套 button），点环境下拉会冒泡误触发折叠 */}
+          {status === "connected" && <EnvSwitcher node={node} cfg={cfgCached} connected />}
+          <div className="flex items-center gap-0.5">
+            {status === "connected" ? (
+              <>
+                <IconBtn title="刷新工具列表（重连）" onClick={() => void refreshTools(node.id)}>
+                  <RefreshCw size={14} />
+                </IconBtn>
+                <IconBtn title="断开连接" onClick={() => void disconnect(node.id)}>
+                  <Unplug size={14} />
+                </IconBtn>
+              </>
+            ) : (
+              <IconBtn
+                title={status === "connecting" ? "连接中…" : "连接"}
+                disabled={status === "connecting"}
+                onClick={() => void connect(node.id)}
+              >
+                {status === "error" ? <AlertCircle size={14} className="text-err" /> : <PlugZap size={14} />}
               </IconBtn>
-              <IconBtn title="断开连接" onClick={() => void disconnect(node.id)}>
-                <Unplug size={14} />
-              </IconBtn>
-            </>
-          ) : (
-            <IconBtn
-              title={status === "connecting" ? "连接中…" : "连接"}
-              disabled={status === "connecting"}
-              onClick={() => void connect(node.id)}
-            >
-              {status === "error" ? <AlertCircle size={14} className="text-err" /> : <PlugZap size={14} />}
-            </IconBtn>
-          )}
+            )}
+          </div>
         </div>
       </div>
 
@@ -201,13 +208,10 @@ function ConnectedConfigBar({ node }: { node: TreeNode }) {
         <span className="flex items-center gap-1.5">
           <Settings2 size={13} /> Server 配置
         </span>
-        <span className="flex items-center gap-1.5">
-          <EnvSwitcher node={node} cfg={cfg} connected />
-          <ChevronDown
-            size={13}
-            className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
-          />
-        </span>
+        <ChevronDown
+          size={13}
+          className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
+        />
       </button>
       {open && (
         <div className="anim-fade-in mt-1">
@@ -405,7 +409,8 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
         </span>
         {!cfg.enabled && <span className="chip bg-warn/10 text-warn">已停用</span>}
         <span className="flex-1" />
-        <EnvSwitcher node={node} cfg={cfg} connected={false} />
+        {/* 环境切换仅在未连接时放这里；已连接时统一走顶部状态条的入口（切换即断开提示重连） */}
+        {!connected && <EnvSwitcher node={node} cfg={cfg} connected={false} />}
       </div>
 
       {/* 主要连接信息 */}

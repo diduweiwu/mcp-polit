@@ -36,10 +36,15 @@ interface ModalProps {
   /** 底部按钮区 */
   footer?: ReactNode;
   width?: number;
+  /**
+   * 内容滚动容器 ref（可选）：父组件可借此操作滚动位置，
+   * 典型用途是校验错误出现在顶部时把内容滚回去，保证反馈可见。
+   */
+  bodyRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 /** 通用模态框：带淡入/缩放入出场动画、Esc 关闭、点击遮罩关闭 */
-export function Modal({ open, title, onClose, children, footer, width = 520 }: ModalProps) {
+export function Modal({ open, title, onClose, children, footer, width = 520, bodyRef }: ModalProps) {
   /** 退出动画播放中标记（动画结束后才真正回调 onClose 卸载） */
   const [closing, setClosing] = useState(false);
   const closingRef = useRef(false);
@@ -102,7 +107,7 @@ export function Modal({ open, title, onClose, children, footer, width = 520 }: M
           </button>
         </div>
         {/* selectable：弹窗正文（说明文字等）允许拖选复制；输入框本就可选中 */}
-        <div className="selectable max-h-[62vh] overflow-y-auto px-4 py-3">{children}</div>
+        <div ref={bodyRef} className="selectable max-h-[62vh] overflow-y-auto px-4 py-3">{children}</div>
         {footer && (
           <div className="flex justify-end gap-2 border-t border-line bg-panel2 px-4 py-3">
             {footer}

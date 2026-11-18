@@ -3,7 +3,7 @@
  * 命令/URL、参数、环境变量、自定义请求头（含鉴权）、超时等。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Info, Plus, Trash2, X } from "lucide-react";
+import { AlertCircle, Info, Plus, Trash2, X } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
 import type { ServerConfig } from "../types";
@@ -55,6 +55,13 @@ export function ServerFormModal({ parentId, onClose }: Props) {
   const [testing, setTesting] = useState(false);
   /** 连通性测试结果：ok=成功（绿色提示），否则红色错误 */
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  /** 弹窗内容滚动容器：反馈出现在顶部时把视图滚回去，保证看得到 */
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  /* 保存校验错误 / 连通性测试反馈出现时滚回弹窗顶部（反馈区固定在顶部展示） */
+  useEffect(() => {
+    if (error || testMsg) bodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }, [error, testMsg]);
 
   // 编辑模式：加载既有配置
   useEffect(() => {
@@ -170,6 +177,7 @@ export function ServerFormModal({ parentId, onClose }: Props) {
       title={editNode ? `编辑 Server：${editNode.name}` : "新建 Server"}
       onClose={onClose}
       width={640}
+      bodyRef={bodyRef}
       footer={
         <>
           <button
@@ -191,9 +199,33 @@ export function ServerFormModal({ parentId, onClose }: Props) {
     >
       {ready && (
         <div className="space-y-3.5">
+          {/* 反馈区（固定在弹窗顶部）：保存校验错误 */}
+          {error && (
+            <div className="flex items-start gap-1.5 rounded-md border border-err/30 bg-err/10 px-3 py-2 text-[12px] leading-relaxed text-err">
+              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <span className="break-all">{error}</span>
+            </div>
+          )}
+          {/* 反馈区：连通性测试结果（成功绿 / 失败红） */}
+          {testMsg && (
+            <div
+              className={`flex items-start gap-1.5 rounded-md border px-3 py-2 text-[12px] leading-relaxed break-all ${
+                testMsg.ok
+                  ? "border-ok/30 bg-ok/10 text-ok"
+                  : "border-err/30 bg-err/10 text-err"
+              }`}
+            >
+              <span className="shrink-0">{testMsg.ok ? "✓" : "✗"}</span>
+              <span>{testMsg.text}</span>
+            </div>
+          )}
+
           {/* 别名 */}
           <div>
-            <label className="label">别名（显示在资源树中）</label>
+            <label className="label">
+              别名（显示在资源树中）
+              <span className="ml-0.5 text-err" title="必填">*</span>
+            </label>
             <input
               className="field"
               placeholder="例如：文件系统 / 公司知识库"
@@ -224,7 +256,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
           {cfg.transport_type === "stdio" ? (
             <div className="space-y-3">
               <div>
-                <label className="label">启动命令（必填）</label>
+                <label className="label">
+                  启动命令
+                  <span className="ml-0.5 text-err" title="必填">*</span>
+                </label>
                 <input
                   className="field font-mono"
                   placeholder="npx / uvx / node …"
@@ -262,7 +297,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
           ) : (
             <div className="space-y-3">
               <div>
-                <label className="label">服务地址 URL（必填）</label>
+                <label className="label">
+                  服务地址 URL
+                  <span className="ml-0.5 text-err" title="必填">*</span>
+                </label>
                 <input
                   className="field font-mono"
                   placeholder="http://127.0.0.1:3000/mcp"
@@ -325,23 +363,6 @@ export function ServerFormModal({ parentId, onClose }: Props) {
               SQLite 中，MCPilot 不联网上传任何数据。
             </span>
           </div>
-
-          {error && (
-            <div className="rounded-md border border-err/30 bg-err/10 px-3 py-2 text-[12px] text-err">
-              {error}
-            </div>
-          )}
-
-          {testMsg && (
-            <div
-              className={`text-[12px] leading-relaxed break-all ${
-                testMsg.ok ? "text-emerald-600 dark:text-emerald-400" : "text-err"
-              }`}
-            >
-              {testMsg.ok ? "✓ " : "✗ "}
-              {testMsg.text}
-            </div>
-          )}
         </div>
       )}
     </Modal>
