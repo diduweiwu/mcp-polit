@@ -31,7 +31,7 @@ MCPilot 是一个跨平台的 [MCP (Model Context Protocol)](https://modelcontex
 
 ### 调用历史
 
-- 全局历史（跨工具/项目，200 条，仅内存）：搜索关键字（工具名/Server/入参），按 全部/当前 Server/当前工具 过滤，条目点击展开完整详情
+- 全局历史（跨工具/项目，落盘保留最近 500 条）：条目带自增编号（最新最大）；搜索关键字（工具名/Server/入参），按 全部/当前 Server/当前工具 过滤，条目点击展开完整详情，滚动到底动态加载更早记录
 
 ![调用结果](docs/screenshots/result.png)
 
@@ -57,6 +57,7 @@ MCPilot 是一个跨平台的 [MCP (Model Context Protocol)](https://modelcontex
 
 - 可折叠日志面板：Git 同步、连接失败等运行记录（仅内存）
 - 四栏宽度可拖拽 + 一键均分
+- 快捷键 `⌘,`（macOS）/ `Ctrl+,`（Windows/Linux）打开设置
 
 ## 界面说明
 
@@ -71,7 +72,9 @@ MCPilot 是一个跨平台的 [MCP (Model Context Protocol)](https://modelcontex
 
 ```bash
 pnpm install
-pnpm app:dev      # 开发模式（热更新，Ctrl+C 退出）
+pnpm app:dev      # 开发模式（tauri dev 托管，热更新，Ctrl+C 退出）
+pnpm app:run      # 快速调试（增量编译 debug 版 app 并直跑，连 vite 热更新，窗口秒开）
+pnpm app:demo     # 浏览器演示模式（免编译 Rust，自动开浏览器，内置 mock 数据）
 pnpm app          # 打包并运行产物
 pnpm app:build    # 只打包不运行
 ```

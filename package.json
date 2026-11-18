@@ -10,6 +10,8 @@
     "tauri": "tauri",
     "app": "./scripts/run.sh",
     "app:dev": "./scripts/run.sh --dev",
+    "app:run": "./scripts/run.sh --run",
+    "app:demo": "./scripts/run.sh --demo",
     "app:build": "./scripts/run.sh --build-only"
   },
   "dependencies": {
