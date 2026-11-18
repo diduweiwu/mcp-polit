@@ -54,7 +54,12 @@ pub fn run() {
             .title("MCPilot — 本地 MCP 调试工作台")
             .inner_size(1360.0, 840.0)
             .min_inner_size(1000.0, 620.0)
-            .center();
+            .center()
+            // 禁用 wry 原生拖放拦截：默认它接管全部 OS 拖放事件（为文件拖放生成
+            // DragDropEvent），会导致 WKWebView/WebView2 内 HTML5 拖拽（资源树
+            // 拖拽移动）的 dragover/drop 事件到不了 JS 层。本应用无文件拖放
+            // 需求（前端未监听 DragDropEvent），禁用后 HTML5 DnD 恢复正常。
+            .disable_drag_drop_handler();
             // macOS：Overlay 标题栏 + 隐藏标题文字。
             // 历史定论（见 git 历史）：2026-11-17 曾两次自研挪按钮均回滚——
             // traffic_light_position 被 wry 布局重置冲掉（wry#1747），

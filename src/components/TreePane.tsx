@@ -28,10 +28,34 @@ import {
 } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
-import { buildTree, type TreeEntry } from "../lib/tree";
+import { buildTree, collectIds, type TreeEntry } from "../lib/tree";
 import type { BranchInfo, TreeNode } from "../types";
 import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
+
+/**
+ * 当前拖拽中的源节点信息（HTML5 DnD 出于安全限制在 dragover 阶段读不到
+ * dataTransfer 内容，需在 dragstart 记录、dragend 清理）。
+ *
+ * descendantIds 用于拖拽目标校验：目录不能放进自己的后代里（防环）。
+ */
+let dragSrc: { id: number; descendantIds: Set<number> } | null = null;
+
+/**
+ * 执行移动：调用 store.moveNode 并统一处理失败（如后端防环校验拦截），
+ * 错误写入日志面板归属到源节点，不静默吞掉。
+ *
+ * @example
+ * dropMove(dragSrc.id, targetFolderId); // 拖到目录上
+ * dropMove(dragSrc.id, null);           // 拖到空白区 = 移回根层
+ */
+async function dropMove(srcId: number, parentId: number | null) {
+  try {
+    await useAppStore.getState().moveNode(srcId, parentId);
+  } catch (e) {
+    useAppStore.getState().addLog("error", `移动失败：${String(e)}`, srcId);
+  }
+}
 
 /** 右键菜单状态 */
 interface CtxMenu {
@@ -58,6 +82,8 @@ export function TreePane() {
   const [deleteTarget, setDeleteTarget] = useState<TreeNode | null>(null);
   /** 收起动画播放中（淡出结束后才真正折叠） */
   const [closing, setClosing] = useState(false);
+  /** 拖拽悬停在树空白区（此时放置目标 = 根层） */
+  const [rootDragOver, setRootDragOver] = useState(false);
 
   /** 收起资源树：先播 160ms 淡出，再触发折叠 */
   const collapseWithAnim = () => {
@@ -152,11 +178,29 @@ export function TreePane() {
 
       {/* 树主体 */}
       <div
-        className="flex-1 overflow-y-auto p-1.5"
+        className={`flex-1 overflow-y-auto rounded-md p-1.5 transition-colors ${
+          rootDragOver ? "bg-primarysoft/50 ring-1 ring-inset ring-primary/40" : ""
+        }`}
         onContextMenu={(e) => {
           if (noProject) return;
           if ((e.target as HTMLElement).closest("[data-tree-item]")) return;
           openCtx(e, null);
+        }}
+        onDragOver={(e) => {
+          // 空白区可作放置目标：移回根层（落在条目上的 drop 已 stopPropagation，不会到这里）
+          if (!dragSrc) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          setRootDragOver(true);
+        }}
+        onDragLeave={(e) => {
+          // 仅当离开整个容器时清除高亮（进入子条目触发的 leave 会冒泡到这，忽略）
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setRootDragOver(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setRootDragOver(false);
+          if (dragSrc) void dropMove(dragSrc.id, null);
         }}
       >
         {activeProjectId == null ? (
@@ -190,13 +234,14 @@ export function TreePane() {
             )}
             {ctx.node?.node_type === "server" && (
               <>
-                <CtxItem icon={<Plug size={13} />} label="连接" onClick={runMenu(() => void useAppStore.getState().connect(ctx.node!.id))} />
                 {(() => {
-                  // 已在连接中/已连接：提供快捷断开入口（连接失败状态无会话可断，不显示）
+                  // 已连接/连接中：不再提供「连接」入口，只留快捷断开；未连接/失败才可发起连接
                   const st = connStates[ctx.node!.id];
-                  if (st !== "connected" && st !== "connecting") return null;
-                  return (
+                  const sessionLive = st === "connected" || st === "connecting";
+                  return sessionLive ? (
                     <CtxItem icon={<PlugZap size={13} />} label="断开连接" onClick={runMenu(() => void useAppStore.getState().disconnect(ctx.node!.id))} />
+                  ) : (
+                    <CtxItem icon={<Plug size={13} />} label="连接" onClick={runMenu(() => void useAppStore.getState().connect(ctx.node!.id))} />
                   );
                 })()}
                 <CtxItem icon={<Settings2 size={13} />} label="编辑配置" onClick={runMenu(() => {
@@ -482,7 +527,6 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
     selectedNodeId,
     connStates,
     connErrors,
-    moveNode,
     connect,
   } = useAppStore();
 
@@ -501,22 +545,27 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
         onDragStart={(e) => {
           e.dataTransfer.setData("text/mcpilot-node", String(node.id));
           e.dataTransfer.effectAllowed = "move";
+          // 记录源节点与其后代集合：dragover 阶段读不到 dataTransfer，且目录不能放进自己的后代（防环）
+          dragSrc = { id: node.id, descendantIds: new Set(collectIds(children)) };
+        }}
+        onDragEnd={() => {
+          dragSrc = null;
         }}
         onDragOver={(e) => {
-          if (!isFolder) return;
+          // 仅目录可作放置目标；拖到自己或自己的后代上不响应（不高亮、不拦截，事件继续冒泡给外层目录）
+          if (!isFolder || !dragSrc) return;
+          if (dragSrc.id === node.id || dragSrc.descendantIds.has(node.id)) return;
           e.preventDefault();
           e.stopPropagation();
+          e.dataTransfer.dropEffect = "move";
           setDragOver(true);
         }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={async (e) => {
+        onDrop={(e) => {
           e.preventDefault();
           e.stopPropagation();
           setDragOver(false);
-          const src = Number(e.dataTransfer.getData("text/mcpilot-node"));
-          if (src && src !== node.id) {
-            await moveNode(src, node.id);
-          }
+          if (dragSrc) void dropMove(dragSrc.id, node.id);
         }}
         className={`group flex h-8 cursor-pointer select-none items-center gap-1 rounded-md px-1.5 transition-colors ${
           selected
