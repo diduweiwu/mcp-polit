@@ -108,9 +108,10 @@ export function ResultPane() {
 /** 历史过滤范围 */
 type HistoryScope = "all" | "server" | "tool";
 
-/** 历史面板：搜索 + 范围过滤 + 可展开详情列表（最近一条默认展开，新调用完成后旧条目自动折叠） */
+/** 历史面板：搜索 + 范围过滤 + 可展开详情列表（最近一条默认展开，滚动到底动态加载更早记录） */
 function HistoryPanel() {
-  const { history, selectedNodeId, selectedToolName, nodes } = useAppStore();
+  const { history, hasMoreHistory, loadingHistory, loadMoreHistory, selectedNodeId, selectedToolName, nodes } =
+    useAppStore();
   const [keyword, setKeyword] = useState("");
   const [scope, setScope] = useState<HistoryScope>("all");
   /** 当前展开的条目（单开模式） */
@@ -180,14 +181,20 @@ function HistoryPanel() {
         </div>
       </div>
 
-      {/* 列表 */}
-      <div className="flex-1 overflow-y-auto p-2">
+      {/* 列表：滚动到底触发动态加载更早的记录 */}
+      <div
+        className="flex-1 overflow-y-auto p-2"
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) void loadMoreHistory();
+        }}
+      >
         {filtered.length === 0 ? (
           <EmptyState
             icon={<History size={36} strokeWidth={1.2} />}
             text={
               history.length === 0
-                ? "还没有调用记录。运行任意工具后，历史会显示在这里（仅保留本会话内存中，最多 200 条）。"
+                ? "还没有调用记录。运行任意工具后，历史会显示在这里（本机保留最近 500 条，跨会话可查）。"
                 : "没有匹配的记录，试试调整关键字或过滤范围。"
             }
           />
@@ -204,6 +211,10 @@ function HistoryPanel() {
                 }`}
               >
                 <div className="flex items-center gap-1.5">
+                  {/* 编号 = 落库自增 id：最新最大、跨会话稳定（新调用在落盘返回前暂缺不显示） */}
+                  <span className="shrink-0 font-mono text-[10.5px] text-inksoft/70">
+                    {h.id != null ? `#${h.id}` : ""}
+                  </span>
                   {h.is_error ? (
                     <XCircle size={13} className="shrink-0 text-err" />
                   ) : (
@@ -227,6 +238,19 @@ function HistoryPanel() {
               )}
             </div>
           ))
+        )}
+
+        {/* 动态加载状态行 */}
+        {(loadingHistory || hasMoreHistory) && history.length > 0 && (
+          <div className="py-2 text-center text-[11px] text-inksoft/60">
+            {loadingHistory ? (
+              <span className="inline-flex items-center gap-1">
+                <Loader2 size={12} className="animate-spin" /> 正在加载更早的记录…
+              </span>
+            ) : (
+              "上滑加载更早的记录"
+            )}
+          </div>
         )}
       </div>
     </div>

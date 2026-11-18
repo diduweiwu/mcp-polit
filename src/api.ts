@@ -138,13 +138,13 @@ export interface StoredHistoryRow extends CallResult {
   created_at: string;
 }
 
-/** 追加一条调用历史（id / created_at 由后端生成，传 0 和空串即可） */
+/** 追加一条调用历史（id / created_at 由后端生成，传 0 和空串即可），返回新记录的自增 ID */
 export const appendHistory = (record: StoredHistoryRow) =>
-  invoke<void>("append_history", { record });
+  invoke<number>("append_history", { record });
 
-/** 读取最近的调用历史（新 → 旧） */
-export const listHistory = (limit: number) =>
-  invoke<StoredHistoryRow[]>("list_history", { limit });
+/** 分页读取调用历史（新 → 旧；offset 为已加载条数，首页传 0） */
+export const listHistory = (limit: number, offset: number) =>
+  invoke<StoredHistoryRow[]>("list_history", { limit, offset });
 
 /** 清空全部调用历史 */
 export const clearHistory = () => invoke<void>("clear_history");

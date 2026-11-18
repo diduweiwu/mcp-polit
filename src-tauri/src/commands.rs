@@ -391,18 +391,23 @@ pub async fn test_server_config(config: ServerConfig) -> CmdResult<Vec<ToolInfo>
 
 /* ---------- 调用历史 ---------- */
 
-/// 追加一条调用历史记录（id / created_at 由后端生成，传入值被忽略）。
+/// 追加一条调用历史记录（id / created_at 由后端生成，传入值被忽略），
+/// 返回新记录的自增 ID（前端展示编号用）。
 #[tauri::command]
-pub fn append_history(db: State<'_, Db>, record: HistoryRecord) -> CmdResult<()> {
+pub fn append_history(db: State<'_, Db>, record: HistoryRecord) -> CmdResult<i64> {
     let conn = db.0.lock().unwrap();
     crate::db::insert_history(&conn, &record)
 }
 
-/// 读取最近的调用历史（新 → 旧）。
+/// 读取调用历史（新 → 旧，按 offset 分页动态加载）。
 #[tauri::command]
-pub fn list_history(db: State<'_, Db>, limit: i64) -> CmdResult<Vec<HistoryRecord>> {
+pub fn list_history(
+    db: State<'_, Db>,
+    limit: i64,
+    offset: Option<i64>,
+) -> CmdResult<Vec<HistoryRecord>> {
     let conn = db.0.lock().unwrap();
-    crate::db::list_history(&conn, limit)
+    crate::db::list_history(&conn, limit, offset.unwrap_or(0))
 }
 
 /// 清空全部调用历史。

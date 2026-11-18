@@ -78,6 +78,8 @@ const connErrors: Record<number, string> = {
 };
 
 let seq = 100;
+/** 演示模式的历史编号（append_history 返回值，模拟后端自增 id） */
+let historyId = 100;
 const demoHistory: Array<Record<string, unknown>> = [
   { seq: 3, tool_name: "web_search", node_id: 2, server_name: "GitHub Copilot", timestamp: "10:02:11", is_error: false, duration_ms: 823, arguments: JSON.stringify({ query: "MCP protocol", count: 5 }), content: [{ type: "text", text: "1. Model Context Protocol 官方文档 —— modelcontextprotocol.io\n2. MCP 规范 2025-06-18 版本已发布，新增任务与鉴权扩展。\n3. MCP 生态：数千个社区 server 可通过 npm 安装。" }], structured_content: null },
   { seq: 2, tool_name: "web_search", node_id: 2, server_name: "GitHub Copilot", timestamp: "10:01:40", is_error: false, duration_ms: 651, arguments: JSON.stringify({ query: "rust tokio 教程", count: 5 }), content: [{ type: "text", text: "1. Tokio 官方教程 —— tokio.rs\n2. async Rust 入门实践（2025 修订版）…" }], structured_content: null },
@@ -139,8 +141,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     }
     case "test_server_config": return [{ name: "echo", title: "Echo", description: "演示模式：探测成功", input_schema: {} }];
     case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "streamable_http", command: "", args: "", env: "", working_dir: "", url: "", headers: "", timeout_ms: 30000, enabled: true, note: "" };
-    // 调用历史：浏览器演示模式不落盘，仅返回空列表保证启动流程畅通
-    case "append_history": return null;
+    // 调用历史：浏览器演示模式不落盘，仅保证启动流程畅通（append 返回模拟编号）
+    case "append_history": { historyId += 1; return historyId; }
     case "list_history": return [];
     case "clear_history": return null;
     case "save_server_config": {

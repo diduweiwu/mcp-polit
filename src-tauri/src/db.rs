@@ -649,10 +649,14 @@ const HISTORY_KEEP: i64 = 500;
 ///
 /// `record.id` 与 `record.created_at` 由后端生成，传入值会被忽略。
 ///
+/// # 返回
+///
+/// 新记录的自增 ID（前端作为历史条目的展示编号：最新最大、跨会话稳定）。
+///
 /// # 异常
 ///
 /// content / structured_content 序列化失败，或 SQLite 写入失败时返回 [`AppError`]。
-pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<()> {
+pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<i64> {
     let content = serde_json::to_string(&record.result.content)?;
     let structured = match &record.result.structured_content {
         Some(v) => Some(serde_json::to_string(v)?),
@@ -680,21 +684,22 @@ pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<()
                 (SELECT id FROM call_history ORDER BY id DESC LIMIT ?1)",
         rusqlite::params![HISTORY_KEEP],
     )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
-/// 按时间倒序读取最近的调用历史。
+/// 按时间倒序读取调用历史（分页：跳过 offset 条更旧的记录）。
 ///
 /// # 参数
 ///
-/// - `limit`: 最多返回条数（前端与内存上限一致，传 200）。
-pub fn list_history(conn: &Connection, limit: i64) -> CmdResult<Vec<HistoryRecord>> {
+/// - `limit`: 本页最多返回条数。
+/// - `offset`: 从第几条更旧的记录开始（前端动态加载翻页用，首页传 0）。
+pub fn list_history(conn: &Connection, limit: i64, offset: i64) -> CmdResult<Vec<HistoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, node_id, server_name, tool_name, is_error, content,
                 structured_content, arguments, duration_ms, created_at
-         FROM call_history ORDER BY id DESC LIMIT ?1",
+         FROM call_history ORDER BY id DESC LIMIT ?1 OFFSET ?2",
     )?;
-    let rows = stmt.query_map(rusqlite::params![limit], map_history_row)?;
+    let rows = stmt.query_map(rusqlite::params![limit, offset], map_history_row)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);

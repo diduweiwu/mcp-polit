@@ -126,6 +126,8 @@ export interface LogEntry {
 
 /** 历史调用记录：CallResult + 定位元数据（所有工具共用一份全局列表） */
 export interface HistoryEntry extends CallResult {
+  /** 落库自增 ID：作为条目展示编号（最新最大、跨会话稳定）；会话内新调用在落盘返回前暂缺 */
+  id?: number;
   /** 被调用 server 的树节点 ID */
   node_id: number;
   /** server 别名（冗余存储，跨项目可读） */

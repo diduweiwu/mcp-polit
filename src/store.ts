@@ -23,6 +23,34 @@ import { applyThemeMode, type ThemeMode } from "./theme";
 /** 结果面板最多保留的历史条数 */
 const MAX_RESULTS = 50;
 
+/** 历史分页大小：首屏与每次滚动动态加载的条数 */
+const HISTORY_PAGE = 30;
+
+/** 历史内存上限：与后端落盘裁剪上限一致（后端保留最新 500 条，满员时最旧的同步出列） */
+const HISTORY_KEEP = 500;
+
+/**
+ * 后端历史行 -> 内存历史条目。
+ *
+ * @param r 后端行（含落库自增 id，作为条目展示编号：最新最大、跨会话稳定）
+ * @param seq 本批次分配的序号（历史列表 React key / 展开标识；保证会话内唯一）
+ */
+function rowToEntry(r: api.StoredHistoryRow, seq: number): HistoryEntry {
+  return {
+    seq,
+    id: r.id,
+    tool_name: r.tool_name,
+    is_error: r.is_error,
+    content: r.content,
+    structured_content: r.structured_content,
+    duration_ms: r.duration_ms,
+    arguments: r.arguments,
+    node_id: r.node_id,
+    server_name: r.server_name,
+    timestamp: r.created_at.length >= 19 ? r.created_at.slice(11, 19) : r.created_at,
+  };
+}
+
 interface AppState {
   /* 初始化标记 */
   initialized: boolean;
@@ -61,8 +89,12 @@ interface AppState {
   /* 日志（结果面板底部展示；最多保留 200 条） */
   logs: LogEntry[];
 
-  /* 调用历史（全局，跨工具/项目；最多保留 200 条，落盘 SQLite 跨会话保留） */
+  /* 调用历史（全局，跨工具/项目；落盘 SQLite 跨会话保留，动态分页加载） */
   history: HistoryEntry[];
+  /** 是否还有更旧的未加载历史（滚动到底继续拉取） */
+  hasMoreHistory: boolean;
+  /** 历史分页加载进行中 */
+  loadingHistory: boolean;
 
   /* 应用设置缓存（键值对） */
   settings: Record<string, string>;
@@ -137,6 +169,8 @@ interface AppState {
   clearLogs: () => void;
   /** 清空全部调用历史 */
   clearHistory: () => void;
+  /** 动态加载更旧的调用历史（历史列表滚动到底时触发） */
+  loadMoreHistory: () => Promise<void>;
 
   /** 记住工具参数（内存 + 防抖持久化到 settings） */
   saveToolParam: (key: string, argsJson: string) => void;
@@ -192,6 +226,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   treeCollapsed: false,
   layoutEqualizeSignal: 0,
   history: [],
+  hasMoreHistory: false,
+  loadingHistory: false,
   logs: [],
   settings: {},
   syncing: false,
@@ -221,25 +257,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (active != null) {
       await get().setActiveProject(active);
     }
-    // 3. 调用历史：从 SQLite 恢复跨会话记录（新 → 旧，条数与内存上限一致）
+    // 3. 调用历史：从 SQLite 恢复第一页（跨会话保留）；更旧的记录滚动到底动态加载
     try {
-      const rows = await api.listHistory(200);
-      const history = rows.map((r, i) => ({
-        // 落盘无 seq，按新→旧分配唯一值（历史列表以 seq 作 React key）
-        seq: rows.length - i,
-        tool_name: r.tool_name,
-        is_error: r.is_error,
-        content: r.content,
-        structured_content: r.structured_content,
-        duration_ms: r.duration_ms,
-        arguments: r.arguments,
-        node_id: r.node_id,
-        server_name: r.server_name,
-        // 完整时间串截取 HH:MM:SS 段
-        timestamp: r.created_at.length >= 19 ? r.created_at.slice(11, 19) : r.created_at,
-      }));
+      const rows = await api.listHistory(HISTORY_PAGE, 0);
+      // 落盘无 seq，按新→旧分配唯一值（历史列表以 seq 作 React key / 展开标识）
+      const history = rows.map((r, i) => rowToEntry(r, rows.length - i));
       // 会话内 seq 从恢复条数续起：避免新执行的 seq 与恢复历史的 seq 重复（列表 key / 展开标识需唯一）
-      set({ history, seq: rows.length });
+      set({ history, seq: rows.length, hasMoreHistory: rows.length === HISTORY_PAGE });
     } catch {
       /* 历史读取失败不影响启动 */
     }
@@ -488,9 +512,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       set((s) => ({
         running: false,
         results: [result, ...s.results].slice(0, MAX_RESULTS),
-        history: [entry, ...s.history].slice(0, 200),
+        history: [entry, ...s.history].slice(0, HISTORY_KEEP),
       }));
-      // 落盘留痕：失败静默，不影响调用主流程展示
+      // 落盘留痕：成功后把落库自增 id 补写到条目（作为展示编号）；失败静默，不影响调用主流程展示
       void api
         .appendHistory({
           id: 0,
@@ -505,6 +529,13 @@ export const useAppStore = create<AppState>((set, get) => ({
           duration_ms: result.duration_ms,
           arguments: result.arguments,
         })
+        .then((id) =>
+          useAppStore.setState((s) => ({
+            history: s.history.map((h) =>
+              h.seq === result.seq && h.id == null ? { ...h, id } : h,
+            ),
+          })),
+        )
         .catch(() => {});
     };
 
@@ -566,8 +597,28 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   clearHistory() {
-    set({ history: [] });
+    set({ history: [], hasMoreHistory: false });
     void api.clearHistory().catch(() => {});
+  },
+
+  /** 动态加载更旧的调用历史：按 offset 翻页追加；不足一页即视为全部加载完 */
+  async loadMoreHistory() {
+    const s = get();
+    if (!s.hasMoreHistory || s.loadingHistory) return;
+    set({ loadingHistory: true });
+    try {
+      const rows = await api.listHistory(HISTORY_PAGE, s.history.length);
+      // 批次 seq 从当前最小值往下递减（负数区），与恢复批（1..N）和新调用（递增）永不冲突
+      const minSeq = s.history.reduce((m, h) => Math.min(m, h.seq), 0);
+      set((st) => ({
+        history: [...st.history, ...rows.map((r, i) => rowToEntry(r, minSeq - 1 - i))],
+        hasMoreHistory: rows.length === HISTORY_PAGE,
+      }));
+    } catch (e) {
+      get().addLog("error", `加载历史失败：${e}`);
+    } finally {
+      set({ loadingHistory: false });
+    }
   },
 
   /** 记住工具参数（写入内存；300ms 防抖持久化到 settings 表） */
