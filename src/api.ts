@@ -111,7 +111,9 @@ export const deleteNode = (id: number) => invoke<void>("delete_node", { id });
 
 /** 复制节点：目录连同整棵子树（含 Server 配置）一起复制，副本排在同级末尾 */
 export const duplicateNode = (id: number, name: string) =>
-  invoke<TreeNode>("duplicate_node", { id, name });
+  // 注意参数名必须是 nodeId：Rust 端 duplicate_node 的入参为 node_id，
+  // Tauri 按 camelCase↔snake_case 匹配，传 id 会导致「missing required key node_id」
+  invoke<TreeNode>("duplicate_node", { nodeId: id, name });
 
 /* ---------- Server 配置 ---------- */
 
@@ -200,9 +202,18 @@ export const clearHistory = () => invoke<void>("clear_history");
 
 /* ---------- 项目级同步 ---------- */
 
-/** 推送项目到其绑定的 git 仓库（导出 + commit + push） */
-export const projectSyncPush = (projectId: number) =>
-  invoke<Array<{ level: string; message: string }>>("project_sync_push", { projectId });
+/**
+ * 推送项目到其绑定的 git 仓库（导出 + commit + push）。
+ *
+ * @param projectId 项目 ID
+ * @param message 用户填写的提交信息；null/undefined/空白时后端使用默认提交信息「MCPilot 配置同步」
+ * @returns 操作日志（info/warn/error），调用方按级别做界面提醒
+ */
+export const projectSyncPush = (projectId: number, message?: string | null) =>
+  invoke<Array<{ level: string; message: string }>>("project_sync_push", {
+    projectId,
+    message: message?.trim() || null,
+  });
 
 /** 从项目绑定的 git 仓库拉取并导入（覆盖当前配置） */
 export const projectSyncPull = (projectId: number) =>

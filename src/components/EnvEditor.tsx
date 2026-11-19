@@ -10,13 +10,16 @@ import { Info, Plus, X } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
 import type { ServerConfig, TreeNode } from "../types";
+import { parseSensitiveKeys, stringifySensitiveKeys } from "../lib/sensitive";
 import { Modal } from "./ui";
 import { KVEditor } from "./KVEditor";
 
-/** 环境组结构（envs JSON 的单个条目） */
+/** 环境组结构（envs JSON 的单个条目；sensitive_headers 为可选键，旧数据没有该键=全部不敏感） */
 interface EnvGroup {
   env: string;
   headers: string;
+  /** 该环境敏感请求头的名称列表（仅影响展示打码，不影响连接） */
+  sensitive_headers?: string[];
 }
 
 /**
@@ -50,9 +53,9 @@ export function EnvSection({
   }, [cfg.envs]);
   const names = Object.keys(envMap);
 
-  /** 其他 server 的可用环境（clone 来源）：base + 各环境 */
+  /** 其他 server 的可用环境（clone 来源）：base + 各环境（含敏感头标记，clone 时一并带入） */
   const foreignEnvs = useMemo(() => {
-    const list: Array<{ label: string; env: string; headers: string }> = [];
+    const list: Array<{ label: string; env: string; headers: string; sensitive_headers: string[] }> = [];
     for (const n of nodes) {
       if (n.node_type !== "server" || n.id === cfg.node_id) continue;
       const c = serverConfigs[n.id];
@@ -61,12 +64,18 @@ export function EnvSection({
         label: `${n.name} · Base`,
         env: c.env ?? "",
         headers: c.headers ?? "",
+        sensitive_headers: parseSensitiveKeys(c.sensitive_headers),
       });
       if (!c.envs) continue;
       try {
         const m = JSON.parse(c.envs) as Record<string, EnvGroup>;
         for (const [name, g] of Object.entries(m)) {
-          list.push({ label: `${n.name} · ${name}`, env: g.env, headers: g.headers });
+          list.push({
+            label: `${n.name} · ${name}`,
+            env: g.env,
+            headers: g.headers,
+            sensitive_headers: g.sensitive_headers ?? [],
+          });
         }
       } catch {
         /* 忽略坏数据 */
@@ -79,16 +88,22 @@ export function EnvSection({
   const writeMap = (map: Record<string, EnvGroup>) =>
     patch({ envs: Object.keys(map).length ? JSON.stringify(map) : "" });
 
-  /** 新建环境（支持 clone 来源） */
+  /** 新建环境（支持 clone 来源；clone 时连同敏感头标记一并带入） */
   const createEnv = () => {
     const name = newName.trim();
     if (!name || envMap[name]) return;
     let init: EnvGroup = { env: "", headers: "" };
-    if (cloneFrom === "__base") init = { env: cfg.env ?? "", headers: cfg.headers ?? "" };
-    else if (cloneFrom.startsWith("__own:")) init = envMap[cloneFrom.slice(6)] ?? init;
-    else {
+    if (cloneFrom === "__base") {
+      init = {
+        env: cfg.env ?? "",
+        headers: cfg.headers ?? "",
+        sensitive_headers: parseSensitiveKeys(cfg.sensitive_headers),
+      };
+    } else if (cloneFrom.startsWith("__own:")) {
+      init = envMap[cloneFrom.slice(6)] ?? init;
+    } else {
       const f = foreignEnvs.find((x) => x.label === cloneFrom);
-      if (f) init = { env: f.env, headers: f.headers };
+      if (f) init = { env: f.env, headers: f.headers, sensitive_headers: f.sensitive_headers };
     }
     writeMap({ ...envMap, [name]: init });
     setSelected(name);
@@ -106,14 +121,39 @@ export function EnvSection({
     if (selected === name) setSelected("__base");
   };
 
-  /** 当前选中环境的 KV（base 或 envMap 项） */
+  /** 当前选中环境的编辑态（base 或 envMap 项；sensitive 为敏感头名称列表） */
   const cur =
     selected === "__base"
-      ? { env: cfg.env ?? "", headers: cfg.headers ?? "" }
-      : (envMap[selected] ?? { env: "", headers: "" });
-  const updateCur = (env: string, headers: string) => {
-    if (selected === "__base") patch({ env, headers });
-    else writeMap({ ...envMap, [selected]: { env, headers } });
+      ? {
+          env: cfg.env ?? "",
+          headers: cfg.headers ?? "",
+          sensitive: parseSensitiveKeys(cfg.sensitive_headers),
+        }
+      : {
+          env: envMap[selected]?.env ?? "",
+          headers: envMap[selected]?.headers ?? "",
+          sensitive: envMap[selected]?.sensitive_headers ?? [],
+        };
+
+  /** 写回当前选中环境的字段（只更新传入的字段，未传字段保持原值） */
+  const updateCur = (p: { env?: string; headers?: string; sensitive?: string[] }) => {
+    if (selected === "__base") {
+      patch({
+        ...(p.env !== undefined && { env: p.env }),
+        ...(p.headers !== undefined && { headers: p.headers }),
+        ...(p.sensitive !== undefined && {
+          sensitive_headers: stringifySensitiveKeys(p.sensitive),
+        }),
+      });
+    } else {
+      const g = envMap[selected];
+      const next: EnvGroup = {
+        env: p.env ?? g?.env ?? "",
+        headers: p.headers ?? g?.headers ?? "",
+        sensitive_headers: p.sensitive ?? g?.sensitive_headers,
+      };
+      writeMap({ ...envMap, [selected]: next });
+    }
   };
 
   return (
@@ -204,16 +244,18 @@ export function EnvSection({
         <KVEditor
           title="环境变量"
           json={cur.env}
-          onChange={(v) => updateCur(v, cur.headers)}
+          onChange={(v) => updateCur({ env: v })}
           keyPlaceholder="变量名"
           valuePlaceholder="值"
         />
         <KVEditor
           title="请求头"
           json={cur.headers}
-          onChange={(v) => updateCur(cur.env, v)}
+          onChange={(v) => updateCur({ headers: v })}
           keyPlaceholder="头名称"
           valuePlaceholder="值"
+          sensitiveKeys={cur.sensitive}
+          onSensitiveKeysChange={(keys) => updateCur({ sensitive: keys })}
         />
       </div>
     </div>

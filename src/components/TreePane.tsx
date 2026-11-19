@@ -6,7 +6,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  AlertCircle,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronsDownUp,
   ChevronsUpDown,
@@ -27,6 +29,7 @@ import {
   Terminal,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
@@ -56,6 +59,21 @@ async function dropMove(srcId: number, parentId: number | null) {
     await useAppStore.getState().moveNode(srcId, parentId);
   } catch (e) {
     useAppStore.getState().addLog("error", `移动失败：${String(e)}`, srcId);
+  }
+}
+
+/**
+ * 执行复制：调用 store.duplicateNode 并统一处理失败，
+ * 错误写入日志面板归属到源节点，不静默吞掉。
+ *
+ * @example
+ * duplicateWithLog(node.id); // 右键菜单「复制」
+ */
+async function duplicateWithLog(srcId: number) {
+  try {
+    await useAppStore.getState().duplicateNode(srcId);
+  } catch (e) {
+    useAppStore.getState().addLog("error", `复制失败：${String(e)}`, srcId);
   }
 }
 
@@ -292,7 +310,7 @@ export function TreePane() {
             )}
             {ctx.node && (
               <>
-                <CtxItem icon={<Copy size={13} />} label="复制" onClick={runMenu(() => void useAppStore.getState().duplicateNode(ctx.node!.id))} />
+                <CtxItem icon={<Copy size={13} />} label="复制" onClick={runMenu(() => void duplicateWithLog(ctx.node!.id))} />
                 <CtxItem icon={<Pencil size={13} />} label="重命名" onClick={runMenu(() => {
                   // 闭包内 TS 无法保留 ctx.node 的非空收窄，此处断言安全（位于 ctx.node && 分支内）
                   const target = ctx.node!;
@@ -411,7 +429,8 @@ export function TreePane() {
 
 /**
  * 同步条：项目绑定了 git 目录时显示。
- * 分支下拉（点击切换，checkout 后刷新树）+ 推送（导出+commit+push）/ 拉取（pull+导入）。
+ * 分支下拉（点击切换，checkout 后刷新树）+ 推送（弹窗填写提交信息后 commit+push）/
+ * 拉取（pull+导入）；同步结果与错误以横幅形式就地提醒，错误需手动关闭。
  */
 function SyncBar() {
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -419,108 +438,236 @@ function SyncBar() {
   const { addLogs, reloadNodes } = useAppStore();
   const [info, setInfo] = useState<BranchInfo | null>(null);
   const [busy, setBusy] = useState<"push" | "pull" | null>(null);
+  /** 结果/错误提醒横幅（info 自动消失，warn/error 常驻需手动关闭） */
+  const [notice, setNotice] = useState<SyncNotice | null>(null);
+  /** 推送确认弹窗：填写提交信息（可留空用默认） */
+  const [pushOpen, setPushOpen] = useState(false);
+  const [commitMsg, setCommitMsg] = useState("");
 
   const hasSync = !!project?.sync_dir;
 
-  /* 项目切换/挂载时拉取分支信息 */
+  /* 项目切换/挂载时拉取分支信息；读取失败时横幅提醒（不再只静默写日志，否则同步条看不到分支名） */
   useEffect(() => {
     setInfo(null);
+    setNotice(null);
     if (!hasSync || activeProjectId == null) return;
     api
       .projectBranches(activeProjectId)
       .then(setInfo)
-      .catch((e) => useAppStore.getState().addLog("warn", String(e)));
+      .catch((e) => {
+        useAppStore.getState().addLog("warn", String(e));
+        setNotice({
+          level: "warn",
+          text: `无法读取分支信息：${String(e)}。请检查同步目录是否存在、git 是否可用后手动处理`,
+        });
+      });
   }, [hasSync, activeProjectId]);
+
+  /* info 级提醒 6 秒后自动消失（仅清理仍然为 info 的横幅，避免误关新错误） */
+  useEffect(() => {
+    if (notice?.level !== "info") return;
+    const t = window.setTimeout(() => {
+      setNotice((n) => (n?.level === "info" ? null : n));
+    }, 6000);
+    return () => window.clearTimeout(t);
+  }, [notice]);
 
   if (!hasSync || !project) return null;
 
-  /** 推送 / 拉取 */
-  const doSync = async (dir: "push" | "pull") => {
+  /** 从本次同步日志提炼横幅提醒：error > warn > info（取最高严重级展示） */
+  const noticeOf = (
+    logs: Array<{ level: string; message: string }>,
+    dir: "push" | "pull",
+  ): SyncNotice => {
+    const label = dir === "push" ? "推送" : "拉取";
+    const err = logs.find((l) => l.level === "error");
+    if (err) {
+      return {
+        level: "error",
+        text: `${label}失败：${err.message}。请检查同步目录 / 远端仓库（网络、权限、冲突）后手动处理，完整信息见日志面板`,
+      };
+    }
+    const warn = logs.find((l) => l.level === "warn");
+    if (warn) {
+      return { level: "warn", text: `${label}完成但有警告：${warn.message}。建议检查处理，完整信息见日志面板` };
+    }
+    const ok = logs.length ? logs[logs.length - 1].message : `${label}完成`;
+    return { level: "info", text: `${label}完成：${ok}` };
+  };
+
+  /** 执行推送 / 拉取（push 传入弹窗填写的提交信息，可为 null 用默认） */
+  const doSync = async (dir: "push" | "pull", message?: string | null) => {
     setBusy(dir);
     try {
       const logs =
         dir === "push"
-          ? await api.projectSyncPush(project.id)
+          ? await api.projectSyncPush(project.id, message)
           : await api.projectSyncPull(project.id);
       addLogs(logs);
+      setNotice(noticeOf(logs, dir));
       if (dir === "pull") await reloadNodes();
     } catch (e) {
+      const label = dir === "push" ? "推送" : "拉取";
       useAppStore.getState().addLog("error", String(e));
+      setNotice({
+        level: "error",
+        text: `${label}失败：${String(e)}。请检查同步目录 / 远端仓库后手动处理，完整信息见日志面板`,
+      });
     } finally {
       setBusy(null);
     }
   };
 
-  /** 切换分支 */
+  /** 切换分支（点击当前分支不做任何操作：对尚无提交的仓库 checkout 自己会报 pathspec 错） */
   const switchBranch = async (branch: string) => {
-    if (activeProjectId == null) return;
+    if (activeProjectId == null || branch === info?.current) return;
     try {
       await api.projectCheckout(project.id, branch);
       const next = await api.projectBranches(project.id);
       setInfo(next);
-      useAppStore.getState().addLog("info", `已切换分支：${branch}（分支间内容可能不同，可点击「拉取」加载该分支配置）`);
+      setNotice({ level: "info", text: `已切换分支：${branch}（分支间内容可能不同，可点击「拉取」加载该分支配置）` });
     } catch (e) {
       useAppStore.getState().addLog("error", String(e));
+      setNotice({ level: "error", text: `切换分支失败：${String(e)}。请检查仓库状态（可能有未提交改动）后手动处理` });
     }
   };
 
+  /** 确认推送：关闭弹窗并携带提交信息执行（留空 → 后端用默认提交信息） */
+  const confirmPush = () => {
+    setPushOpen(false);
+    void doSync("push", commitMsg.trim() || null);
+  };
+
   return (
-    <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-panel2/60 px-2">
-      <GitBranch size={12} className="shrink-0 text-inksoft" />
-      {info ? (
-        <Dropdown
-          trigger={(open, toggle) => (
-            <button
-              className="flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] text-ink transition-colors hover:bg-panel"
-              onClick={toggle}
-              title="切换分支"
-            >
-              <span className="max-w-[90px] truncate">{info.current}</span>
-              <ChevronDown size={11} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
-            </button>
-          )}
+    <>
+      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-panel2/60 px-2">
+        <GitBranch size={12} className="shrink-0 text-inksoft" />
+        {info ? (
+          <Dropdown
+            trigger={(open, toggle) => (
+              <button
+                className="flex min-w-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] text-ink transition-colors hover:bg-panel"
+                onClick={toggle}
+                title={`当前分支：${info.current}（点击切换）`}
+              >
+                <span className="max-w-[90px] truncate">{info.current}</span>
+                <ChevronDown size={11} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+              </button>
+            )}
+          >
+            {(close) => (
+              <>
+                {info.branches.length === 0 && (
+                  <div className="px-3 py-1.5 text-[12px] text-inksoft">（仓库还没有任何分支）</div>
+                )}
+                {info.branches.map((b) => (
+                  <MenuItem
+                    key={b}
+                    label={b}
+                    icon={b === info.current ? <Check size={13} className="text-primarystrong" /> : <span className="w-[13px]" />}
+                    onClick={() => {
+                      void switchBranch(b);
+                      close();
+                    }}
+                  />
+                ))}
+              </>
+            )}
+          </Dropdown>
+        ) : (
+          <span className="text-[11.5px] text-inksoft/70">Git 同步</span>
+        )}
+        <span className="flex-1" />
+        <button
+          className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
+          title={`推送：导出当前配置并 commit + push${info ? `（分支 ${info.current}）` : ""}`}
+          disabled={busy != null}
+          onClick={() => {
+            setCommitMsg("");
+            setPushOpen(true);
+          }}
         >
-          {(close) => (
-            <>
-              {info.branches.length === 0 && (
-                <div className="px-3 py-1.5 text-[12px] text-inksoft">（仓库还没有任何分支）</div>
-              )}
-              {info.branches.map((b) => (
-                <MenuItem
-                  key={b}
-                  label={b}
-                  icon={b === info.current ? <Check size={13} className="text-primarystrong" /> : <span className="w-[13px]" />}
-                  onClick={() => {
-                    void switchBranch(b);
-                    close();
-                  }}
-                />
-              ))}
-            </>
+          {busy === "push" ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+        </button>
+        <button
+          className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
+          title={`拉取：pull 并覆盖加载该分支的配置${info ? `（分支 ${info.current}）` : ""}`}
+          disabled={busy != null}
+          onClick={() => void doSync("pull")}
+        >
+          {busy === "pull" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+        </button>
+      </div>
+
+      {/* 结果/错误提醒横幅：error/warn 常驻（手动关闭），info 绿色 6s 自动消失 */}
+      {notice && (
+        <div
+          className={`flex items-start gap-1.5 border-b px-2 py-1.5 text-[11.5px] leading-relaxed anim-fade-in ${
+            notice.level === "error"
+              ? "border-err/20 bg-err/10 text-err"
+              : notice.level === "warn"
+                ? "border-warn/20 bg-warn/10 text-warn"
+                : "border-ok/20 bg-ok/10 text-ok"
+          }`}
+        >
+          {notice.level === "info" ? (
+            <CheckCircle2 size={13} className="mt-0.5 shrink-0" />
+          ) : (
+            <AlertCircle size={13} className="mt-0.5 shrink-0" />
           )}
-        </Dropdown>
-      ) : (
-        <span className="text-[11.5px] text-inksoft/70">Git 同步</span>
+          <span className="min-w-0 break-all">{notice.text}</span>
+          <button
+            className="ml-auto shrink-0 rounded p-0.5 hover:bg-panel/60"
+            title="关闭提醒"
+            onClick={() => setNotice(null)}
+          >
+            <X size={12} />
+          </button>
+        </div>
       )}
-      <span className="flex-1" />
-      <button
-        className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
-        title="推送：导出当前配置并 commit + push"
-        disabled={busy != null}
-        onClick={() => void doSync("push")}
+
+      {/* 推送确认弹窗：填写提交信息（可留空用默认），展示目标项目与分支 */}
+      <Modal
+        open={pushOpen}
+        title="推送到 Git 仓库"
+        onClose={() => setPushOpen(false)}
+        width={440}
+        footer={
+          <>
+            <button className="btn-ghost" onClick={() => setPushOpen(false)} disabled={busy === "push"}>
+              取消
+            </button>
+            <button className="btn-primary" disabled={busy === "push"} onClick={confirmPush}>
+              {busy === "push" ? "推送中…" : "推送"}
+            </button>
+          </>
+        }
       >
-        {busy === "push" ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
-      </button>
-      <button
-        className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
-        title="拉取：pull 并覆盖加载该分支的配置"
-        disabled={busy != null}
-        onClick={() => void doSync("pull")}
-      >
-        {busy === "pull" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-      </button>
-    </div>
+        <p className="mb-3 text-[12px] leading-relaxed text-inksoft">
+          将把项目「{project.name}」的当前配置导出并提交到分支
+          <span className="mx-1 font-mono text-primarystrong">{info?.current ?? "?"}</span>
+          ，然后推送到远端仓库。
+        </p>
+        <label className="label">提交信息（可选）</label>
+        <input
+          className="field"
+          autoFocus
+          placeholder="留空使用默认：MCPilot 配置同步"
+          value={commitMsg}
+          onChange={(e) => setCommitMsg(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && confirmPush()}
+        />
+      </Modal>
+    </>
   );
+}
+
+/** 同步条提醒横幅的数据 */
+interface SyncNotice {
+  /** 提醒级别：error/warn 常驻红色/黄色，info 绿色自动消失 */
+  level: "info" | "warn" | "error";
+  /** 展示文本（含手动处理引导） */
+  text: string;
 }
 
 /** 右键菜单项 */

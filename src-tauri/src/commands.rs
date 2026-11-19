@@ -356,13 +356,16 @@ pub fn save_setting(db: State<'_, Db>, key: String, value: String) -> CmdResult<
 /* ---------- 项目级同步（资源树推送/拉取/分支） ---------- */
 
 /// 推送项目到其绑定的 git 仓库（导出 + commit + push），返回操作日志。
+///
+/// `message` 为用户在推送弹窗填写的提交信息；None 或空白时后端使用默认提交信息。
 #[tauri::command]
 pub async fn project_sync_push(
     app: AppHandle,
     db: State<'_, Db>,
     project_id: i64,
+    message: Option<String>,
 ) -> CmdResult<Vec<crate::models::LogEntry>> {
-    Ok(crate::sync::push_project(&app, &db, project_id).await)
+    Ok(crate::sync::push_project(&app, &db, project_id, message).await)
 }
 
 /// 从项目绑定的 git 仓库拉取并导入（覆盖当前配置），返回操作日志。

@@ -55,6 +55,8 @@ export interface ServerConfig {
   url: string | null;
   /** http：JSON 对象字符串（含鉴权头） */
   headers: string | null;
+  /** http：JSON 数组字符串——敏感请求头名称列表（如 ["Authorization"]），展示时值打码为星号，仅影响展示不影响连接 */
+  sensitive_headers?: string | null;
   /** 工具调用超时（毫秒） */
   timeout_ms: number;
   enabled: boolean;

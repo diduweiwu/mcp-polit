@@ -38,22 +38,25 @@ const configs: Record<number, unknown> = {
     node_id: 2, transport_type: "streamable_http", command: null, args: null, env: null,
     working_dir: null, url: "https://api.githubcopilot.com/mcp",
     headers: JSON.stringify({ Authorization: "Bearer ghp_demo_token", "X-Env": "prod" }),
+    sensitive_headers: JSON.stringify(["Authorization"]),
     timeout_ms: 30000, enabled: true, note: "官方 GitHub MCP",
     envs: JSON.stringify({
-      prod: { env: "{}", headers: JSON.stringify({ Authorization: "Bearer ghp_prod_token" }) },
-      dev: { env: "{}", headers: JSON.stringify({ Authorization: "Bearer ghp_dev_token" }) },
+      prod: { env: "{}", headers: JSON.stringify({ Authorization: "Bearer ghp_prod_token" }), sensitive_headers: ["Authorization"] },
+      dev: { env: "{}", headers: JSON.stringify({ Authorization: "Bearer ghp_dev_token" }), sensitive_headers: ["Authorization"] },
     }),
     active_env: "prod",
   },
   3: {
     node_id: 3, transport_type: "streamable_http", command: null, args: null, env: null,
     working_dir: null, url: "https://mcp.exa.ai/mcp", headers: JSON.stringify({ "x-api-key": "demo" }),
+    sensitive_headers: null,
     timeout_ms: 30000, enabled: true, note: null, envs: null, active_env: null,
   },
   5: {
     node_id: 5, transport_type: "stdio", command: "npx",
     args: JSON.stringify(["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]),
     env: JSON.stringify({ DEBUG: "1" }), working_dir: null, url: null, headers: null,
+    sensitive_headers: null,
     timeout_ms: 30000, enabled: true, note: null, envs: null, active_env: null,
   },
 };
@@ -141,12 +144,14 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
         for (const c of [...nodes].filter((x) => x.parent_id === srcId)) clone(c.id, nodeSeq, null);
         return nodeSeq;
       };
-      const srcNode = nodes.find((x) => x.id === args.id);
-      const nid = clone(args.id as number, srcNode?.parent_id ?? null, args.name as string);
+      // 参数形态与真实 IPC 保持一致：api.ts 传 nodeId（对齐 Rust node_id）
+      const srcId = args.nodeId as number;
+      const srcNode = nodes.find((x) => x.id === srcId);
+      const nid = clone(srcId, srcNode?.parent_id ?? null, args.name as string);
       return nodes.find((x) => x.id === nid) ?? null;
     }
     case "test_server_config": return [{ name: "echo", title: "Echo", description: "演示模式：探测成功", input_schema: {} }];
-    case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "streamable_http", command: "", args: "", env: "", working_dir: "", url: "", headers: "", timeout_ms: 30000, enabled: true, note: "" };
+    case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "streamable_http", command: "", args: "", env: "", working_dir: "", url: "", headers: "", sensitive_headers: "", timeout_ms: 30000, enabled: true, note: "" };
     // 调用历史：浏览器演示模式不落盘，仅保证启动流程畅通（append 返回模拟编号）
     case "append_history": { historyId += 1; return historyId; }
     case "list_history": return [];
@@ -167,11 +172,22 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       demoHistory.unshift({ ...result, node_id: args.nodeId, server_name: "GitHub Copilot", timestamp: "now" });
       return result;
     }
-    case "project_sync_push": return [
-      { level: "info", message: "项目「演示项目」已导出：5 个节点 / 3 个 Server（已脱敏）" },
-      { level: "info", message: "已提交到本地仓库" },
-      { level: "info", message: "已推送到远端" },
-    ];
+    // 推送：message 以 FAIL 开头时返回错误日志，用于演示/验证失败提醒横幅
+    case "project_sync_push": {
+      const msg = (args.message as string)?.trim();
+      if (msg?.startsWith("FAIL")) {
+        return [
+          { level: "info", message: "项目「演示项目」已导出：5 个节点 / 3 个 Server（已脱敏）" },
+          { level: "warn", message: "git pull 失败（分支 main，继续推送本地内容）" },
+          { level: "error", message: `git push 失败（分支 main，本地提交已完成，可稍后手动推送）：FAIL:${msg.slice(4)}` },
+        ];
+      }
+      return [
+        { level: "info", message: "项目「演示项目」已导出：5 个节点 / 3 个 Server（已脱敏）" },
+        { level: "info", message: `已提交到本地仓库（分支 main）${msg ? `：${msg}` : "（默认提交信息）"}` },
+        { level: "info", message: "已推送到远端（分支 main）" },
+      ];
+    }
     case "project_sync_pull": return [
       { level: "info", message: "项目「演示项目」导入完成：2 目录 / 3 Server（覆盖当前配置）" },
     ];

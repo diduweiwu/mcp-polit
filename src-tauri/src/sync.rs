@@ -50,6 +50,10 @@ struct SyncServer {
     working_dir: Option<String>,
     url: Option<String>,
     headers: Option<String>,
+    /// 敏感请求头名称列表（JSON 数组字符串）：仅是头名称、非敏感值，导出导入原样透传，
+    /// 使拉取方保留「展示打码」标记（headers 值在默认脱敏导出时已替换 "***"）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sensitive_headers: Option<String>,
     timeout_ms: i64,
     enabled: bool,
     note: Option<String>,
@@ -66,7 +70,16 @@ fn entry(level: &str, message: String) -> LogEntry {
 /* ==================== 项目级同步（资源树推送/拉取） ==================== */
 
 /// 推送项目到其绑定的 git 仓库：导出 JSON -> commit -> push。
-pub async fn push_project(app: &AppHandle, db: &Db, project_id: i64) -> Vec<LogEntry> {
+///
+/// `message` 为用户填写的提交信息（前端推送弹窗传入）：去首尾空白后非空才使用，
+/// 否则回退默认提交信息「MCPilot 配置同步」。提交与推送日志均携带当前分支名，
+/// 便于用户确认推送目标。
+pub async fn push_project(
+    app: &AppHandle,
+    db: &Db,
+    project_id: i64,
+    message: Option<String>,
+) -> Vec<LogEntry> {
     let mut logs = Vec::new();
     let (project, include_secrets) = {
         let conn = db.0.lock().unwrap();
@@ -93,9 +106,10 @@ pub async fn push_project(app: &AppHandle, db: &Db, project_id: i64) -> Vec<LogE
         return logs;
     }
     ensure_git_repo(&repo, &mut logs).await;
+    let branch = current_branch(&repo).await;
 
     if let Err(e) = git_async(&repo, &["pull", "--ff-only"]).await {
-        logs.push(entry("warn", format!("git pull 失败（继续推送本地内容）：{e}")));
+        logs.push(entry("warn", format!("git pull 失败（分支 {branch}，继续推送本地内容）：{e}")));
     }
 
     // 导出该项目
@@ -116,21 +130,27 @@ pub async fn push_project(app: &AppHandle, db: &Db, project_id: i64) -> Vec<LogE
         return logs;
     }
 
-    // 提交并推送
+    // 提交并推送（提交信息：用户填写优先，留空回退默认）
+    let commit_msg = message
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| "MCPilot 配置同步".into());
     let _ = git_async(&repo, &["add", "-A"]).await;
-    match git_async(&repo, &["-c", "user.name=MCPilot", "-c", "user.email=mcpilot@local", "commit", "-m", "MCPilot 配置同步"]).await {
+    match git_async(&repo, &["-c", "user.name=MCPilot", "-c", "user.email=mcpilot@local", "commit", "-m", &commit_msg]).await {
         Ok(_) => {
-            logs.push(entry("info", "已提交到本地仓库".into()));
+            logs.push(entry("info", format!("已提交到本地仓库（分支 {branch}）")));
             match git_async(&repo, &["push"]).await {
-                Ok(_) => logs.push(entry("info", "已推送到远端".into())),
-                Err(e) => logs.push(entry("warn", format!("git push 失败（本地提交已完成，可稍后手动推送）：{e}"))),
+                Ok(_) => logs.push(entry("info", format!("已推送到远端（分支 {branch}）"))),
+                Err(e) => logs.push(entry("warn", format!("git push 失败（分支 {branch}，本地提交已完成，可稍后手动推送）：{e}"))),
             }
         }
         Err(e) => {
             if e.contains("nothing to commit") {
                 logs.push(entry("info", "内容无变化，未产生新提交".into()));
             } else {
-                logs.push(entry("error", format!("git commit 失败：{e}")));
+                logs.push(entry("error", format!("git commit 失败（分支 {branch}）：{e}")));
             }
         }
     }
@@ -161,11 +181,25 @@ pub async fn pull_project(app: &AppHandle, db: &Db, project_id: i64) -> Vec<LogE
         return logs;
     }
     if let Err(e) = git_async(&repo, &["pull", "--ff-only"]).await {
-        logs.push(entry("warn", format!("git pull 失败（使用本地仓库当前内容）：{e}")));
+        let branch = current_branch(&repo).await;
+        logs.push(entry("warn", format!("git pull 失败（分支 {branch}，使用本地仓库当前内容）：{e}")));
     }
 
     import_tree_dir(&repo, app, db, Some(&project), &mut logs).await;
     logs
+}
+
+/// 取仓库当前分支名（仅用于日志与提示展示）。
+///
+/// 优先 `git branch --show-current`：尚无提交的空仓库也能取到分支名；
+/// detached HEAD 或命令失败时返回「?」占位。
+async fn current_branch(repo: &Path) -> String {
+    git_async(repo, &["branch", "--show-current"])
+        .await
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "?".into())
 }
 
 /// 项目绑定新的空同步目录后，把项目当前数据迁移进去：导出 JSON + 创建初始提交。
@@ -251,23 +285,46 @@ pub fn git_branches(dir: &Path) -> Result<BranchInfo, String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    let branches: Vec<String> = String::from_utf8_lossy(&out.stdout)
+    let mut branches: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
-    let current = std::process::Command::new("git")
+    // 当前分支用 branch --show-current：尚无提交的空仓库也能拿到正确分支名
+    // （rev-parse HEAD 在空仓库会失败，旧版回退的 "(main)" 在默认分支非 main 时是错的）
+    let cur = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["branch", "--show-current"])
         .output()
         .map_err(|e| format!("git 执行失败：{e}"))?;
-    let current = if current.status.success() {
-        String::from_utf8_lossy(&current.stdout).trim().to_string()
+    let mut current = if cur.status.success() {
+        String::from_utf8_lossy(&cur.stdout).trim().to_string()
     } else {
-        "(main)".into() // 空仓库尚无提交
+        String::new()
     };
+    if current.is_empty() {
+        // --show-current 不可用（老版本 git）或 detached HEAD 时回退 rev-parse
+        let fallback = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output();
+        current = match fallback {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() || s == "HEAD" { "(无分支)".into() } else { s }
+            }
+            _ => "(无分支)".into(),
+        };
+    }
+    // 尚无提交的空仓库：refs/heads 为空（分支要等首次提交才「诞生」），但 HEAD 已指向
+    // 当前分支名——把当前分支并入列表，避免 UI 出现「显示 main 却说没有任何分支」的矛盾；
+    // detached HEAD（current 为「(无分支)」占位）时不并入
+    if branches.is_empty() && !current.is_empty() && !current.starts_with('(') {
+        branches.push(current.clone());
+    }
     Ok(BranchInfo { current, branches })
 }
 
@@ -369,6 +426,7 @@ fn load_project_data(
             working_dir: cfg.working_dir,
             url: cfg.url,
             headers: if include_secrets { cfg.headers } else { scrub(cfg.headers.as_deref()) },
+            sensitive_headers: cfg.sensitive_headers,
             timeout_ms: cfg.timeout_ms,
             enabled: cfg.enabled,
             note: cfg.note,
@@ -578,6 +636,7 @@ async fn import_tree_dir(
             working_dir: ss.working_dir.clone(),
             url: ss.url.clone(),
             headers: ss.headers.clone(),
+            sensitive_headers: ss.sensitive_headers.clone(),
             timeout_ms: ss.timeout_ms,
             enabled: ss.enabled,
             note: ss.note.clone(),

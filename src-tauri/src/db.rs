@@ -157,6 +157,12 @@ fn migrate(conn: &Connection) -> Result<(), AppError> {
         "ALTER TABLE server_configs ADD COLUMN active_env TEXT",
         [],
     );
+    // 敏感请求头名称列表：JSON 数组字符串（如 '["Authorization"]'），
+    // 标记哪些头的值在展示时打码；仅影响展示，连接仍用 headers 原值
+    let _ = conn.execute(
+        "ALTER TABLE server_configs ADD COLUMN sensitive_headers TEXT",
+        [],
+    );
     Ok(())
 }
 
@@ -440,9 +446,9 @@ fn copy_subtree(
         conn.execute(
             "INSERT INTO server_configs
                     (node_id, transport_type, command, args, env, working_dir, url, headers,
-                     timeout_ms, enabled, note, envs, active_env)
+                     timeout_ms, enabled, note, envs, active_env, sensitive_headers)
              SELECT ?1, transport_type, command, args, env, working_dir, url, headers,
-                    timeout_ms, enabled, note, envs, active_env
+                    timeout_ms, enabled, note, envs, active_env, sensitive_headers
              FROM server_configs WHERE node_id = ?2",
             rusqlite::params![new_id, src_id],
         )?;
@@ -536,7 +542,7 @@ pub fn delete_node(conn: &Connection, id: i64) -> CmdResult<Vec<i64>> {
 pub fn get_server_config(conn: &Connection, node_id: i64) -> CmdResult<ServerConfig> {
     let result = conn.query_row(
         "SELECT node_id, transport_type, command, args, env, working_dir, url, headers,
-                timeout_ms, enabled, note, envs, active_env
+                timeout_ms, enabled, note, envs, active_env, sensitive_headers
          FROM server_configs WHERE node_id = ?1",
         rusqlite::params![node_id],
         map_config,
@@ -552,6 +558,7 @@ pub fn get_server_config(conn: &Connection, node_id: i64) -> CmdResult<ServerCon
             working_dir: None,
             url: None,
             headers: None,
+            sensitive_headers: None,
             timeout_ms: 30_000,
             enabled: true,
             note: None,
@@ -578,6 +585,7 @@ fn map_config(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerConfig> {
         note: row.get(10)?,
         envs: row.get(11)?,
         active_env: row.get(12)?,
+        sensitive_headers: row.get(13)?,
     })
 }
 
@@ -605,8 +613,8 @@ pub fn upsert_server_config(conn: &Connection, cfg: &ServerConfig) -> CmdResult<
     conn.execute(
         "INSERT INTO server_configs
              (node_id, transport_type, command, args, env, working_dir, url, headers,
-              timeout_ms, enabled, note, envs, active_env)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+              timeout_ms, enabled, note, envs, active_env, sensitive_headers)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(node_id) DO UPDATE SET
              transport_type = excluded.transport_type,
              command = excluded.command,
@@ -619,7 +627,8 @@ pub fn upsert_server_config(conn: &Connection, cfg: &ServerConfig) -> CmdResult<
              enabled = excluded.enabled,
              note = excluded.note,
              envs = excluded.envs,
-             active_env = excluded.active_env",
+             active_env = excluded.active_env,
+             sensitive_headers = excluded.sensitive_headers",
         rusqlite::params![
             cfg.node_id,
             transport_to_str(cfg.transport_type),
@@ -634,6 +643,7 @@ pub fn upsert_server_config(conn: &Connection, cfg: &ServerConfig) -> CmdResult<
             cfg.note,
             cfg.envs,
             cfg.active_env,
+            cfg.sensitive_headers,
         ],
     )?;
     Ok(())
@@ -800,6 +810,7 @@ mod tests {
             working_dir: None,
             url: None,
             headers: None,
+            sensitive_headers: None,
             timeout_ms: 15_000,
             enabled: true,
             note: Some("测试".into()),
@@ -847,6 +858,7 @@ mod tests {
             working_dir: None,
             url: None,
             headers: None,
+            sensitive_headers: Some(r#"["Authorization"]"#.into()),
             timeout_ms: 15_000,
             enabled: true,
             note: None,

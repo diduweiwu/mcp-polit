@@ -84,6 +84,10 @@ pub struct ServerConfig {
     pub url: Option<String>,
     /// streamable_http 模式：自定义请求头（JSON 对象字符串，可放 Authorization 等鉴权头）
     pub headers: Option<String>,
+    /// 敏感请求头名称列表（JSON 数组字符串，如 ["Authorization"]）：
+    /// 标记哪些头的值属于敏感信息，摘要/编辑展示时以星号打码，仅影响展示不影响连接
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitive_headers: Option<String>,
     /// 工具调用超时时间（毫秒）
     pub timeout_ms: i64,
     /// 是否启用该 Server

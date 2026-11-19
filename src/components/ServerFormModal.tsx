@@ -7,6 +7,7 @@ import { AlertCircle, Info } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
 import type { ServerConfig } from "../types";
+import { parseSensitiveKeys, stringifySensitiveKeys } from "../lib/sensitive";
 import { Modal } from "./ui";
 import { KVEditor } from "./KVEditor";
 import { EnvSection } from "./EnvEditor";
@@ -22,6 +23,7 @@ function defaultConfig(nodeId: number): ServerConfig {
     working_dir: "",
     url: "",
     headers: "",
+    sensitive_headers: "",
     timeout_ms: 30_000,
     enabled: true,
     note: "",
@@ -316,6 +318,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
                 onChange={(v) => patch({ headers: v })}
                 keyPlaceholder="头名称，如 Authorization"
                 valuePlaceholder="值，如 Bearer sk-****"
+                sensitiveKeys={parseSensitiveKeys(cfg.sensitive_headers)}
+                onSensitiveKeysChange={(keys) =>
+                  patch({ sensitive_headers: stringifySensitiveKeys(keys) })
+                }
               />
             </div>
           )}

@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../store";
 import type { TreeNode } from "../types";
+import { isSensitiveKey, parseSensitiveKeys } from "../lib/sensitive";
 import * as api from "../api";
 import { EmptyState, SearchSelect, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
@@ -326,6 +327,9 @@ function rowsOf(json?: string | null): Array<[string, string]> {
     return [];
   }
 }
+
+/** 敏感值的摘要展示形态：固定星号，不显示真实内容 */
+const MASKED_VALUE = "******";
 /** 摘要行 */
 function SummaryRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -392,7 +396,14 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
         <SummaryRow label="请求头">
           {rowsOf(cfg.headers).map(([k, v]) => (
             <div key={k} className="mb-0.5">
-              <span className="text-primarystrong">{k}:</span> {v}
+              <span className="text-primarystrong">{k}:</span>{" "}
+              {isSensitiveKey(parseSensitiveKeys(cfg.sensitive_headers), k) ? (
+                <span className="text-inksoft" title="已标记为敏感信息，值已隐藏">
+                  {MASKED_VALUE}
+                </span>
+              ) : (
+                v
+              )}
             </div>
           ))}
         </SummaryRow>
