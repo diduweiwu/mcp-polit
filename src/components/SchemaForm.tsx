@@ -4,7 +4,7 @@
  * 支持：string（含 enum 下拉、密码框）、number/integer、boolean、
  * 基础类型数组、嵌套对象；复杂结构回退为 JSON 文本编辑。
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import type { JsonSchema } from "../types";
 
@@ -263,28 +263,36 @@ function SchemaField({
   }
 }
 
-/** 字段行：label + 控件 + 描述 */
+/** 字段行：label + 控件 + 描述（label 行右侧可带类型徽章） */
 function Row({
   label,
   required,
   desc,
+  badge,
   children,
 }: {
   label: string;
   required: boolean;
   desc?: string;
+  /** 行右侧的类型徽章文本（如 JSON），与参数名视觉分离，避免被误读为名称的一部分 */
+  badge?: string;
   children: React.ReactNode;
 }) {
   /** 描述默认两行截断，点击切换全文（行内本地态即可） */
   const [descExpanded, setDescExpanded] = useState(false);
   return (
     <div>
-      <label className="label">
+      <label className="label flex items-center">
         <span className="font-mono">{label}</span>
         {required ? (
           <span className="ml-1 text-err">*</span>
         ) : (
           <span className="ml-1 text-[11px] text-inksoft/60">可选</span>
+        )}
+        {badge && (
+          <span className="ml-auto shrink-0 rounded-full border border-line bg-panel2 px-1.5 text-[10px] leading-4 font-mono font-medium text-inksoft">
+            {badge}
+          </span>
         )}
       </label>
       {children}
@@ -303,7 +311,18 @@ function Row({
   );
 }
 
-/** 复杂子结构：JSON 文本编辑（带校验提示） */
+/** 序列化草稿显示：格式化缩进，便于直接编辑 */
+function serializeDraft(value: unknown): string {
+  return value === undefined || value === null ? "" : JSON.stringify(value, null, 2);
+}
+
+/**
+ * 复杂子结构：JSON 文本编辑（带校验提示）。
+ *
+ * 输入采用本地草稿态：编辑过程中允许存在不合法的中间文本（如只输入了一个 `{`），
+ * 只有解析成功才向上同步；解析失败时保留草稿并给出行内提示，绝不回弹用户输入。
+ * 外部值变化（如 Case 带入、切换工具重挂载除外）时以外部值为准重置草稿。
+ */
 function JsonSubEdit({
   label,
   required,
@@ -317,24 +336,56 @@ function JsonSubEdit({
   value: unknown;
   onChange: OnChange;
 }) {
-  const text = value === undefined || value === null ? "" : JSON.stringify(value);
+  /** 输入草稿：编辑中的原始文本，与向上同步的 value 解耦 */
+  const [draft, setDraft] = useState<string>(() => serializeDraft(value));
+  /** 当前草稿是否为非法 JSON（输入中间态） */
+  const [invalid, setInvalid] = useState(false);
+  /** 最近一次向上同步的值，用于区分「自身编辑引起的同步」与「外部带入的变化」 */
+  const lastSynced = useRef<unknown>(value);
+
+  /* 外部 value 变化（引用不同，如 Case 带入）→ 重置草稿为外部值；
+     自身编辑引起的同步引用相同，不会误触发 */
+  useEffect(() => {
+    if (value !== lastSynced.current) {
+      lastSynced.current = value;
+      setDraft(serializeDraft(value));
+      setInvalid(false);
+    }
+  }, [value]);
+
   return (
-    <Row label={`${label}（JSON）`} required={required} desc={desc}>
+    <Row label={label} required={required} desc={desc} badge="JSON">
       <textarea
         className="field font-mono !text-[12px]"
-        rows={3}
+        rows={4}
         placeholder='例如：{"nested": 1} 或 [1, 2]'
-        value={text}
+        value={draft}
         onChange={(e) => {
-          const raw = e.target.value.trim();
-          if (raw === "") return onChange(undefined);
+          const raw = e.target.value;
+          setDraft(raw);
+          const trimmed = raw.trim();
+          if (trimmed === "") {
+            lastSynced.current = undefined;
+            setInvalid(false);
+            onChange(undefined);
+            return;
+          }
           try {
-            onChange(JSON.parse(raw));
+            const parsed = JSON.parse(trimmed);
+            lastSynced.current = parsed;
+            setInvalid(false);
+            onChange(parsed);
           } catch {
-            /* 输入中：暂时保留旧值，运行前会整体校验 */
+            /* 输入中间态：保留草稿，等补全后再同步 */
+            setInvalid(true);
           }
         }}
       />
+      {invalid && (
+        <div className="mt-0.5 text-[11px] text-err">
+          JSON 格式有误，补全后才会生效（运行时使用最近一次合法内容）
+        </div>
+      )}
     </Row>
   );
 }
