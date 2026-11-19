@@ -1,6 +1,6 @@
 [package]
 name = "mcpilot"
-version = "0.1.8"
+version = "0.1.9"
 description = "MCPilot — 本地 MCP 调试工作台（MCP Inspector 客户端）"
 authors = ["MCPilot"]
 edition = "2024"
