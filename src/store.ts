@@ -8,6 +8,7 @@ import * as api from "./api";
 import type {
   CallResult,
   ConnStatus,
+  Environment,
   HistoryEntry,
   LogLevel,
   LogEntry,
@@ -96,8 +97,11 @@ interface AppState {
   /** 历史分页加载进行中 */
   loadingHistory: boolean;
 
-  /* 应用设置缓存（键值对） */
+  /* 应用设置缓存（键值对；含按项目存的激活环境 active_env_<projectId>） */
   settings: Record<string, string>;
+
+  /* 项目级环境库（当前项目的环境列表；Server 配置以 {{变量名}} 引用其中的变量） */
+  environments: Environment[];
 
   /** 工具参数缓存（key: "nodeId:toolName" -> 入参 JSON；跨切换/重启保留） */
   toolParams: Record<string, string>;
@@ -189,6 +193,13 @@ interface AppState {
   /** 保存一个设置项并同步缓存 */
   saveSetting: (key: string, value: string) => Promise<void>;
 
+  /** 加载当前项目的环境库（切换项目时调用） */
+  loadEnvironments: () => Promise<void>;
+  /** 整批保存环境库（弹窗草稿式编辑后一次性落盘；全量覆盖） */
+  saveEnvironments: (envs: api.EnvironmentPayload[]) => Promise<void>;
+  /** 切换全局激活环境（空串 = 不使用环境）；已连接的 Server 需重连后生效 */
+  switchActiveEnv: (name: string) => Promise<void>;
+
   /** 合并后端推送的连接状态（Tauri event） */
   applyConnState: (ev: { node_id: number; status: ConnStatus; message: string | null }) => void;
 }
@@ -230,6 +241,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadingHistory: false,
   logs: [],
   settings: {},
+  environments: [],
   toolParams: {},
   cases: {},
   lastToolByNode: {},
@@ -285,6 +297,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       expandedIds: {},
     });
     await get().reloadNodes();
+    // 加载项目环境库 + 旧环境组一次性迁移（幂等；迁移明细/冲突写日志面板）
+    await get().loadEnvironments();
+    void api
+      .migrateLegacyEnvs(id)
+      .then((logs) => {
+        if (logs.length) get().addLogs(logs);
+      })
+      .catch((e) => get().addLog("warn", `旧环境组迁移检查失败：${e}`));
     // 恢复仍在存活连接的状态（窗口刷新场景）
     const { nodes } = get();
     for (const n of nodes) {
@@ -700,6 +720,45 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((s) => ({ settings: { ...s.settings, [key]: value } }));
   },
 
+  async loadEnvironments() {
+    const pid = get().activeProjectId;
+    if (pid == null) {
+      set({ environments: [] });
+      return;
+    }
+    try {
+      const environments = await api.listEnvironments(pid);
+      set({ environments });
+    } catch {
+      set({ environments: [] });
+    }
+  },
+
+  async saveEnvironments(envs) {
+    const pid = get().activeProjectId;
+    if (pid == null) return;
+    await api.saveEnvironments(pid, envs);
+    // 后端整批替换会重新生成 id，重新拉取保证缓存一致（以环境名为身份）
+    await get().loadEnvironments();
+    scheduleSyncExport(); // 实时同步：环境库已变更，防抖写盘到同步目录
+  },
+
+  async switchActiveEnv(name) {
+    const pid = get().activeProjectId;
+    if (pid == null) return;
+    const key = `active_env_${pid}`;
+    if ((get().settings[key] ?? "").trim() === name) return;
+    await get().saveSetting(key, name);
+    const label = name || "不使用环境";
+    const connected = Object.values(get().connStates).filter((s) => s === "connected").length;
+    get().addLog(
+      "info",
+      connected > 0
+        ? `全局环境已切换为「${label}」：${connected} 个已连接的 Server 需重新连接后生效`
+        : `全局环境已切换为「${label}」`,
+    );
+  },
+
   applyConnState(ev) {
     set((s) => ({
       connStates: { ...s.connStates, [ev.node_id]: ev.status },
@@ -712,6 +771,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 }));
+
+/**
+ * 当前项目激活的全局环境名（settings 里按项目存：`active_env_<projectId>`）。
+ *
+ * 空串 = 未选择环境（配置中的 {{变量名}} 引用会在连接时报错引导选择）。
+ * 环境身份是「名字」：整批保存后 id 会重建，凡以环境为 key 的地方都用名字。
+ *
+ * @example
+ * const name = activeEnvName(useAppStore.getState());
+ * const vars = useAppStore.getState().environments.find((e) => e.name === name);
+ */
+export function activeEnvName(
+  s: Pick<AppState, "settings" | "activeProjectId">,
+): string {
+  if (s.activeProjectId == null) return "";
+  return (s.settings[`active_env_${s.activeProjectId}`] ?? "").trim();
+}
 
 /** 自动导出的防抖计时器（连续操作合并为一次写盘） */
 let syncExportTimer: number | null = null;

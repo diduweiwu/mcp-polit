@@ -2,16 +2,15 @@
  * Server 新建 / 编辑弹窗：别名、传输类型（stdio / Streamable HTTP）、
  * 命令/URL、参数、环境变量、自定义请求头（含鉴权）、超时等。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Info } from "lucide-react";
 import * as api from "../api";
-import { useAppStore, scheduleSyncExport } from "../store";
+import { activeEnvName, useAppStore, scheduleSyncExport } from "../store";
 import type { ServerConfig } from "../types";
 import { siblingNameConflict } from "../lib/tree";
 import { parseSensitiveKeys, stringifySensitiveKeys } from "../lib/sensitive";
 import { Modal } from "./ui";
 import { KVEditor } from "./KVEditor";
-import { EnvSection } from "./EnvEditor";
 
 /** 空/新建时的默认配置 */
 function defaultConfig(nodeId: number): ServerConfig {
@@ -44,6 +43,19 @@ interface Props {
 export function ServerFormModal({ parentId, onClose }: Props) {
   const { nodes, selectedNodeId, renameNode, reloadNodes, selectNode } =
     useAppStore();
+  const environments = useAppStore((s) => s.environments);
+  /** 当前激活的全局环境名（顶栏切换；空串 = 未选择环境） */
+  const envName = useAppStore((s) => activeEnvName(s));
+  /** 该环境的变量名列表（env/headers 值里 {{}} 引用提示条用） */
+  const availableVars = useMemo(() => {
+    const cur = environments.find((e) => e.name === envName);
+    if (!cur?.variables.trim()) return [];
+    try {
+      return Object.keys(JSON.parse(cur.variables) as Record<string, unknown>);
+    } catch {
+      return [];
+    }
+  }, [environments, envName]);
 
   /** 编辑模式的目标节点（新建时为 null） */
   const editNode =
@@ -125,17 +137,22 @@ export function ServerFormModal({ parentId, onClose }: Props) {
     return "";
   };
 
-  /** 测试连通性：用当前表单配置（无需先保存）握手并拉取工具列表 */
+  /** 测试连通性：用当前表单配置（无需先保存）握手并拉取工具列表（按当前全局环境解析 {{}} 引用） */
   const testConn = async () => {
     const err = validateConfig();
     if (err) {
       setTestMsg({ ok: false, text: err });
       return;
     }
+    const projectId = useAppStore.getState().activeProjectId;
+    if (projectId == null) {
+      setTestMsg({ ok: false, text: "没有已选中的项目，无法测试连通性" });
+      return;
+    }
     setTesting(true);
     setTestMsg(null);
     try {
-      const tools = await api.testServerConfig(cfg);
+      const tools = await api.testServerConfig(cfg, projectId);
       setTestMsg({ ok: true, text: `连接成功，发现 ${tools.length} 个工具` });
     } catch (e) {
       setTestMsg({ ok: false, text: String(e) });
@@ -308,7 +325,8 @@ export function ServerFormModal({ parentId, onClose }: Props) {
                 json={cfg.env ?? ""}
                 onChange={(v) => patch({ env: v })}
                 keyPlaceholder="变量名，如 DEBUG"
-                valuePlaceholder="值，如 1"
+                valuePlaceholder="值，如 1，或 {{VAR}} 引用环境变量"
+                availableVars={availableVars}
               />
               <div>
                 <label className="label">工作目录（可选）</label>
@@ -339,17 +357,27 @@ export function ServerFormModal({ parentId, onClose }: Props) {
                 json={cfg.headers ?? ""}
                 onChange={(v) => patch({ headers: v })}
                 keyPlaceholder="头名称，如 Authorization"
-                valuePlaceholder="值，如 Bearer sk-****"
+                valuePlaceholder="值，如 Bearer {{TOKEN}}"
                 sensitiveKeys={parseSensitiveKeys(cfg.sensitive_headers)}
                 onSensitiveKeysChange={(keys) =>
                   patch({ sensitive_headers: stringifySensitiveKeys(keys) })
                 }
+                availableVars={availableVars}
               />
             </div>
           )}
 
-          {/* 环境组：多套 env/headers 覆盖，连接时按激活环境套用 */}
-          <EnvSection cfg={cfg} patch={patch} />
+          {/* 环境变量引用说明：环境值在顶栏「环境」中管理，这里只做引用 */}
+          <div className="flex items-start gap-1.5 rounded-md bg-panel2 p-2.5 text-[12px] leading-relaxed text-inksoft">
+            <Info size={14} className="mt-0.5 shrink-0" />
+            <span>
+              值中可用
+              <span className="mx-0.5 font-mono text-primarystrong">{"{{变量名}}"}</span>
+              引用环境变量（地址 / 命令 / 参数 / 环境变量 / 请求头均支持），连接时按当前环境
+              <b className="mx-0.5">{envName || "（未选择）"}</b>
+              替换。变量在顶栏「环境」中定义与修改，与本表单互不影响。
+            </span>
+          </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>

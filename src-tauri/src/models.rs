@@ -94,12 +94,100 @@ pub struct ServerConfig {
     pub enabled: bool,
     /// 备注（可选）
     pub note: Option<String>,
-    /// 环境变量组（JSON：{"dev":{"env":{...},"headers":{...}}}，可多套，切换连接时覆盖 base）
+    /// 【已废弃】旧版每 Server 内嵌环境组（JSON：{"dev":{"env":{...},"headers":{...}}}）。
+    /// 环境模型已改为项目级环境库（`environments` 表）+ 配置中 `{{变量名}}` 引用；
+    /// 本字段仅保留旧数据不被删除（休眠不读），Git 同步仍原样透传以防回退丢数据。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envs: Option<String>,
-    /// 当前激活的环境名；None 表示使用 base 配置（不启用环境覆盖）
+    /// 【已废弃】旧版激活的环境名。保留原因同 `envs`；连接解析不再读取。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_env: Option<String>,
+}
+
+/// 项目级环境：一组可在 Server 配置中以 `{{变量名}}` 引用的变量。
+///
+/// 同一项目下可定义多套环境（如 dev / prod），同一时刻全局激活一套；
+/// 连接 Server 时按激活环境的变量集对配置值做插值替换。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Environment {
+    /// 环境 ID，自增主键
+    pub id: i64,
+    /// 所属项目 ID
+    pub project_id: i64,
+    /// 环境名（同项目内唯一，如 dev / prod）
+    pub name: String,
+    /// 变量集（JSON 对象字符串，如 {"TOKEN":"xxx"}；配置中以 {{键}} 引用）
+    pub variables: String,
+    /// 同项目内排序序号（小的在前）
+    pub sort_order: i64,
+}
+
+/// 旧版每 Server 环境组（`envs` 字段）向项目级环境库合并的结果报告。
+///
+/// 由 [`crate::db::merge_legacy_envs`] 产出，经 [`Self::to_logs`] 转成日志条目
+/// 展示给用户，保证迁移过程可见、冲突不静默。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LegacyEnvsMergeReport {
+    /// 扫描的 Server 总数（项目内全部 server 节点）
+    pub scanned_servers: usize,
+    /// 携带旧环境组数据的 Server 别名列表
+    pub servers_with_envs: Vec<String>,
+    /// 本次新建的环境名列表
+    pub created_envs: Vec<String>,
+    /// 向已有环境补充变量的（环境名, 补充的变量键列表）列表
+    pub merged_into: Vec<(String, Vec<String>)>,
+    /// 同键取值冲突明细（环境库已有值优先保留，新值丢弃）：每条一句人话
+    pub conflicts: Vec<String>,
+}
+
+impl LegacyEnvsMergeReport {
+    /// 把合并报告转成用户可见的日志条目（info 明细 + warn 冲突）。
+    ///
+    /// 无旧数据（`servers_with_envs` 为空，含已迁移过的重复调用）时返回空，
+    /// 调用方静默即可，不骚扰用户。
+    ///
+    /// # 使用示例
+    ///
+    /// ```text
+    /// LegacyEnvsMergeReport::default().to_logs().is_empty() == true  // 无旧数据 -> 静默
+    /// ```
+    pub fn to_logs(&self) -> Vec<LogEntry> {
+        if self.servers_with_envs.is_empty() {
+            return Vec::new();
+        }
+        let mut logs = Vec::new();
+        logs.push(LogEntry {
+            level: "info".into(),
+            message: format!(
+                "检测到旧版 Server 环境组数据（{} 个 Server：{}），已合并进项目环境库",
+                self.servers_with_envs.len(),
+                self.servers_with_envs.join("、")
+            ),
+        });
+        if !self.created_envs.is_empty() {
+            logs.push(LogEntry {
+                level: "info".into(),
+                message: format!("新建环境：{}", self.created_envs.join("、")),
+            });
+        }
+        for (name, keys) in &self.merged_into {
+            logs.push(LogEntry {
+                level: "info".into(),
+                message: format!("环境「{name}」补充变量：{}", keys.join("、")),
+            });
+        }
+        for c in &self.conflicts {
+            logs.push(LogEntry {
+                level: "warn".into(),
+                message: format!("合并冲突：{c}"),
+            });
+        }
+        logs.push(LogEntry {
+            level: "info".into(),
+            message: "旧环境组数据已保留在原 Server 配置中（不再生效），可在配置值里改用 {{变量名}} 引用环境变量".into(),
+        });
+        logs
+    }
 }
 
 /// 工具信息：从 MCP Server 的 tools/list 结果中提炼、传给前端的结构。

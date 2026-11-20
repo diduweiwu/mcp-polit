@@ -8,6 +8,7 @@ import type {
   BranchInfo,
   CallResult,
   ConnStateEvent,
+  Environment,
   Project,
   ServerConfig,
   ToolInfo,
@@ -125,9 +126,37 @@ export const getServerConfig = (nodeId: number) =>
 export const saveServerConfig = (config: ServerConfig) =>
   invoke<void>("save_server_config", { config });
 
-/** 测试连通性：用表单中的未保存配置握手 + 拉取工具列表，成功返回工具列表 */
-export const testServerConfig = (config: ServerConfig) =>
-  invoke<ToolInfo[]>("test_server_config", { config });
+/** 测试连通性：用表单中的未保存配置握手 + 拉取工具列表，成功返回工具列表。
+ *  与正式连接一致：projectId 用于按当前激活环境解析配置里的 {{变量名}} 引用 */
+export const testServerConfig = (config: ServerConfig, projectId: number) =>
+  invoke<ToolInfo[]>("test_server_config", { config, projectId });
+
+/* ---------- 项目级环境库 ---------- */
+
+/** 环境保存负载：环境管理弹窗整批提交的单个环境（id / 排序由后端生成） */
+export interface EnvironmentPayload {
+  /** 环境名（同项目内唯一，如 dev / prod） */
+  name: string;
+  /** 变量集：JSON 对象字符串，如 '{"TOKEN":"xxx"}' */
+  variables: string;
+}
+
+/** 列出项目全部环境（按 sort_order 升序） */
+export const listEnvironments = (projectId: number) =>
+  invoke<Environment[]>("list_environments", { projectId });
+
+/** 整批保存项目环境库（全量覆盖：列表中没有的环境会被删除，改名 = 删旧建新） */
+export const saveEnvironments = (projectId: number, environments: EnvironmentPayload[]) =>
+  invoke<void>("save_environments", { projectId, environments });
+
+/**
+ * 旧版每-Server 环境组（envs 字段）向项目环境库的一次性迁移（幂等）。
+ *
+ * 切换到某项目时调用；已迁移过的项目返回空数组（静默）。
+ * 返回迁移明细 / 冲突提醒日志（info/warn），调用方写入日志面板。
+ */
+export const migrateLegacyEnvs = (projectId: number) =>
+  invoke<Array<{ level: string; message: string }>>("migrate_legacy_envs", { projectId });
 
 /* ---------- 连接与调用 ---------- */
 

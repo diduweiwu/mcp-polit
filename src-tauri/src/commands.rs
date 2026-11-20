@@ -10,7 +10,8 @@ use crate::db::Db;
 use crate::error::CmdResult;
 use crate::mcp_manager::McpManager;
 use crate::models::{
-    CallResult, HistoryRecord, NodeType, Project, ServerConfig, ToolInfo, TreeNode,
+    CallResult, Environment, HistoryRecord, LogEntry, NodeType, Project, ServerConfig, ToolInfo,
+    TreeNode,
 };
 
 /* ---------- 项目 ---------- */
@@ -308,6 +309,61 @@ fn validate_config(config: &ServerConfig) -> CmdResult<()> {
     Ok(())
 }
 
+/* ---------- 项目级环境库 ---------- */
+
+/// 列出项目的全部环境（variables 为 JSON 对象字符串原文，前端解析渲染）。
+#[tauri::command]
+pub fn list_environments(
+    db: State<'_, Db>,
+    project_id: i64,
+) -> CmdResult<Vec<Environment>> {
+    let conn = db.0.lock().unwrap();
+    crate::db::list_environments(&conn, project_id)
+}
+
+/// 环境保存负载：环境管理弹窗整批提交的单个环境（id / 排序由后端生成）。
+#[derive(serde::Deserialize)]
+pub struct EnvironmentPayload {
+    /// 环境名（同项目内唯一，如 dev / prod）
+    pub name: String,
+    /// 变量集 JSON 对象字符串，如 '{"TOKEN":"xxx"}'
+    pub variables: String,
+}
+
+/// 整批保存项目的环境库（全量覆盖语义：列表中没有的环境会被删除，改名 = 删旧建新）。
+///
+/// 同批重名 / 空名 / variables 非法 JSON 时整体报错不落盘（校验在 [`crate::db::replace_environments`]）。
+#[tauri::command]
+pub fn save_environments(
+    db: State<'_, Db>,
+    project_id: i64,
+    environments: Vec<EnvironmentPayload>,
+) -> CmdResult<()> {
+    let inputs: Vec<crate::db::EnvironmentInput> = environments
+        .into_iter()
+        .map(|e| crate::db::EnvironmentInput {
+            name: e.name,
+            variables: e.variables,
+        })
+        .collect();
+    let mut conn = db.0.lock().unwrap();
+    crate::db::replace_environments(&mut conn, project_id, &inputs)
+}
+
+/// 旧版每 Server 环境组（`envs` 字段）向项目级环境库的一次性迁移（幂等）。
+///
+/// 前端在切换到某项目时调用；已迁移过的项目返回空日志（静默）。
+/// 返回的日志（迁移明细 / 冲突提醒）由前端写入日志面板，保证迁移可见、冲突不静默。
+#[tauri::command]
+pub fn migrate_legacy_envs(
+    db: State<'_, Db>,
+    project_id: i64,
+) -> CmdResult<Vec<LogEntry>> {
+    let mut conn = db.0.lock().unwrap();
+    let report = crate::db::merge_legacy_envs(&mut conn, project_id, false)?;
+    Ok(report.to_logs())
+}
+
 /* ---------- 连接与调用 ---------- */
 
 /// 连接指定 server，成功返回工具列表。
@@ -490,10 +546,21 @@ pub fn duplicate_node(db: State<'_, Db>, node_id: i64, name: String) -> CmdResul
 
 /// 用表单中的（未落库）配置测试连通性：握手 → 拉取工具列表 → 立即断开。
 ///
+/// 与正式连接一致：先按 `project_id` 当前激活环境对配置做 `{{}}` 插值解析，
+/// 存在未定义的环境变量引用时直接报错（fail-fast，不把占位符原样发出）。
+///
 /// 不写入连接表、不广播状态、不影响该节点可能已存在的正式连接。
 #[tauri::command]
-pub async fn test_server_config(config: ServerConfig) -> CmdResult<Vec<ToolInfo>> {
-    McpManager::probe_config(config).await
+pub async fn test_server_config(
+    db: State<'_, Db>,
+    config: ServerConfig,
+    project_id: i64,
+) -> CmdResult<Vec<ToolInfo>> {
+    let resolved = {
+        let conn = db.0.lock().unwrap();
+        crate::mcp_manager::resolve_config(&conn, &config, project_id)?
+    };
+    McpManager::probe_config(resolved).await
 }
 
 /* ---------- 调用历史 ---------- */

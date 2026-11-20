@@ -8,6 +8,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Eye, EyeOff, Plus, Trash2 } from "lucide-react";
+import { copyText } from "../lib/clipboard";
 
 /** 键值对编辑器属性 */
 interface KVProps {
@@ -21,6 +22,9 @@ interface KVProps {
   sensitiveKeys?: string[];
   /** 敏感标记变化回调：勾选/取消/改名跟随/删行移除时触发，调用方负责持久化 */
   onSensitiveKeysChange?: (keys: string[]) => void;
+  /** 可引用的环境变量名列表（当前激活环境）。传入时在编辑器底部渲染提示条，
+   *  点击变量chip复制 {{变量名}} 引用；传空数组时提示去环境管理里添加 */
+  availableVars?: string[];
 }
 
 /** 键值对编辑器：环境变量 / 自定义请求头用，输出 JSON 对象字符串 */
@@ -32,6 +36,7 @@ export function KVEditor({
   valuePlaceholder,
   sensitiveKeys,
   onSensitiveKeysChange,
+  availableVars,
 }: KVProps) {
   /** 从 JSON 解析出键值行（非法 JSON 时显示为空，合法性由父级提交校验提示） */
   const parsed: Array<[string, string]> = useMemo(() => {
@@ -206,7 +211,43 @@ export function KVEditor({
             </div>
           );
         })}
+        {/* 环境变量引用提示条：点击 chip 复制 {{变量名}}，粘贴到任意值框即可引用 */}
+        {availableVars != null && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-inksoft">
+            <span className="shrink-0">可引用：</span>
+            {availableVars.length > 0 ? (
+              availableVars.map((name) => <VarChip key={name} name={name} />)
+            ) : (
+              <span className="text-inksoft/70">当前环境暂无变量，可在顶栏「环境」中添加。</span>
+            )}
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+/** 变量引用 chip：展示 {{变量名}}，点击复制引用文本（复制成功短暂显示「已复制」） */
+function VarChip({ name }: { name: string }) {
+  /** 复制成功的短暂反馈态 */
+  const [copied, setCopied] = useState(false);
+  /** 反馈恢复计时器（重复点击时重置） */
+  const timer = useRef<number | null>(null);
+
+  return (
+    <button
+      className="rounded border border-line bg-panel2 px-1.5 py-0.5 font-mono text-primarystrong transition-colors hover:bg-primarysoft"
+      title={`点击复制 {{${name}}}，粘贴到值输入框即可引用`}
+      onClick={() => {
+        void copyText(`{{${name}}}`).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          if (timer.current != null) window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+    >
+      {copied ? "已复制 ✓" : `{{${name}}}`}
+    </button>
   );
 }

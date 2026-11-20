@@ -13,10 +13,11 @@ import {
   Moon,
   Plus,
   Settings,
+  SlidersHorizontal,
   Sun,
   Zap,
 } from "lucide-react";
-import { useAppStore } from "../store";
+import { activeEnvName, useAppStore } from "../store";
 import { THEME_MODE_OPTIONS, type ThemeMode } from "../theme";
 import { openRepoPage, REPO_URL } from "../api";
 import { Dropdown, MenuItem, Modal } from "./ui";
@@ -24,6 +25,7 @@ import { GithubIcon } from "./icons";
 import { SettingsModal } from "./SettingsModal";
 import { ProjectManageModal } from "./ProjectManageModal";
 import { SyncDirField } from "./SyncDirField";
+import { EnvironmentManageModal } from "./EnvironmentManageModal";
 
 /** 风格模式 -> 图标 */
 function ModeIcon({ mode }: { mode: ThemeMode }) {
@@ -66,7 +68,11 @@ export function TopBar() {
     setActiveProject,
     createProject,
     setThemeMode,
+    environments,
+    switchActiveEnv,
   } = useAppStore();
+  /** 当前激活的全局环境名（空串 = 未选择环境，配置里的 {{}} 引用会在连接时报错引导） */
+  const envName = useAppStore((s) => activeEnvName(s));
 
   const active = projects.find((p) => p.id === activeProjectId) ?? null;
   const [newOpen, setNewOpen] = useState(false);
@@ -75,6 +81,8 @@ export function TopBar() {
   /** 管理项目弹窗：全部项目的重命名 / 配置同步目录 / 删除集中在此 */
   const [manageOpen, setManageOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 环境管理弹窗：环境变量集中定义（Server 配置以 {{变量名}} 引用） */
+  const [envManageOpen, setEnvManageOpen] = useState(false);
 
   /* 全局快捷键：⌘,（macOS）/ Ctrl+,（其他平台）打开设置（桌面应用惯例键位）。
      已打开时重复触发幂等；Esc 关闭由 Modal 自带 */
@@ -200,6 +208,71 @@ export function TopBar() {
         >
           <FolderCog size={15} />
         </button>
+
+        {/* 全局环境切换：一处切换影响项目内全部 Server 的 {{}} 引用解析（Apifox 式） */}
+        <Dropdown
+          trigger={(open, toggle) => (
+            <button
+              className="btn-ghost h-8 gap-1.5 !px-2.5"
+              onClick={toggle}
+              title="切换全局环境（Server 配置里的 {{变量名}} 按此环境解析）"
+            >
+              <SlidersHorizontal size={14} />
+              <span className="max-w-[120px] truncate">
+                {envName ? `环境：${envName}` : "环境：未选择"}
+              </span>
+              <ChevronDown
+                size={14}
+                className={`text-inksoft transition-transform ${open ? "rotate-180" : ""}`}
+              />
+            </button>
+          )}
+        >
+          {(close) => (
+            <>
+              <MenuItem
+                label="不使用环境"
+                icon={
+                  envName === "" ? (
+                    <Check size={14} className="text-primarystrong" />
+                  ) : (
+                    <span className="w-[14px]" />
+                  )
+                }
+                onClick={() => {
+                  void switchActiveEnv("");
+                  close();
+                }}
+              />
+              {environments.map((e) => (
+                <MenuItem
+                  key={e.name}
+                  label={e.name}
+                  icon={
+                    envName === e.name ? (
+                      <Check size={14} className="text-primarystrong" />
+                    ) : (
+                      <span className="w-[14px]" />
+                    )
+                  }
+                  onClick={() => {
+                    void switchActiveEnv(e.name);
+                    close();
+                  }}
+                />
+              ))}
+              <div className="my-1 border-t border-line" />
+              <MenuItem
+                icon={<Settings size={14} />}
+                label="管理环境…"
+                onClick={() => {
+                  setEnvManageOpen(true);
+                  close();
+                }}
+              />
+            </>
+          )}
+        </Dropdown>
       </div>
 
       {/* 右侧：均分布局 + 设置 + 主题色 + 明暗切换 + GitHub 仓库 */}
@@ -309,6 +382,9 @@ export function TopBar() {
 
       {/* 管理项目弹窗：重命名 / 配置同步目录（可选目录） / 删除，集中管理全部项目 */}
       <ProjectManageModal open={manageOpen} onClose={() => setManageOpen(false)} />
+
+      {/* 环境管理弹窗：环境变量集中定义与修改（Server 配置只做 {{}} 引用） */}
+      <EnvironmentManageModal open={envManageOpen} onClose={() => setEnvManageOpen(false)} />
 
       {/* 设置弹窗 */}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />

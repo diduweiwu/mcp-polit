@@ -149,7 +149,10 @@ pub async fn push_project(
     // 导出该项目（配置明文，json 即完整可用配置）
     let data = load_project_data(db, &project, &mut logs);
     if let Some((nodes, servers)) = data {
-        if let Err(e) = write_project_files(&repo, &project.name, &nodes, &servers) {
+        let environments = load_environments_data(db, project.id, &mut logs);
+        if let Err(e) =
+            write_project_files(&repo, &project.name, &nodes, &servers, environments.as_deref())
+        {
             logs.push(entry("error", format!("写入同步文件失败：{e}")));
             return logs;
         }
@@ -242,7 +245,8 @@ pub async fn pull_project(app: &AppHandle, db: &Db, project_id: i64) -> Vec<LogE
     // 覆盖导入会丢失这些差异，提醒用户先推送
     let source = snapshot.clone().unwrap_or_else(|| repo.clone());
     if let Some((local_nodes, local_servers)) = load_project_data(db, &project, &mut logs) {
-        if local_has_unpushed_changes(&source, &local_nodes, &local_servers) {
+        let local_environments = load_environments_data(db, project.id, &mut logs).unwrap_or_default();
+        if local_has_unpushed_changes(&source, &local_nodes, &local_servers, &local_environments) {
             logs.push(entry("warn",
                 "检测到本地与仓库内容存在差异（本地有未推送的改动），拉取将覆盖本地配置；建议先推送再拉取".into()));
         }
@@ -257,7 +261,14 @@ pub async fn pull_project(app: &AppHandle, db: &Db, project_id: i64) -> Vec<LogE
     // 工作树归零后后续推送无噪音；失败不阻断（下次变更/推送会自动重试）
     if has_remote {
         if let Some((nodes, servers)) = load_project_data(db, &project, &mut logs) {
-            if let Err(e) = write_project_files(&repo, &project.name, &nodes, &servers) {
+            let environments = load_environments_data(db, project.id, &mut logs);
+            if let Err(e) = write_project_files(
+                &repo,
+                &project.name,
+                &nodes,
+                &servers,
+                environments.as_deref(),
+            ) {
                 logs.push(entry("warn", format!("回写同步目录失败（下次推送/变更时会自动重试）：{e}")));
             }
         }
@@ -305,12 +316,13 @@ pub async fn migrate_project_to_dir(db: &Db, project_id: i64, dir: &Path) -> Vec
     let Some((nodes, servers)) = data else {
         return logs;
     };
+    let environments = load_environments_data(db, project.id, &mut logs);
     if nodes.is_empty() && servers.is_empty() {
         logs.push(entry("info", format!("项目「{}」暂无数据，同步目录已绑定（待首次推送生成内容）", project.name)));
         return logs;
     }
 
-    if let Err(e) = write_project_files(&repo, &project.name, &nodes, &servers) {
+    if let Err(e) = write_project_files(&repo, &project.name, &nodes, &servers, environments.as_deref()) {
         logs.push(entry("error", format!("迁移写入失败：{e}")));
         return logs;
     }
@@ -367,7 +379,8 @@ pub fn export_project_dir(db: &Db, project_id: i64) -> Vec<LogEntry> {
     }
     let data = load_project_data(db, &project, &mut logs);
     let Some((nodes, servers)) = data else { return logs };
-    if let Err(e) = write_project_files(&repo, &project.name, &nodes, &servers) {
+    let environments = load_environments_data(db, project_id, &mut logs);
+    if let Err(e) = write_project_files(&repo, &project.name, &nodes, &servers, environments.as_deref()) {
         logs.push(entry("warn", format!("自动同步失败（推送时会显示详细错误）：{e}")));
     }
     logs
@@ -377,12 +390,15 @@ pub fn export_project_dir(db: &Db, project_id: i64) -> Vec<LogEntry> {
 
 /// 检测本地导出内容与仓库当前内容是否存在差异（= 本地有未推送的改动）。
 ///
-/// 对比 `tree.json` 的 nodes 与全部 Server 配置文件（配置明文导出，无需归一处理）。
-/// 仓库缺 `tree.json` / 解析失败视为有差异（空仓库或异常状态都提醒）。
+/// 对比 `tree.json` 的 nodes、全部 Server 配置文件与环境库文件
+/// `environments.json`（配置明文导出，无需归一处理）。
+/// 仓库缺 `tree.json` / 解析失败视为有差异（空仓库或异常状态都提醒）；
+/// `environments.json` 缺失仅在本地环境库非空时视为差异（兼容旧版仓库）。
 fn local_has_unpushed_changes(
     repo: &Path,
     nodes: &[SyncNode],
     servers: &[(String, SyncServer)],
+    environments: &[SyncEnvironment],
 ) -> bool {
     // nodes 直接深比较（serde_json 的 Value 对象比较与键序无关）
     let local_nodes = serde_json::to_value(nodes).unwrap_or(Value::Null);
@@ -395,6 +411,18 @@ fn local_has_unpushed_changes(
     };
     if disk_nodes != local_nodes {
         return true;
+    }
+    // 环境库比较：本地有环境而仓库无 environments.json = 未推送的改动；
+    // 两边都有时按数组深比较（与导出形态一致）
+    let disk_envs = std::fs::read_to_string(repo.join(ENVIRONMENTS_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("environments").cloned());
+    let local_envs = serde_json::to_value(environments).unwrap_or(Value::Null);
+    match disk_envs {
+        None if !environments.is_empty() => return true,
+        Some(d) if d != local_envs => return true,
+        _ => {}
     }
     let local: HashMap<&str, Value> = servers
         .iter()
@@ -429,6 +457,7 @@ fn walk_repo(root: &Path, dir: &Path, out: &mut HashMap<String, Value>) -> Resul
             walk_repo(root, &p, out)?;
         } else if p.extension().and_then(|s| s.to_str()) == Some("json")
             && p != root.join(TREE_META_FILE)
+            && p != root.join(ENVIRONMENTS_FILE)
         {
             let rel = p
                 .strip_prefix(root)
@@ -688,11 +717,45 @@ fn load_project_data(
     Some((sync_nodes, servers))
 }
 
+/// 读取项目环境库的导出形态（environments.json 内容）。
+///
+/// 返回 `None` 表示读取失败（日志已写入，调用方跳过写 environments.json，
+/// 避免用空数据覆盖对端/本地已有文件）；环境库为空时返回空数组（全量镜像语义）。
+fn load_environments_data(
+    db: &Db,
+    project_id: i64,
+    logs: &mut Vec<LogEntry>,
+) -> Option<Vec<SyncEnvironment>> {
+    let conn = db.0.lock().unwrap();
+    match crate::db::list_environments(&conn, project_id) {
+        Ok(envs) => Some(
+            envs.iter()
+                .map(|e| SyncEnvironment {
+                    name: e.name.clone(),
+                    // 落库的 variables 保存时已校验为 JSON 对象；解析失败兜底 null（导入端按 {} 处理并记日志）
+                    variables: serde_json::from_str(e.variables.trim()).unwrap_or(Value::Null),
+                })
+                .collect(),
+        ),
+        Err(e) => {
+            logs.push(entry(
+                "warn",
+                format!("读取项目环境库失败（本次导出不含 environments.json）：{e}"),
+            ));
+            None
+        }
+    }
+}
+
 /// 把单个项目的数据写入同步目录（树形镜像布局，先清空重建防残留）。
 ///
-/// 布局：`tree.json`（结构元数据）+ 分组目录树 + 各分组目录下的 `<别名>.json`。
+/// 布局：`tree.json`（结构元数据）+ `environments.json`（项目环境库）+
+/// 分组目录树 + 各分组目录下的 `<别名>.json`。
 /// 不含任何条目的分组目录补 `.gitkeep` 占位——git 不跟踪空目录，否则没有 Server
 /// 的分组跨机器 clone 后会消失。
+///
+/// `environments` 传 `Some` 时始终写 environments.json（空环境库写空数组，
+/// 拉取方据此清空环境库）；传 `None`（读取环境库失败）不写，保留对端旧文件。
 ///
 /// 全程持有 [`WRITE_LOCK`]：自动导出 / 手动推送 / 拉取回写并发时防止交错写坏文件。
 fn write_project_files(
@@ -700,6 +763,7 @@ fn write_project_files(
     project_name: &str,
     nodes: &[SyncNode],
     servers: &[(String, SyncServer)],
+    environments: Option<&[SyncEnvironment]>,
 ) -> Result<(), String> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if dir.exists() {
@@ -709,6 +773,14 @@ fn write_project_files(
     let tree = serde_json::json!({ "project": project_name, "nodes": nodes });
     std::fs::write(dir.join(TREE_META_FILE), serde_json::to_string_pretty(&tree).unwrap_or_default() + "\n")
         .map_err(|e| format!("写入 tree.json 失败：{e}"))?;
+    if let Some(environments) = environments {
+        let payload = serde_json::json!({ "environments": environments });
+        std::fs::write(
+            dir.join(ENVIRONMENTS_FILE),
+            serde_json::to_string_pretty(&payload).unwrap_or_default() + "\n",
+        )
+        .map_err(|e| format!("写入 environments.json 失败：{e}"))?;
+    }
 
     // 分组目录全部落盘（空分组也要存在，目录名经 compute_layout 后缀消解）
     let layout = compute_layout(nodes);
@@ -812,8 +884,60 @@ async fn import_tree_dir(
     }
 
     // 重建目录树与 Server
-    let conn = db.0.lock().unwrap();
+    let mut conn = db.0.lock().unwrap();
     rebuild_project_tree(&conn, project_id, &project_name, &nodes, &imports, logs);
+
+    // 项目环境库：environments.json 存在 -> 整批覆盖导入（新布局仓库）；
+    // 文件缺失（旧版仓库）不动环境库，改为把 Server 里的旧 envs 数据合并进环境库
+    let env_path = dir.join(ENVIRONMENTS_FILE);
+    if env_path.is_file() {
+        match parse_environments_file(&env_path) {
+            Ok(list) => {
+                let inputs: Vec<crate::db::EnvironmentInput> = list
+                    .iter()
+                    .map(|e| crate::db::EnvironmentInput {
+                        name: e.name.clone(),
+                        variables: if e.variables.is_null() {
+                            "{}".into()
+                        } else {
+                            serde_json::to_string(&e.variables).unwrap_or_else(|_| "{}".into())
+                        },
+                    })
+                    .collect();
+                match crate::db::replace_environments(&mut conn, project_id, &inputs) {
+                    Ok(_) => logs.push(entry("info", format!(
+                        "已导入项目环境库：{} 个环境（覆盖）", inputs.len()
+                    ))),
+                    Err(e) => logs.push(entry("error", format!("导入环境库失败：{e}"))),
+                }
+            }
+            Err(e) => logs.push(entry("warn", format!(
+                "environments.json 解析失败，跳过环境库导入：{e}"
+            ))),
+        }
+    } else if imports.iter().any(|i| {
+        i.server
+            .envs
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    }) {
+        // 旧版仓库导入的 Server 带旧 envs 数据：强制合并（幂等），明细与冲突写日志
+        match crate::db::merge_legacy_envs(&mut conn, project_id, true) {
+            Ok(report) => logs.extend(report.to_logs()),
+            Err(e) => logs.push(entry("error", format!("旧环境组数据合并失败：{e}"))),
+        }
+    }
+}
+
+/// 解析 environments.json（项目环境库导出文件），返回环境列表；失败返回错误文案。
+fn parse_environments_file(path: &Path) -> Result<Vec<SyncEnvironment>, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("读取失败（{}）：{e}", path.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("JSON 解析失败：{}（{e}）", path.display()))?;
+    serde_json::from_value(v.get("environments").cloned().unwrap_or(Value::Null))
+        .map_err(|e| format!("environments 字段解析失败：{e}"))
 }
 
 /// 单个待导入的 Server：显示名 + 挂载引用 + 配置内容。
@@ -923,8 +1047,8 @@ fn scan_extra_servers(
         if p.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        // 仓库根的 tree.json 是结构元数据，不是 Server 文件
-        if p == root.join(TREE_META_FILE) {
+        // 仓库根的 tree.json / environments.json 是元数据文件，不是 Server 文件
+        if p == root.join(TREE_META_FILE) || p == root.join(ENVIRONMENTS_FILE) {
             continue;
         }
         // 已被 tree.json 登记条目消费过的文件不重复导入
@@ -1121,6 +1245,22 @@ fn safe_name(s: &str) -> String {
 /// 根层的目录与 Server 文件名都不允许占用该名字。
 const TREE_META_FILE: &str = "tree.json";
 
+/// 项目环境库导出文件名：仓库根的 environments.json 记录全部环境与变量集
+/// （环境变量在环境中定义、Server 配置以 {{变量名}} 引用），根层同样不允许占用该名字。
+const ENVIRONMENTS_FILE: &str = "environments.json";
+
+/// 单个导出的环境（environments.json 数组项）。
+///
+/// `variables` 在数据库里是 JSON 对象字符串，导出时 parse 成对象写入
+/// （json 即完整可读配置），导入时再序列化回字符串落库。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SyncEnvironment {
+    /// 环境名（同项目内唯一，如 dev / prod）
+    name: String,
+    /// 变量集对象（{"KEY":"VALUE"}；非法 JSON 的环境导出为 null，导入时按 {} 兜底并记日志）
+    variables: serde_json::Value,
+}
+
 /// 由树节点列表推导每个节点的同步磁盘相对路径（树形镜像布局）。
 ///
 /// 规则：
@@ -1150,7 +1290,9 @@ fn compute_layout(nodes: &[SyncNode]) -> HashMap<String, String> {
     let mut used: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     used.insert(
         String::new(),
-        [TREE_META_FILE.to_lowercase()].into_iter().collect(),
+        [TREE_META_FILE.to_lowercase(), ENVIRONMENTS_FILE.to_lowercase()]
+            .into_iter()
+            .collect(),
     );
     let mut layout = HashMap::new();
     for depth in 0..=max_depth {
@@ -1482,7 +1624,7 @@ mod tests {
             (layout["n2"].clone(), s2),
             (layout["n5"].clone(), s5),
         ];
-        write_project_files(&base, "演示项目", &nodes, &servers).unwrap();
+        write_project_files(&base, "演示项目", &nodes, &servers, None).unwrap();
 
         // 目录结构镜像资源树 + 空分组 .gitkeep 占位
         assert!(base.join("tree.json").is_file());
@@ -1506,6 +1648,57 @@ mod tests {
             .collect();
         assert_eq!(xs, vec![Some("n1".to_string()), Some("n4".to_string())]);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 环境库导出：environments.json 落盘、解析往返一致；不被当成 Server 配置导入；
+    /// 名为 environments 的根层 Server 自动加后缀消解，不与元数据文件冲突。
+    #[test]
+    fn 环境库文件往返且不被当成server() {
+        let base = std::env::temp_dir().join(format!("mcpilot-env-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // 根层两个 Server：普通 root + 与元数据同名的 environments
+        let nodes = vec![
+            node("n0", None, "server", "root", 0),
+            node("n1", None, "server", "environments", 1),
+        ];
+        let layout = compute_layout(&nodes);
+        let servers = vec![
+            (layout["n0"].clone(), server_cfg("node root.js")),
+            (layout["n1"].clone(), server_cfg("node env.js")),
+        ];
+        let environments = vec![
+            SyncEnvironment {
+                name: "dev".into(),
+                variables: serde_json::json!({"TOKEN": "t1"}),
+            },
+            SyncEnvironment { name: "prod".into(), variables: serde_json::json!({}) },
+        ];
+        write_project_files(&base, "p", &nodes, &servers, Some(&environments)).unwrap();
+
+        // 元数据文件落盘；同名 Server 文件被后缀消解，不覆盖 environments.json
+        assert!(base.join("environments.json").is_file());
+        assert!(base.join("environments-2.json").is_file(), "同名 Server 应加后缀消解");
+
+        // 解析往返：内容一致
+        let parsed = parse_environments_file(&base.join("environments.json")).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "dev");
+        assert_eq!(parsed[0].variables["TOKEN"], "t1");
+
+        // 导入扫描：只有 2 个 Server 导入项，environments.json 不被当成 Server
+        let mut logs = Vec::new();
+        let imports = collect_server_imports(&base, &nodes, &mut logs);
+        assert!(logs.is_empty(), "不应产生警告日志：{logs:?}");
+        assert_eq!(imports.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+
+        // 损坏文件：解析报错不 panic
+        let base2 = std::env::temp_dir().join(format!("mcpilot-env-broken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base2);
+        std::fs::create_dir_all(&base2).unwrap();
+        std::fs::write(base2.join("environments.json"), "{broken").unwrap();
+        assert!(parse_environments_file(&base2.join("environments.json")).is_err());
+        let _ = std::fs::remove_dir_all(&base2);
     }
 
     #[test]

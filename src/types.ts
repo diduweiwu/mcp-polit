@@ -61,10 +61,26 @@ export interface ServerConfig {
   timeout_ms: number;
   enabled: boolean;
   note: string | null;
-  /** 环境变量组 JSON：{"dev":{"env":{...},"headers":{...}}} */
+  /** 【已废弃】旧版每 Server 内嵌环境组 JSON：{"dev":{"env":{...},"headers":{...}}}。
+   *  环境模型已改为项目级环境库（Environment）+ 配置值中 {{变量名}} 引用；
+   *  本字段仅保留旧数据不被删除（不再读取、不再编辑），Git 同步原样透传防丢数据 */
   envs?: string | null;
-  /** 当前激活的环境名（null = 不启用环境覆盖） */
+  /** 【已废弃】旧版激活环境名。保留原因同 envs；连接解析不再读取 */
   active_env?: string | null;
+}
+
+/** 项目级环境：一组可被 Server 配置以 {{变量名}} 引用的变量（variables 为 JSON 对象字符串） */
+export interface Environment {
+  /** 环境 ID（自增主键；整批保存后由后端重新生成，前端列表 key 请用 name） */
+  id: number;
+  /** 所属项目 ID */
+  project_id: number;
+  /** 环境名（同项目内唯一，如 dev / prod） */
+  name: string;
+  /** 变量集：JSON 对象字符串，如 '{"TOKEN":"xxx"}' */
+  variables: string;
+  /** 同项目内排序序号（小的在前） */
+  sort_order: number;
 }
 
 /** 单个调用参数 Case（保存的入参快照） */

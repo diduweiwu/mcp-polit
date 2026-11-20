@@ -10,6 +10,8 @@
 const settings: Record<string, string> = {
   theme_mode: "light",
   sync_repo_path: "/Users/demo/mcpilot-sync",
+  // 按项目存的激活环境（store 的 activeEnvName 从这里派生）
+  active_env_1: "prod",
   tool_params: JSON.stringify({
     "2:web_search": JSON.stringify({ query: "MCP protocol", count: 5 }),
   }),
@@ -17,6 +19,14 @@ const settings: Record<string, string> = {
     "2:web_search": [{ name: "默认查询", args: JSON.stringify({ query: "MCP protocol", count: 5 }), saved_at: "10:02:11" }],
   }),
 };
+
+/* 项目级环境库演示数据（环境变量集中定义，Server 配置以 {{变量名}} 引用） */
+let envSeq = 10;
+let environments = [
+  { id: 1, project_id: 1, name: "dev", variables: JSON.stringify({ GH_TOKEN: "ghp_dev_demo", BASE_URL: "https://dev.example.com" }), sort_order: 0 },
+  { id: 2, project_id: 1, name: "prod", variables: JSON.stringify({ GH_TOKEN: "ghp_prod_demo", BASE_URL: "https://api.example.com" }), sort_order: 1 },
+  { id: 3, project_id: 2, name: "staging", variables: JSON.stringify({ KEY: "stg" }), sort_order: 0 },
+];
 
 const projects = [
   { id: 1, name: "演示项目", created_at: "2026-11-15 09:00:00", updated_at: "2026-11-15 09:00:00", sync_dir: "/Users/demo/mcpilot-sync" },
@@ -35,15 +45,11 @@ const nodes = [
 const configs: Record<number, unknown> = {
   2: {
     node_id: 2, transport_type: "streamable_http", command: null, args: null, env: null,
-    working_dir: null, url: "https://api.githubcopilot.com/mcp",
-    headers: JSON.stringify({ Authorization: "Bearer ghp_demo_token", "X-Env": "prod" }),
+    working_dir: null, url: "{{BASE_URL}}/mcp",
+    headers: JSON.stringify({ Authorization: "Bearer {{GH_TOKEN}}" }),
     sensitive_headers: JSON.stringify(["Authorization"]),
-    timeout_ms: 30000, enabled: true, note: "官方 GitHub MCP",
-    envs: JSON.stringify({
-      prod: { env: "{}", headers: JSON.stringify({ Authorization: "Bearer ghp_prod_token" }), sensitive_headers: ["Authorization"] },
-      dev: { env: "{}", headers: JSON.stringify({ Authorization: "Bearer ghp_dev_token" }), sensitive_headers: ["Authorization"] },
-    }),
-    active_env: "prod",
+    timeout_ms: 30000, enabled: true, note: "官方 GitHub MCP（URL 与鉴权头引用环境变量）",
+    envs: null, active_env: null,
   },
   3: {
     node_id: 3, transport_type: "streamable_http", command: null, args: null, env: null,
@@ -150,6 +156,18 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return nodes.find((x) => x.id === nid) ?? null;
     }
     case "test_server_config": return [{ name: "echo", title: "Echo", description: "演示模式：探测成功", input_schema: {} }];
+    // 项目级环境库：列出 / 整批保存（id 重新生成、排序按数组序）/ 旧数据迁移检查
+    case "list_environments": return environments.filter((e) => e.project_id === args.projectId).sort((a, b) => a.sort_order - b.sort_order);
+    case "save_environments": {
+      const pid = args.projectId as number;
+      environments = environments.filter((e) => e.project_id !== pid);
+      for (const [i, e] of (args.environments as Array<{ name: string; variables: string }>).entries()) {
+        envSeq += 1;
+        environments.push({ id: envSeq, project_id: pid, name: e.name, variables: e.variables, sort_order: i });
+      }
+      return null;
+    }
+    case "migrate_legacy_envs": return [];
     case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "streamable_http", command: "", args: "", env: "", working_dir: "", url: "", headers: "", sensitive_headers: "", timeout_ms: 30000, enabled: true, note: "" };
     // 调用历史：浏览器演示模式不落盘，仅保证启动流程畅通（append 返回模拟编号）
     case "append_history": { historyId += 1; return historyId; }

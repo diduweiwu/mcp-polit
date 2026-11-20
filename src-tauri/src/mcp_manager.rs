@@ -81,20 +81,37 @@ impl McpManager {
 
     /// 建立连接：按配置构建传输层 -> 握手 -> 拉取工具列表 -> 入表并广播状态。
     ///
+    /// 连接前会按当前项目激活的环境对配置做 `{{}}` 插值解析（[`resolve_config`]），
+    /// 存在未定义的环境变量引用时连接失败并明确报错。
+    ///
     /// 成功后返回该 server 的工具列表。
     pub async fn connect(app: AppHandle, db: &Db, node_id: i64) -> CmdResult<Vec<ToolInfo>> {
-        // 读取配置（短锁）
-        let config = {
+        // 读取配置与所属项目（短锁）
+        let (raw_config, project_id) = {
             let conn = db.0.lock().unwrap();
-            crate::db::get_server_config(&conn, node_id)?
+            let node = crate::db::get_node(&conn, node_id)?;
+            let cfg = crate::db::get_server_config(&conn, node_id)?;
+            (cfg, node.project_id)
         };
-        if !config.enabled {
+        if !raw_config.enabled {
             return Err(AppError::new("该 Server 已停用，请先在配置中启用"));
         }
 
         Self::report(&app, node_id, ConnStatus::Connecting, None);
         // 若已有旧连接，先静默断开（"刷新工具"走重连路径）
         Self::disconnect_inner(&app, node_id).await;
+
+        // 环境插值解析（短锁）：失败（未定义引用等）与传输构建失败同样走 Error 状态上报
+        let config = {
+            let conn = db.0.lock().unwrap();
+            match resolve_config(&conn, &raw_config, project_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    Self::report(&app, node_id, ConnStatus::Error, Some(e.message.clone()));
+                    return Err(e);
+                }
+            }
+        };
 
         match config.transport_type {
             TransportType::Stdio => {
@@ -357,33 +374,178 @@ fn parse_json_object(raw: Option<&str>) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// 应用激活的环境覆盖：base env/headers 与 envs[active] 合并（环境值优先）。
-///
-/// 返回 (合并后的 env JSON 字符串, 合并后的 headers JSON 字符串)。
-/// 激活环境不存在（名字写错/已删除）时静默回退 base，不报错。
-fn merged_env_headers(config: &ServerConfig) -> (Map<String, Value>, Map<String, Value>) {
-    let mut env = parse_json_object(config.env.as_deref());
-    let mut headers = parse_json_object(config.headers.as_deref());
+/* ---------- 环境变量引用（{{占位符}} 插值） ---------- */
 
-    if let Some(active) = config.active_env.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        let envs: Map<String, Value> = parse_json_object(config.envs.as_deref());
-        if let Some(Value::Object(group)) = envs.get(active) {
-            if let Some(Value::Object(e)) = group.get("env") {
-                for (k, v) in e {
-                    env.insert(k.clone(), v.clone());
+/// 占位符开/闭标记。
+const PLACEHOLDER_OPEN: &str = "{{";
+const PLACEHOLDER_CLOSE: &str = "}}";
+
+/// 扫描并替换文本中的 `{{变量名}}` 占位符（项目级环境引用，Apifox 同款语法）。
+///
+/// 规则：
+/// - 变量名两侧允许空白（`{{ TOKEN }}` 与 `{{TOKEN}}` 等价）；
+/// - 变量集命中 -> 替换为变量值；未命中 -> 原文保留并把变量名记入 `missing`
+///   （去重，按首次出现顺序）；
+/// - 空名 `{{}}` 与未闭合的 `{{` 视为普通文本原样保留，不进 missing。
+///
+/// # 使用示例
+///
+/// ```text
+/// vars = {"TOKEN": "abc"}
+/// resolve_placeholders("Bearer {{ TOKEN }}", vars, missing) -> "Bearer abc"
+/// resolve_placeholders("{{NOPE}}",        vars, missing) -> "{{NOPE}}"，missing 收集 ["NOPE"]
+/// ```
+fn resolve_placeholders(
+    value: &str,
+    vars: &std::collections::BTreeMap<String, String>,
+    missing: &mut Vec<String>,
+) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find(PLACEHOLDER_OPEN) {
+        let body_start = start + PLACEHOLDER_OPEN.len();
+        let Some(end) = rest[body_start..].find(PLACEHOLDER_CLOSE) else {
+            break; // 从 start 起未闭合：剩余文本原样保留（循环外统一追加）
+        };
+        out.push_str(&rest[..start]);
+        let name = rest[body_start..body_start + end].trim();
+        match (name.is_empty(), vars.get(name)) {
+            (true, _) | (_, None) => {
+                // 空名 / 未定义：原文保留；未定义记入 missing
+                out.push_str(&rest[start..body_start + end + PLACEHOLDER_CLOSE.len()]);
+                if !name.is_empty() && !missing.iter().any(|m| m == name) {
+                    missing.push(name.to_string());
                 }
             }
-            if let Some(Value::Object(h)) = group.get("headers") {
-                for (k, v) in h {
-                    headers.insert(k.clone(), v.clone());
-                }
+            (_, Some(v)) => out.push_str(v),
+        }
+        rest = &rest[body_start + end + PLACEHOLDER_CLOSE.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 连接期配置解析：按项目激活环境的变量集对配置做 `{{}}` 插值，返回解析后的新配置。
+///
+/// 解析范围：command / working_dir / url（整串）、args（JSON 数组逐元素）、
+/// env / headers（JSON 对象逐值）；JSON 字段解析失败时原样保留（由保存校验与
+/// 传输构建阶段报错）。原配置不被修改（数据库里存的是含 `{{}}` 的原文）。
+///
+/// 行为约定：
+/// - 配置不含任何 `{{` 时走快速路径，不读环境库；
+/// - 未选择环境时变量集为空集——含占位符的配置会在下方因 missing 报错，
+///   引导用户选择环境（fail-fast，绝不把 `{{TOKEN}}` 原样发给 Server）；
+/// - 所选环境已被删除时报错提醒重新选择（不静默回退）。
+///
+/// # 异常
+///
+/// 所选环境不存在、环境变量集非法 JSON、存在未定义变量引用时返回 [`AppError`]。
+pub(crate) fn resolve_config(
+    conn: &rusqlite::Connection,
+    config: &ServerConfig,
+    project_id: i64,
+) -> CmdResult<ServerConfig> {
+    // 快速路径：全部文本字段都不含占位符则原样返回
+    let has_placeholder = [
+        config.command.as_deref(),
+        config.args.as_deref(),
+        config.env.as_deref(),
+        config.working_dir.as_deref(),
+        config.url.as_deref(),
+        config.headers.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|s| s.contains(PLACEHOLDER_OPEN));
+    if !has_placeholder {
+        return Ok(config.clone());
+    }
+
+    // 激活环境：settings 里按项目存的环境名（空/未设 = 未选择环境）
+    let active = crate::db::get_setting(conn, &format!("active_env_{project_id}"))?
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut vars = std::collections::BTreeMap::new();
+    if let Some(name) = &active {
+        let env = crate::db::list_environments(conn, project_id)?
+            .into_iter()
+            .find(|e| &e.name == name)
+            .ok_or_else(|| {
+                AppError::new(format!(
+                    "当前环境「{name}」不存在（可能已被删除），请到顶栏「环境」重新选择"
+                ))
+            })?;
+        let parsed: serde_json::Value = serde_json::from_str(env.variables.trim())
+            .map_err(|e| AppError::new(format!("环境「{name}」的变量集不是合法的 JSON：{e}")))?;
+        if let Some(obj) = parsed.as_object() {
+            for (k, v) in obj {
+                vars.insert(
+                    k.clone(),
+                    v.as_str().map(String::from).unwrap_or_else(|| v.to_string()),
+                );
             }
         }
     }
-    (env, headers)
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut resolved = config.clone();
+    let mut sub = |s: &str| resolve_placeholders(s, &vars, &mut missing);
+
+    resolved.command = resolved.command.map(|s| sub(&s));
+    resolved.working_dir = resolved.working_dir.map(|s| sub(&s));
+    resolved.url = resolved.url.map(|s| sub(&s));
+    // args：JSON 字符串数组逐元素替换（解析失败原样保留，交由传输构建报错）
+    if let Some(raw) = resolved.args.as_deref() {
+        if let Ok(items) = serde_json::from_str::<Vec<String>>(raw.trim()) {
+            let out: Vec<String> = items.iter().map(|s| sub(s)).collect();
+            resolved.args = serde_json::to_string(&out).ok();
+        }
+    }
+    // env / headers：JSON 对象逐值替换（键不替换；非字符串值原样保留）
+    resolved.env = resolve_json_object_values(resolved.env.as_deref(), &mut sub);
+    resolved.headers = resolve_json_object_values(resolved.headers.as_deref(), &mut sub);
+
+    if !missing.is_empty() {
+        let list = missing.iter().map(|m| format!("{{{{{m}}}}}")).collect::<Vec<_>>().join("、");
+        let msg = match &active {
+            Some(name) => format!(
+                "存在未定义的环境变量引用：{list}。环境「{name}」中没有这些变量，请到顶栏「环境」补充变量或切换环境"
+            ),
+            None => format!(
+                "配置中使用了环境变量引用：{list}，但当前未选择环境。请到顶栏「环境」选择环境，或在配置中填写实际值"
+            ),
+        };
+        return Err(AppError::new(msg));
+    }
+    Ok(resolved)
+}
+
+/// 对 JSON 对象字符串的每个字符串值做替换，返回替换后的 JSON 字符串。
+///
+/// 入参为空/非法时原样返回 `None`（交由保存校验与传输构建阶段报错）。
+fn resolve_json_object_values(
+    raw: Option<&str>,
+    sub: &mut impl FnMut(&str) -> String,
+) -> Option<String> {
+    let raw = raw?;
+    let map: Map<String, Value> = serde_json::from_str(raw.trim()).ok()?;
+    let out: Map<String, Value> = map
+        .into_iter()
+        .map(|(k, v)| {
+            let v = match v {
+                Value::String(s) => Value::String(sub(&s)),
+                other => other,
+            };
+            (k, v)
+        })
+        .collect();
+    serde_json::to_string(&out).ok()
 }
 
 /// 构建 stdio 子进程传输。
+///
+/// 传入的配置应是 [`resolve_config`] 解析后的结果（`{{}}` 已替换为实际值）。
 ///
 /// # 异常
 ///
@@ -400,8 +562,8 @@ fn build_stdio_transport(config: &ServerConfig) -> Result<TokioChildProcess, App
         Some(s) => serde_json::from_str::<Vec<String>>(s)
             .map_err(|e| AppError::new(format!("参数必须是 JSON 字符串数组：{e}")))?,
     };
-    // 环境变量：base + 激活环境覆盖合并
-    let (env, _headers) = merged_env_headers(config);
+    // 环境变量：已由 resolve_config 完成 {{}} 插值，这里直接使用
+    let env = parse_json_object(config.env.as_deref());
 
     TokioChildProcess::new(
         tokio::process::Command::new(command).configure(|cmd| {
@@ -426,6 +588,8 @@ fn build_stdio_transport(config: &ServerConfig) -> Result<TokioChildProcess, App
 
 /// 构建 Streamable HTTP 传输（含自定义请求头 / 鉴权头）。
 ///
+/// 传入的配置应是 [`resolve_config`] 解析后的结果（`{{}}` 已替换为实际值）。
+///
 /// # 异常
 ///
 /// - URL 缺失或非 http(s)、headers JSON 非法、头名称/值不合法时返回 [`AppError`]。
@@ -443,8 +607,8 @@ fn build_http_transport(
     }
     let mut builder = StreamableHttpClientTransportConfig::with_uri(url);
 
-    // 自定义 headers：base + 激活环境覆盖合并（JSON 对象 -> HeaderName/HeaderValue）
-    let (_env, headers) = merged_env_headers(config);
+    // 自定义 headers：已由 resolve_config 完成 {{}} 插值（JSON 对象 -> HeaderName/HeaderValue）
+    let headers = parse_json_object(config.headers.as_deref());
     if !headers.is_empty() {
         let mut map = HashMap::new();
         for (k, v) in headers {
@@ -466,12 +630,11 @@ fn build_http_transport(
 /// 错误信息脱敏：剥离可能混入的 header/env 敏感值。
 ///
 /// 策略：把配置里各敏感字段的值（长度 ≥ 4 的字符串）从错误文本中替换为 `***`。
+/// 传入的配置应是解析后的结果——只有解析后的真实值才可能出现在连接错误里。
 fn sanitize(mut msg: String, config: &ServerConfig) -> String {
     let mut secrets: Vec<String> = Vec::new();
-    // headers / env 的值（含激活环境合并后的值）
-    let (env, headers) = merged_env_headers(config);
-    collect_secret_values(&headers, &mut secrets);
-    collect_secret_values(&env, &mut secrets);
+    collect_secret_values(&parse_json_object(config.headers.as_deref()), &mut secrets);
+    collect_secret_values(&parse_json_object(config.env.as_deref()), &mut secrets);
     for secret in secrets {
         msg = msg.replace(&secret, "***");
     }
@@ -486,6 +649,111 @@ fn collect_secret_values(map: &Map<String, Value>, out: &mut Vec<String>) {
                 out.push(sv.to_string());
             }
         }
+    }
+}
+
+/* ---------- 插值引擎单元测试（内存库，不依赖网络/子进程） ---------- */
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use crate::db;
+    use crate::models::TransportType;
+
+    /// 内存数据库（每个测试独立，已跑迁移）。
+    fn setup() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        db::migrate(&conn).unwrap();
+        conn
+    }
+
+    /// 构造一个 http 配置（其余字段为空默认值）。
+    fn cfg(url: &str) -> ServerConfig {
+        ServerConfig {
+            node_id: 0,
+            transport_type: TransportType::StreamableHttp,
+            command: None,
+            args: None,
+            env: None,
+            working_dir: None,
+            url: Some(url.into()),
+            headers: None,
+            sensitive_headers: None,
+            timeout_ms: 30_000,
+            enabled: true,
+            note: None,
+            envs: None,
+            active_env: None,
+        }
+    }
+
+    #[test]
+    fn 占位符替换与未定义收集() {
+        let vars = std::collections::BTreeMap::from([("TOKEN".to_string(), "abc".to_string())]);
+        let mut missing = Vec::new();
+        // 命中替换（两侧空白等价）+ 未定义保留原文并收集
+        assert_eq!(resolve_placeholders("Bearer {{ TOKEN }}", &vars, &mut missing), "Bearer abc");
+        assert_eq!(resolve_placeholders("{{NOPE}}-{{TOKEN}}", &vars, &mut missing), "{{NOPE}}-abc");
+        assert_eq!(missing, ["NOPE"]);
+        // 未闭合 / 空名原样保留、不进 missing
+        let mut m2 = Vec::new();
+        assert_eq!(resolve_placeholders("a{{b", &vars, &mut m2), "a{{b");
+        assert_eq!(resolve_placeholders("{{}}", &vars, &mut m2), "{{}}");
+        assert!(m2.is_empty());
+    }
+
+    #[test]
+    fn 解析按激活环境插值且不改原配置() {
+        let mut conn = setup();
+        let p = db::create_project(&conn, "p", None).unwrap();
+        db::replace_environments(
+            &mut conn,
+            p.id,
+            &[db::EnvironmentInput {
+                name: "dev".into(),
+                variables: r#"{"TOKEN":"dev-token","HOST":"127.0.0.1"}"#.into(),
+            }],
+        )
+        .unwrap();
+        db::set_setting(&conn, &format!("active_env_{}", p.id), "dev").unwrap();
+
+        let mut c = cfg("http://{{HOST}}:3000/mcp");
+        c.headers = Some(r#"{"Authorization":"Bearer {{TOKEN}}","X-Lit":"{{MISSING}}"}"#.into());
+        // 有未定义引用 -> 报错并列出变量名
+        let err = resolve_config(&conn, &c, p.id).unwrap_err();
+        assert!(err.message.contains("{{MISSING}}"), "实际：{}", err.message);
+        // 补全后成功插值
+        c.headers = Some(r#"{"Authorization":"Bearer {{TOKEN}}"}"#.into());
+        let r = resolve_config(&conn, &c, p.id).unwrap();
+        assert_eq!(r.url.as_deref(), Some("http://127.0.0.1:3000/mcp"));
+        assert!(r.headers.as_deref().unwrap().contains("Bearer dev-token"));
+        // 原配置不被修改（数据库存的是含 {{}} 的原文）
+        assert_eq!(c.url.as_deref(), Some("http://{{HOST}}:3000/mcp"));
+    }
+
+    #[test]
+    fn 未选环境时含引用报错_无引用走快速路径() {
+        let conn = setup();
+        let p = db::create_project(&conn, "p", None).unwrap();
+        // 未选环境 + 含 {{}} -> 报错引导选择环境（不把占位符原样发出）
+        let c = cfg("http://{{HOST}}/mcp");
+        let err = resolve_config(&conn, &c, p.id).unwrap_err();
+        assert!(err.message.contains("未选择环境"), "实际：{}", err.message);
+        // 无占位符快速路径：环境库为空也不报错
+        let plain = cfg("http://127.0.0.1:3000/mcp");
+        let r = resolve_config(&conn, &plain, p.id).unwrap();
+        assert_eq!(r.url, plain.url);
+    }
+
+    #[test]
+    fn 激活环境被删除时明确报错() {
+        let conn = setup();
+        let p = db::create_project(&conn, "p", None).unwrap();
+        db::set_setting(&conn, &format!("active_env_{}", p.id), "ghost").unwrap();
+        let c = cfg("http://{{HOST}}/mcp");
+        let err = resolve_config(&conn, &c, p.id).unwrap_err();
+        assert!(err.message.contains("ghost"), "实际：{}", err.message);
     }
 }
 

@@ -18,13 +18,11 @@ import {
   Unplug,
   Wrench,
 } from "lucide-react";
-import { useAppStore } from "../store";
+import { activeEnvName, useAppStore } from "../store";
 import type { TreeNode } from "../types";
 import { isSensitiveKey, parseSensitiveKeys } from "../lib/sensitive";
-import * as api from "../api";
-import { EmptyState, SearchSelect, StatusDot } from "./ui";
+import { EmptyState, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
-import { EnvEditModal } from "./EnvEditor";
 
 /** 工具列表栏 */
 export function ToolPane() {
@@ -82,7 +80,6 @@ export function ToolPane() {
   return (
     <PaneWrap
       title={`工具列表 · ${node.name}`}
-      right={<EnvBar node={node} />}
       lead={
         treeCollapsed ? (
           <button
@@ -351,6 +348,8 @@ function SummaryRow({ label, children }: { label: string; children: React.ReactN
 function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
   const cfg = useAppStore((s) => s.serverConfigs[node.id]);
   const { connect, disconnect, refreshTools } = useAppStore();
+  /** 当前全局环境名（连接时配置里的 {{}} 引用按它插值；空串 = 未选择） */
+  const envName = useAppStore((s) => activeEnvName(s));
   const [editOpen, setEditOpen] = useState(false);
   const connected = status === "connected";
 
@@ -368,7 +367,7 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
 
   return (
     <div className="anim-fade-in p-2">
-      {/* 传输类型徽章 + 环境切换 */}
+      {/* 传输类型徽章 + 当前环境 + 停用标记 */}
       <div className="mb-2.5 flex items-center gap-1.5">
         <span
           className={`chip ${
@@ -378,6 +377,11 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
           {isHttp ? <Globe size={11} /> : <Terminal size={11} />}
           {isHttp ? "Streamable HTTP" : "stdio"}
         </span>
+        {envName && (
+          <span className="chip bg-primarysoft text-primarystrong" title={`连接时按环境「${envName}」解析 {{变量名}} 引用`}>
+            环境：{envName}
+          </span>
+        )}
         {!cfg.enabled && <span className="chip bg-warn/10 text-warn">已停用</span>}
       </div>
 
@@ -468,73 +472,6 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
       )}
 
       {editOpen && <ServerFormModal parentId={null} onClose={() => setEditOpen(false)} />}
-    </div>
-  );
-}
-
-/**
- * 栏头环境控件：可搜索下拉切换激活环境 + 「编辑环境」入口（打开 EnvEditModal）。
- * 切换即写配置；已连接时自动断开并提示重连以应用新环境。
- */
-function EnvBar({ node }: { node: TreeNode }) {
-  const cfg = useAppStore((s) => s.serverConfigs[node.id]);
-  const status = useAppStore((s) => s.connStates[node.id] ?? "disconnected");
-  const [editOpen, setEditOpen] = useState(false);
-  const connected = status === "connected";
-
-  /** Base + 全部环境名（可搜索下拉选项） */
-  const envNames = useMemo(() => {
-    try {
-      return Object.keys(JSON.parse(cfg?.envs ?? "{}") as Record<string, unknown>);
-    } catch {
-      return [];
-    }
-  }, [cfg?.envs]);
-  const activeName = cfg?.active_env?.trim() || "Base";
-  const options = [
-    { value: "", label: "Base" },
-    ...envNames.map((n) => ({ value: n, label: n })),
-  ];
-
-  /** 切换激活环境：写配置；已连接则断开并提示重连（切回同一环境无操作） */
-  const switchEnv = async (name: string) => {
-    if (!cfg || (cfg.active_env?.trim() || "") === name) return;
-    const saved = { ...cfg, active_env: name };
-    try {
-      await api.saveServerConfig(saved);
-      useAppStore.getState().updateConfigCache(saved);
-      if (connected) {
-        await useAppStore.getState().disconnect(node.id);
-        useAppStore.getState().addLog(
-          "info",
-          `环境已切换为「${name || "Base"}」，连接已断开，请重新连接以应用新环境`,
-          node.id,
-        );
-      } else {
-        useAppStore.getState().addLog("info", `环境已切换为「${name || "Base"}」`, node.id);
-      }
-    } catch (e) {
-      useAppStore.getState().addLog("error", String(e), node.id);
-    }
-  };
-
-  return (
-    <div className="flex shrink-0 items-center gap-1">
-      <SearchSelect
-        placeholder={activeName}
-        options={options}
-        width={120}
-        align="right"
-        onSelect={(v) => void switchEnv(v)}
-      />
-      <button
-        className="rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
-        title="编辑环境（各环境的请求头 / 环境变量）"
-        onClick={() => setEditOpen(true)}
-      >
-        <Settings2 size={14} />
-      </button>
-      {editOpen && <EnvEditModal node={node} onClose={() => setEditOpen(false)} />}
     </div>
   );
 }

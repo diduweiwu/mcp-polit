@@ -13,7 +13,8 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, CmdResult};
 use crate::models::{
-    CallResult, HistoryRecord, NodeType, Project, ServerConfig, TreeNode, TransportType,
+    CallResult, Environment, HistoryRecord, LegacyEnvsMergeReport, NodeType, Project, ServerConfig,
+    TreeNode, TransportType,
 };
 
 /// 数据库访问句柄：内部包一把互斥锁，保证多线程串行访问 SQLite。
@@ -141,6 +142,27 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), AppError> {
             -- 调用时间：本地时间
             created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
         );
+
+        -- 项目级环境库：每项目多套环境（dev/prod…），变量以 {{键}} 被 Server 配置引用
+        CREATE TABLE IF NOT EXISTS environments (
+            -- 环境 ID：自增主键
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            -- 所属项目 ID：外键 -> projects.id，项目删除时级联删除
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            -- 环境名：同项目内唯一（如 dev / prod），配置引用时全局切换的就是它
+            name TEXT NOT NULL,
+            -- 变量集：JSON 对象字符串，如 '{"TOKEN":"xxx"}'，配置中以 {{键}} 引用
+            variables TEXT NOT NULL DEFAULT '{}',
+            -- 同项目内排序序号：越小越靠前
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            -- 创建时间：本地时间
+            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            -- 更新时间：本地时间
+            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+        );
+        -- 同项目环境名唯一（重名直接建索引拦住）
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_environments_project_name
+            ON environments(project_id, name);
 
         COMMIT;
         "#,
@@ -669,6 +691,259 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> CmdResult<()> {
     Ok(())
 }
 
+/// 读取单个设置项；不存在时返回 `None`（与 [`get_all_settings`] 的批量读互补）。
+pub fn get_setting(conn: &Connection, key: &str) -> CmdResult<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+    let mut rows = stmt.query_map(rusqlite::params![key], |row| row.get::<_, String>(0))?;
+    Ok(rows.next().transpose()?)
+}
+
+/* ---------- 项目级环境库 ---------- */
+
+/// 单个环境的写入负载：整存整取接口使用（id / 排序由后端按数组序生成）。
+#[derive(Debug, Clone)]
+pub struct EnvironmentInput {
+    /// 环境名（同项目内唯一；重名时整批报错，不做静默去重）
+    pub name: String,
+    /// 变量集 JSON 对象字符串（如 '{"TOKEN":"xxx"}'）
+    pub variables: String,
+}
+
+/// 列出项目的全部环境（按 sort_order 升序，同序按 id）。
+pub fn list_environments(conn: &Connection, project_id: i64) -> CmdResult<Vec<Environment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, name, variables, sort_order
+         FROM environments WHERE project_id = ?1 ORDER BY sort_order ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![project_id], |row| {
+        Ok(Environment {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            name: row.get(2)?,
+            variables: row.get(3)?,
+            sort_order: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 整批替换项目的环境库（前端弹窗草稿式编辑后一次性保存）。
+///
+/// 语义：以传入列表为准做全量覆盖——列表中没有的环境会被删除（改名 = 删旧建新），
+/// 排序按数组顺序重排。全程事务内进行，任一步失败整体回滚。
+///
+/// # 异常
+///
+/// 环境名为空、同批重名、variables 非法 JSON 或写入失败时返回 [`AppError`]。
+pub fn replace_environments(
+    conn: &mut Connection,
+    project_id: i64,
+    inputs: &[EnvironmentInput],
+) -> CmdResult<()> {
+    // 先做纯内存校验，任何非法直接拒绝，不进入事务
+    let mut seen = std::collections::HashSet::new();
+    for (i, input) in inputs.iter().enumerate() {
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err(AppError::new(format!("第 {} 个环境名不能为空", i + 1)));
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(AppError::new(format!("环境名「{name}」重复")));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(input.variables.trim())
+            .map_err(|e| AppError::new(format!("环境「{name}」的变量集不是合法的 JSON：{e}")))?;
+        if !parsed.is_object() {
+            return Err(AppError::new(format!(
+                "环境「{name}」的变量集必须是 JSON 对象"
+            )));
+        }
+    }
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM environments WHERE project_id = ?1",
+        rusqlite::params![project_id],
+    )?;
+    for (i, input) in inputs.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO environments (project_id, name, variables, sort_order)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![project_id, input.name.trim(), input.variables.trim(), i as i64],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// 把项目内各 Server 旧版 `envs` 环境组数据合并进项目级环境库（幂等，可重复执行）。
+///
+/// 合并规则：
+/// - 每个 `envs` 条目（环境名）在环境库不存在时新建，变量 = 旧组 env + headers 的
+///   全部键值（headers 后写、同键覆盖 env——请求头里的键更接近鉴权语义）；
+/// - 环境名已存在时仅**补充**环境库缺失的键，已有值一律保留（环境库优先）；
+/// - 所有冲突（含 env/headers 同键）逐条记入报告，不做任何静默取舍。
+///
+/// `force` 为 true 时跳过迁移标记检查（Git 拉取导入旧格式数据后的强制合并用）；
+/// 成功后写入 `envs_migrated_{project_id}` 标记，保证启动期迁移每个项目只跑一次。
+///
+/// 旧 `envs` 数据本身不删除（休眠不读），必要时可回退。
+pub fn merge_legacy_envs(
+    conn: &mut Connection,
+    project_id: i64,
+    force: bool,
+) -> CmdResult<LegacyEnvsMergeReport> {
+    let marker = format!("envs_migrated_{project_id}");
+    if !force && get_setting(conn, &marker)?.is_some() {
+        return Ok(LegacyEnvsMergeReport::default());
+    }
+    let mut report = LegacyEnvsMergeReport::default();
+
+    // 收集项目内全部 server 节点的旧环境组（别名 + envs JSON）
+    let mut stmt = conn.prepare(
+        "SELECT t.name, s.envs FROM tree_nodes t
+         JOIN server_configs s ON s.node_id = t.id
+         WHERE t.project_id = ?1 AND t.node_type = 'server'",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let servers: Vec<(String, Option<String>)> = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    report.scanned_servers = servers.len();
+
+    // 旧数据形态：{"dev":{"env":{...},"headers":{...}}}，逐环境逐键合并
+    let mut existing = load_env_vars_map(conn, project_id)?;
+    for (server_name, envs_raw) in servers {
+        let Some(raw) = envs_raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(v) => v,
+            Err(_) => {
+                report.conflicts.push(format!(
+                    "Server「{server_name}」的旧环境组不是合法 JSON，已跳过（数据原样保留）"
+                ));
+                continue;
+            }
+        };
+        report.servers_with_envs.push(server_name.clone());
+        let Some(groups) = parsed.as_object() else { continue };
+        for (env_name, group) in groups {
+            let Some(group_obj) = group.as_object() else { continue };
+            // 旧组内 env 与 headers 两块变量；headers 后处理、同键覆盖 env 并记冲突
+            let mut incoming: Vec<(String, String)> = Vec::new();
+            for section in ["env", "headers"] {
+                if let Some(section_obj) = group_obj.get(section).and_then(|v| v.as_object()) {
+                    for (k, v) in section_obj {
+                        let val = match v.as_str() {
+                            Some(s) => s.to_string(),
+                            None => v.to_string(),
+                        };
+                        if let Some((_, prev)) = incoming.iter_mut().find(|(pk, _)| pk == k) {
+                            if *prev != val {
+                                report.conflicts.push(format!(
+                                    "环境「{env_name}」变量「{k}」在旧数据的 env 与 headers 中取值不同，已采用 headers 的值"
+                                ));
+                            }
+                            *prev = val;
+                        } else {
+                            incoming.push((k.clone(), val));
+                        }
+                    }
+                }
+            }
+            // 环境在环境库（含本次迁移已新建的）中不存在 -> 新建并全量写入；
+            // 已存在 -> 只补缺失键，已有值保留并记冲突明细
+            let is_new = !existing.contains_key(env_name);
+            let entry = existing.entry(env_name.clone()).or_default();
+            if is_new {
+                report.created_envs.push(env_name.clone());
+                for (k, v) in incoming {
+                    entry.insert(k, v);
+                }
+            } else {
+                for (k, v) in incoming {
+                    match entry.get(&k) {
+                        None => {
+                            entry.insert(k.clone(), v);
+                            let slot = report
+                                .merged_into
+                                .iter_mut()
+                                .find(|(n, _)| n == env_name);
+                            match slot {
+                                Some((_, added)) => added.push(k),
+                                None => report.merged_into.push((env_name.clone(), vec![k])),
+                            }
+                        }
+                        Some(old) if *old != v => {
+                            report.conflicts.push(format!(
+                                "环境「{env_name}」变量「{k}」已有取值，来自 Server「{server_name}」的新值已丢弃（环境库优先）"
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    persist_env_vars_map(conn, project_id, &existing)?;
+    set_setting(conn, &marker, "1")?;
+    Ok(report)
+}
+
+/// 读取项目环境库为 环境名 -> 变量集（BTreeMap 保序便于报告输出稳定）。
+fn load_env_vars_map(
+    conn: &Connection,
+    project_id: i64,
+) -> CmdResult<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>> {
+    let envs = list_environments(conn, project_id)?;
+    let mut map = std::collections::BTreeMap::new();
+    for e in envs {
+        let vars: serde_json::Value = serde_json::from_str(e.variables.trim()).unwrap_or_default();
+        let mut inner = std::collections::BTreeMap::new();
+        if let Some(obj) = vars.as_object() {
+            for (k, v) in obj {
+                inner.insert(k.clone(), v.as_str().map(String::from).unwrap_or_else(|| v.to_string()));
+            }
+        }
+        map.insert(e.name, inner);
+    }
+    Ok(map)
+}
+
+/// 把 环境名 -> 变量集 写回项目环境库（按名字 UPSERT；名字不存在则追加到末尾）。
+fn persist_env_vars_map(
+    conn: &mut Connection,
+    project_id: i64,
+    map: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+) -> CmdResult<()> {
+    let tx = conn.transaction()?;
+    for (name, vars) in map {
+        let json = serde_json::to_string(&vars).unwrap_or_else(|_| "{}".into());
+        let changed = tx.execute(
+            "UPDATE environments SET variables = ?1, updated_at = datetime('now','localtime')
+             WHERE project_id = ?2 AND name = ?3",
+            rusqlite::params![json, project_id, name],
+        )?;
+        if changed == 0 {
+            let next_sort: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM environments WHERE project_id = ?1",
+                    rusqlite::params![project_id],
+                    |row| row.get(0),
+                )
+                .map_err(AppError::from)?;
+            tx.execute(
+                "INSERT INTO environments (project_id, name, variables, sort_order)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![project_id, name, json, next_sort],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /* ---------- 调用历史 ---------- */
 
 /// 落盘保留的最大历史条数：比前端展示上限（200）多留余量。
@@ -912,5 +1187,194 @@ mod tests {
         assert_eq!(ids, vec![s1.id, s2.id]);
         assert!(list_projects(&conn).unwrap().is_empty());
         assert!(list_nodes(&conn, p.id).unwrap().is_empty());
+    }
+
+    /// 环境库：整批替换的校验（重名/空名/非法 JSON 拒绝）与排序落库。
+    #[test]
+    fn 环境库整批替换与校验() {
+        let mut conn = mem_db();
+        let p = create_project(&conn, "p", None).unwrap();
+
+        replace_environments(
+            &mut conn,
+            p.id,
+            &[
+                EnvironmentInput { name: "dev".into(), variables: r#"{"TOKEN":"d"}"#.into() },
+                EnvironmentInput { name: "prod".into(), variables: "{}".into() },
+            ],
+        )
+        .unwrap();
+        let envs = list_environments(&conn, p.id).unwrap();
+        assert_eq!(envs.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["dev", "prod"]);
+
+        // 整批替换：不在列表中的环境被删除，顺序按数组重排
+        replace_environments(
+            &mut conn,
+            p.id,
+            &[EnvironmentInput { name: "staging".into(), variables: "{}".into() }],
+        )
+        .unwrap();
+        let envs = list_environments(&conn, p.id).unwrap();
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].name, "staging");
+
+        // 校验拦截：同批重名 / 空名 / 非法 JSON
+        let dup = replace_environments(
+            &mut conn,
+            p.id,
+            &[
+                EnvironmentInput { name: "a".into(), variables: "{}".into() },
+                EnvironmentInput { name: "a".into(), variables: "{}".into() },
+            ],
+        );
+        assert!(dup.is_err());
+        let empty = replace_environments(
+            &mut conn,
+            p.id,
+            &[EnvironmentInput { name: "  ".into(), variables: "{}".into() }],
+        );
+        assert!(empty.is_err());
+        let bad_json = replace_environments(
+            &mut conn,
+            p.id,
+            &[EnvironmentInput { name: "a".into(), variables: "[1]".into() }],
+        );
+        assert!(bad_json.is_err());
+        // 失败的整批替换不落任何数据
+        assert!(list_environments(&conn, p.id).unwrap().len() == 1);
+    }
+
+    /// 旧版 envs 合并：新建 / 补充 / 冲突保留环境库值 / 标记只跑一次 / force 重跑。
+    #[test]
+    fn 旧环境组合并进环境库() {
+        let mut conn = mem_db();
+        let p = create_project(&conn, "p", None).unwrap();
+        let s1 = create_node(&conn, p.id, None, NodeType::Server, "A").unwrap();
+        let s2 = create_node(&conn, p.id, None, NodeType::Server, "B").unwrap();
+        upsert_server_config(
+            &conn,
+            &ServerConfig {
+                node_id: s1.id,
+                transport_type: TransportType::Stdio,
+                command: Some("npx".into()),
+                args: None,
+                env: None,
+                working_dir: None,
+                url: None,
+                headers: None,
+                sensitive_headers: None,
+                timeout_ms: 30_000,
+                enabled: true,
+                note: None,
+                envs: Some(r#"{"dev":{"env":{"TOKEN":"a-token","DEBUG":"1"},"headers":{"X-H":"h1"}}}"#.into()),
+                active_env: Some("dev".into()),
+            },
+        )
+        .unwrap();
+        upsert_server_config(
+            &conn,
+            &ServerConfig {
+                node_id: s2.id,
+                transport_type: TransportType::Stdio,
+                command: Some("npx".into()),
+                args: None,
+                env: None,
+                working_dir: None,
+                url: None,
+                headers: None,
+                sensitive_headers: None,
+                timeout_ms: 30_000,
+                enabled: true,
+                note: None,
+                envs: Some(r#"{"dev":{"env":{"TOKEN":"b-token"},"headers":{}}}"#.into()),
+                active_env: None,
+            },
+        )
+        .unwrap();
+
+        // 环境库先建一个 prod（验证合并不影响已有环境）
+        replace_environments(
+            &mut conn,
+            p.id,
+            &[EnvironmentInput { name: "prod".into(), variables: "{}".into() }],
+        )
+        .unwrap();
+
+        let report = merge_legacy_envs(&mut conn, p.id, false).unwrap();
+        assert_eq!(report.scanned_servers, 2);
+        assert_eq!(report.servers_with_envs, ["A", "B"]);
+        // dev 环境由 Server A 新建，TOKEN/DEBUG/X-H 全部带入
+        assert_eq!(report.created_envs, ["dev"]);
+        // Server B 的 dev：TOKEN 冲突保留 A 的值（无补充键）
+        assert!(report.merged_into.is_empty());
+        assert_eq!(report.conflicts.len(), 1);
+        assert!(report.conflicts[0].contains("TOKEN"), "冲突应指明变量：{:?}", report.conflicts);
+
+        // 落库结果：dev = A 的取值；prod 原样保留
+        let envs = list_environments(&conn, p.id).unwrap();
+        let dev = envs.iter().find(|e| e.name == "dev").unwrap();
+        let vars: serde_json::Value = serde_json::from_str(&dev.variables).unwrap();
+        assert_eq!(vars["TOKEN"], "a-token");
+        assert_eq!(vars["DEBUG"], "1");
+        assert_eq!(vars["X-H"], "h1");
+
+        // 标记已设：再次执行为 no-op；force 时重跑但幂等（环境库值优先不覆盖）
+        let again = merge_legacy_envs(&mut conn, p.id, false).unwrap();
+        assert!(again.servers_with_envs.is_empty());
+        let forced = merge_legacy_envs(&mut conn, p.id, true).unwrap();
+        assert_eq!(forced.servers_with_envs, ["A", "B"]);
+        let envs = list_environments(&conn, p.id).unwrap();
+        let dev = envs.iter().find(|e| e.name == "dev").unwrap();
+        let vars: serde_json::Value = serde_json::from_str(&dev.variables).unwrap();
+        assert_eq!(vars["TOKEN"], "a-token", "重复合并不能覆盖环境库已有值");
+    }
+
+    /// 补充场景：环境库已有同名环境但缺键时只补缺失，已有值保留。
+    #[test]
+    fn 合并补充缺失键时保留环境库值() {
+        let mut conn = mem_db();
+        let p = create_project(&conn, "p", None).unwrap();
+        let s = create_node(&conn, p.id, None, NodeType::Server, "A").unwrap();
+        upsert_server_config(
+            &conn,
+            &ServerConfig {
+                node_id: s.id,
+                transport_type: TransportType::Stdio,
+                command: Some("npx".into()),
+                args: None,
+                env: None,
+                working_dir: None,
+                url: None,
+                headers: None,
+                sensitive_headers: None,
+                timeout_ms: 30_000,
+                enabled: true,
+                note: None,
+                envs: Some(r#"{"dev":{"env":{"NEW":"x","OLD":"y"},"headers":{}}}"#.into()),
+                active_env: None,
+            },
+        )
+        .unwrap();
+        // 环境库已有 dev，含 OLD（与旧数据取值不同）
+        replace_environments(
+            &mut conn,
+            p.id,
+            &[EnvironmentInput {
+                name: "dev".into(),
+                variables: r#"{"OLD":"keep"}"#.into(),
+            }],
+        )
+        .unwrap();
+
+        let report = merge_legacy_envs(&mut conn, p.id, true).unwrap();
+        assert!(report.created_envs.is_empty());
+        assert_eq!(report.merged_into, [("dev".to_string(), vec!["NEW".to_string()])]);
+        assert_eq!(report.conflicts.len(), 1);
+
+        let envs = list_environments(&conn, p.id).unwrap();
+        let dev = envs.iter().find(|e| e.name == "dev").unwrap();
+        let vars: serde_json::Value = serde_json::from_str(&dev.variables).unwrap();
+        assert_eq!(vars["OLD"], "keep");
+        assert_eq!(vars["NEW"], "x");
     }
 }

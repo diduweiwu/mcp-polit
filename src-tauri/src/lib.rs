@@ -116,6 +116,10 @@ pub fn run() {
             // Server 配置
             commands::get_server_config,
             commands::save_server_config,
+            // 项目级环境库（环境变量在环境中定义，Server 配置以 {{变量名}} 引用）
+            commands::list_environments,
+            commands::save_environments,
+            commands::migrate_legacy_envs,
             // 连接与调用
             commands::connect_server,
             commands::disconnect_server,
