@@ -4,6 +4,7 @@ import App from "./App";
 import "./index.css";
 import "allotment/dist/style.css";
 import { disableNativeTextCorrection } from "./lib/disable-autocorrect";
+import { appendDiagLog } from "./api";
 
 // 关闭 WKWebView 原生输入纠正（macOS 键入时的自动修正气泡 / 拼写检查）
 disableNativeTextCorrection();
@@ -20,6 +21,24 @@ document.addEventListener("contextmenu", (e) => {
   const target = e.target as HTMLElement | null;
   if (target?.closest("input, textarea, [contenteditable]")) return;
   e.preventDefault();
+});
+
+/**
+ * 前端全局异常落盘：JS 运行时错误与未处理的 Promise 拒绝写入 crash.log
+ * （与后端 panic / ObjC 异常同一文件，跨会话可查）。
+ *
+ * 前端异常此前完全无痕（日志面板仅内存、重启即失）；落盘后与后端日志合并排查。
+ * 截图/事件对象等非字符串直接 String() 化；写入失败静默（诊断不能反噬运行）。
+ */
+window.addEventListener("error", (e) => {
+  const detail = e.error?.stack ?? e.message ?? String(e.error ?? "未知错误");
+  appendDiagLog("JS_ERROR", `${e.message}\n${detail}`).catch(() => {});
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const reason = e.reason;
+  const detail =
+    reason instanceof Error ? `${reason.message}\n${reason.stack ?? ""}` : String(reason ?? "未知拒绝");
+  appendDiagLog("JS_REJECTION", detail).catch(() => {});
 });
 
 // 浏览器演示模式：纯浏览器打开时注入 mock IPC（仅 DEV，生产构建不含）

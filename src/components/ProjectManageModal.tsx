@@ -1,10 +1,9 @@
 /**
- * 管理项目弹窗：集中管理全部项目——重命名、配置同步目录、删除，以及全局同步选项。
+ * 管理项目弹窗：集中管理全部项目——重命名、配置同步目录、删除。
  *
  * 取代原「项目下拉 → 编辑当前项目 / 删除当前项目」的分散入口：
  * 列表展示全部项目（当前项目带「当前」徽标），单行内联展开编辑表单
  * （名称 + 同步目录，同步目录可直接从文件系统挑选），删除走二次确认。
- * 底部为全局同步选项（推送脱敏开关，对所有项目的推送生效）。
  * 保存复用 store 既有 actions（renameProject / updateProjectSyncDir /
  * deleteProject），数据流与原编辑弹窗完全一致。
  */
@@ -39,8 +38,6 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
     renameProject,
     updateProjectSyncDir,
     deleteProject,
-    settings,
-    saveSetting,
   } = useAppStore();
 
   /** 正在内联编辑的项目 ID（同一时间最多一个；null 表示无编辑行） */
@@ -214,26 +211,6 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
           </div>
         )}
 
-        {/* 全局同步选项：脱敏开关对全部项目的推送生效（值实时取自设置缓存，改动即保存） */}
-        <div className="mt-3 flex items-start gap-1.5 rounded-md bg-panel2 p-2.5">
-          <input
-            type="checkbox"
-            id="sync-include-secrets"
-            className="mt-0.5 accent-[var(--c-primary-strong)]"
-            checked={settings["sync_include_secrets"] === "1"}
-            onChange={(e) =>
-              void saveSetting("sync_include_secrets", e.target.checked ? "1" : "0")
-            }
-          />
-          <label
-            htmlFor="sync-include-secrets"
-            className="cursor-pointer text-[11.5px] leading-relaxed text-inksoft"
-          >
-            推送时包含敏感信息（请求头 / 环境变量的真实值）。
-            <span className="text-warn">关闭时这些值以 *** 脱敏写入仓库</span>
-            ；仓库若同步到公开远端，请务必保持关闭。
-          </label>
-        </div>
       </Modal>
 
       {/* 删除二次确认：嵌套弹窗，打开时外层 Esc 已禁用 */}

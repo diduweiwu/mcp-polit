@@ -44,9 +44,12 @@ pub fn run() {
             let conn = db::init(&db_path)?;
             app.manage(Db(std::sync::Mutex::new(conn)));
 
-            // 诊断留痕：panic 闪退无系统崩溃报告，写入本地 crash.log 供事后定位
+            // 诊断留痕：panic 与 ObjC 未捕获异常（SIGABRT 类崩溃，panic 钩子拿不到）
+            // 都写入本地 crash.log 供事后定位；前端 JS 异常经 append_diag_log 命令写入
             let crash_log = data_dir.join("crash.log");
             diag::install_panic_logger(crash_log.clone());
+            #[cfg(target_os = "macos")]
+            diag::install_uncaught_exception_logger(crash_log.clone());
             app.manage(diag::DiagLog(crash_log));
 
             // 主窗口手动构建
@@ -126,11 +129,14 @@ pub fn run() {
             commands::save_setting,
             // 调用历史
             commands::append_history,
+            // 诊断（前端异常落盘 crash.log）
+            commands::append_diag_log,
             commands::list_history,
             commands::clear_history,
-            // Git 同步（项目级：推送/拉取/分支）
+            // Git 同步（项目级：推送/拉取/分支/实时自动导出）
             commands::project_sync_push,
             commands::project_sync_pull,
+            commands::project_sync_export,
             commands::project_branches,
             commands::project_checkout,
         ])

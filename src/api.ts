@@ -219,6 +219,24 @@ export const projectSyncPush = (projectId: number, message?: string | null) =>
 export const projectSyncPull = (projectId: number) =>
   invoke<Array<{ level: string; message: string }>>("project_sync_pull", { projectId });
 
+/**
+ * 同步目录自动导出（实时同步）：把当前配置全量写入同步目录（不含 git 操作）。
+ *
+ * 变更后由 store 的 scheduleSyncExport 防抖调用；成功返回空日志（静默），
+ * 失败返回 warn 日志供日志面板展示，不影响触发它的操作。
+ */
+export const projectSyncExport = (projectId: number) =>
+  invoke<Array<{ level: string; message: string }>>("project_sync_export", { projectId });
+
+/**
+ * 追加一条前端诊断日志到 crash.log（与后端 panic / ObjC 异常同一文件，跨会话可查）。
+ *
+ * main.tsx 的全局异常监听调用：kind 用 `JS_ERROR` / `JS_REJECTION`，
+ * message 建议含简要堆栈。写入失败直接 reject，调用方 catch 静默即可。
+ */
+export const appendDiagLog = (kind: string, message: string) =>
+  invoke<void>("append_diag_log", { kind, message });
+
 /** 列出项目同步仓库的分支 */
 export const projectBranches = (projectId: number) =>
   invoke<BranchInfo>("project_branches", { projectId });

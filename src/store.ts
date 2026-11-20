@@ -360,11 +360,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (pid == null) return;
     await api.createNode(pid, parentId, type, name);
     await get().reloadNodes();
+    scheduleSyncExport();
   },
 
   async renameNode(id, name) {
     await api.renameNode(id, name);
     await get().reloadNodes();
+    scheduleSyncExport();
   },
 
   async deleteNode(id) {
@@ -379,11 +381,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set(patch as AppState);
     await get().reloadNodes();
+    scheduleSyncExport();
   },
 
   async moveNode(id, newParentId) {
     await api.moveNode(id, newParentId);
     await get().reloadNodes();
+    scheduleSyncExport();
   },
 
   async duplicateNode(id) {
@@ -393,6 +397,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const suffix = Math.random().toString(36).slice(2, 6);
     await api.duplicateNode(id, `${src.name}-${suffix}`);
     await get().reloadNodes();
+    scheduleSyncExport();
   },
 
   expandNode(id) {
@@ -707,3 +712,34 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 }));
+
+/** 自动导出的防抖计时器（连续操作合并为一次写盘） */
+let syncExportTimer: number | null = null;
+
+/**
+ * 变更后调度一次同步目录自动导出（300ms 防抖合并连续操作）。
+ *
+ * 「实时同步」：新建/改名/移动/删除/复制节点、保存 Server 配置后调用，
+ * 让同步目录文件始终与工具内数据一致（文件可看、可被第三方工具读取）；
+ * git 提交/推送节奏仍由用户手动控制（推送按钮）。
+ * 成功静默不打扰；失败写日志面板提醒，不影响触发它的操作。
+ *
+ * @example
+ * scheduleSyncExport(); // 树操作 / 配置保存成功后
+ */
+export function scheduleSyncExport(): void {
+  if (syncExportTimer != null) window.clearTimeout(syncExportTimer);
+  syncExportTimer = window.setTimeout(() => {
+    syncExportTimer = null;
+    const { activeProjectId, addLogs } = useAppStore.getState();
+    if (activeProjectId == null) return;
+    api
+      .projectSyncExport(activeProjectId)
+      .then((logs) => {
+        if (logs.length) addLogs(logs);
+      })
+      .catch((e) => {
+        useAppStore.getState().addLog("warn", `自动同步失败：${String(e)}`);
+      });
+  }, 300);
+}

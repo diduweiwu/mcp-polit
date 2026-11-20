@@ -148,6 +148,50 @@ pub fn list_nodes(db: State<'_, Db>, project_id: i64) -> CmdResult<Vec<TreeNode>
     crate::db::list_nodes(&conn, project_id)
 }
 
+/// 校验同一父目录下同类型节点名称唯一。
+///
+/// 同步目录为树形镜像布局（分组 = 真实子目录、Server = 分组目录下的同名 `.json`），
+/// 同目录同名会在磁盘上互相覆盖，故新建 / 重命名 / 移动 / 复制时统一拦截；
+/// 前端输入时已实时提示，此处为后端兜底。目录与 Server 同名不冲突
+/// （磁盘上一个目录一个文件）；跨目录同名完全合法。
+///
+/// `exclude_id` 用于重命名 / 移动时排除自身（新建传 None）。
+fn ensure_sibling_name_unique(
+    conn: &rusqlite::Connection,
+    project_id: i64,
+    parent_id: Option<i64>,
+    node_type: NodeType,
+    name: &str,
+    exclude_id: Option<i64>,
+) -> CmdResult<()> {
+    let type_str = match node_type {
+        NodeType::Folder => "folder",
+        NodeType::Server => "server",
+    };
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM tree_nodes
+             WHERE project_id = ?1 AND parent_id IS ?2 AND node_type = ?3 AND name = ?4 AND id != ?5
+             LIMIT 1",
+            rusqlite::params![
+                project_id,
+                parent_id,
+                type_str,
+                name,
+                exclude_id.unwrap_or(0) // 新建场景无自身；id 从 1 自增，0 不会误排除
+            ],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if exists {
+        let kind = if type_str == "folder" { "目录" } else { "Server" };
+        return Err(crate::error::AppError::new(format!(
+            "同目录下已存在同名{kind}「{name}」"
+        )));
+    }
+    Ok(())
+}
+
 /// 在目录下（或根层）新建目录 / Server 节点。
 #[tauri::command]
 pub fn create_node(
@@ -162,6 +206,7 @@ pub fn create_node(
         return Err(crate::error::AppError::new("名称不能为空"));
     }
     let conn = db.0.lock().unwrap();
+    ensure_sibling_name_unique(&conn, project_id, parent_id, node_type, &name, None)?;
     crate::db::create_node(&conn, project_id, parent_id, node_type, &name)
 }
 
@@ -173,6 +218,8 @@ pub fn rename_node(db: State<'_, Db>, id: i64, name: String) -> CmdResult<TreeNo
         return Err(crate::error::AppError::new("名称不能为空"));
     }
     let conn = db.0.lock().unwrap();
+    let node = crate::db::get_node(&conn, id)?;
+    ensure_sibling_name_unique(&conn, node.project_id, node.parent_id, node.node_type, &name, Some(id))?;
     crate::db::rename_node(&conn, id, &name)
 }
 
@@ -180,6 +227,8 @@ pub fn rename_node(db: State<'_, Db>, id: i64, name: String) -> CmdResult<TreeNo
 #[tauri::command]
 pub fn move_node(db: State<'_, Db>, id: i64, new_parent_id: Option<i64>) -> CmdResult<TreeNode> {
     let conn = db.0.lock().unwrap();
+    let node = crate::db::get_node(&conn, id)?;
+    ensure_sibling_name_unique(&conn, node.project_id, new_parent_id, node.node_type, &node.name, Some(id))?;
     crate::db::move_node(&conn, id, new_parent_id)
 }
 
@@ -378,6 +427,18 @@ pub async fn project_sync_pull(
     Ok(crate::sync::pull_project(&app, &db, project_id).await)
 }
 
+/// 同步目录自动导出（实时同步）：把项目当前配置全量写入同步目录（不含 git 操作）。
+///
+/// 树/配置变更后由前端防抖调用。成功返回空日志（静默）；失败返回 warn 日志
+/// 供日志面板展示，不影响触发它的操作本身。
+#[tauri::command]
+pub fn project_sync_export(
+    db: State<'_, Db>,
+    project_id: i64,
+) -> CmdResult<Vec<crate::models::LogEntry>> {
+    Ok(crate::sync::export_project_dir(&db, project_id))
+}
+
 /// 列出项目同步仓库的分支（当前分支 + 全部本地分支）。
 #[tauri::command]
 pub fn project_branches(
@@ -413,7 +474,8 @@ pub fn project_checkout(db: State<'_, Db>, project_id: i64, branch: String) -> C
 /// # 参数
 ///
 /// - `node_id`: 源节点 ID
-/// - `name`: 副本名称（前端生成，如「原名-a3f2」随机后缀避免重名）
+/// - `name`: 副本名称（前端生成，如「原名-a3f2」随机后缀避免重名；
+///   极小概率撞同级同名时由同级重名校验拦截）
 #[tauri::command]
 pub fn duplicate_node(db: State<'_, Db>, node_id: i64, name: String) -> CmdResult<TreeNode> {
     let name = name.trim().to_string();
@@ -421,6 +483,8 @@ pub fn duplicate_node(db: State<'_, Db>, node_id: i64, name: String) -> CmdResul
         return Err(crate::error::AppError::new("副本名称不能为空"));
     }
     let conn = db.0.lock().unwrap();
+    let src = crate::db::get_node(&conn, node_id)?;
+    ensure_sibling_name_unique(&conn, src.project_id, src.parent_id, src.node_type, &name, None)?;
     crate::db::duplicate_node(&conn, node_id, &name)
 }
 
@@ -440,6 +504,23 @@ pub async fn test_server_config(config: ServerConfig) -> CmdResult<Vec<ToolInfo>
 pub fn append_history(db: State<'_, Db>, record: HistoryRecord) -> CmdResult<i64> {
     let conn = db.0.lock().unwrap();
     crate::db::insert_history(&conn, &record)
+}
+
+/// 追加一条前端诊断日志到 crash.log（与 Rust panic / ObjC 异常同一文件，跨会话可查）。
+///
+/// 前端全局异常（JS error / unhandledrejection）经此落盘；kind 建议用
+/// `JS_ERROR` / `JS_REJECTION`，message 由前端拼好（含简要堆栈）。
+/// 写入失败静默（诊断日志绝不反过来影响运行）；无鉴权风险：仅写入本机数据目录。
+#[tauri::command]
+pub fn append_diag_log(
+    log: State<'_, crate::diag::DiagLog>,
+    kind: String,
+    message: String,
+) -> CmdResult<()> {
+    // 限制单条长度：堆栈可能很长，截断到 8KB 防止日志被单条异常撑爆
+    let message: String = message.chars().take(8192).collect();
+    crate::diag::append_diag(&log.0, &kind, &message);
+    Ok(())
 }
 
 /// 读取调用历史（新 → 旧，按 offset 分页动态加载）。

@@ -55,6 +55,80 @@ pub fn install_panic_logger(log_path: PathBuf) {
     }));
 }
 
+/* ---------- ObjC 未捕获异常捕获（macOS） ---------- */
+
+// 背景：Rust panic 钩子拿不到 Objective-C 层的 NSException——菜单 / WebView /
+// 系统控件回调里抛出的异常不经过 Rust panic 流程，直接 objc_terminate → abort
+//（SIGABRT），此前 crash.log 完全无痕（v0.1.10 于 2026-11-20 的崩溃即属此类，
+// 只有系统 .ips 报告、无任何进程内日志）。装 NSSetUncaughtExceptionHandler 把
+// 异常信息记入同一份 crash.log，与 panic / 前端异常/ 退出事件合并排查。
+
+/// 安装 ObjC 未捕获异常钩子：NSException 走到 terminate 前，把异常名、原因与
+/// 调用栈追加进 crash.log（类别 `NS_EXCEPTION`）。
+///
+/// 仅 macOS 生效；handler 返回后系统继续原有终止流程（生成 .ips 崩溃报告），
+/// 不影响既有行为。重复调用会覆盖前一个钩子（系统只有一个槽位）。
+///
+/// 应在应用启动早期（setup 中）与 [`install_panic_logger`] 一同调用。
+///
+/// # 参数
+///
+/// - `log_path`: 日志文件完整路径（所在目录需已存在）。
+#[cfg(target_os = "macos")]
+pub fn install_uncaught_exception_logger(log_path: PathBuf) {
+    use objc2::msg_send;
+    use objc2_foundation::{NSArray, NSException, NSString, NSSetUncaughtExceptionHandler};
+    use std::sync::OnceLock;
+
+    static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+    let _ = LOG_PATH.set(log_path);
+
+    /// 读取 name / reason 属性（裸指针转借用：异常对象在 terminate 前一直存活）。
+    fn read_ns_string(ptr: *mut NSString) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        Some(unsafe { &*ptr }.to_string())
+    }
+
+    // 钩子在抛异常的线程上执行；只做文件追加，任何失败静默（诊断代码绝不能二次引爆）
+    unsafe extern "C" fn on_uncaught_exception(exception: *mut NSException) {
+        if exception.is_null() {
+            return;
+        }
+        let exc = unsafe { &*exception };
+        let path = LOG_PATH.get().map(|p| p.as_path()).unwrap_or_else(|| Path::new("crash.log"));
+        // 调用栈：NSArray<NSString> 用 componentsJoinedByString 一次性拼好
+        let stack_ptr: *mut NSArray<NSString> = unsafe { msg_send![exc, callStackSymbols] };
+        let stack = if stack_ptr.is_null() {
+            String::from("（无）")
+        } else {
+            let arr = unsafe { &*stack_ptr };
+            let sep = NSString::from_str("\n");
+            arr.componentsJoinedByString(&sep).to_string()
+        };
+        let name_ptr: *mut NSString = unsafe { msg_send![exc, name] };
+        let reason_ptr: *mut NSString = unsafe { msg_send![exc, reason] };
+        let msg = format!(
+            "name={}\n  reason={}\n{}",
+            read_ns_string(name_ptr).unwrap_or_else(|| "（无）".into()),
+            read_ns_string(reason_ptr).unwrap_or_else(|| "（无）".into()),
+            stack,
+        );
+        append_diag(path, "NS_EXCEPTION", &msg);
+    }
+
+    // objc2-foundation 0.3 的绑定是裸指针风格（NSUncaughtExceptionHandler = c_void），
+    // 函数指针按 ABI 等价性转换后传入（Apple: void NSSetUncaughtExceptionHandler(void (*)(NSException*))）
+    let handler: unsafe extern "C" fn(*mut NSException) = on_uncaught_exception;
+    unsafe {
+        #[allow(static_mut_refs)]
+        NSSetUncaughtExceptionHandler(
+            std::mem::transmute::<unsafe extern "C" fn(*mut NSException), *mut std::ffi::c_void>(handler),
+        );
+    }
+}
+
 /// 追加一行诊断日志：`[UTC 时间] [类别] 内容`。
 ///
 /// 写入失败静默忽略（诊断日志本身绝不能反过来把进程搞挂）。

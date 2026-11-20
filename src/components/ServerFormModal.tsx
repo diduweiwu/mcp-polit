@@ -5,8 +5,9 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertCircle, Info } from "lucide-react";
 import * as api from "../api";
-import { useAppStore } from "../store";
+import { useAppStore, scheduleSyncExport } from "../store";
 import type { ServerConfig } from "../types";
+import { siblingNameConflict } from "../lib/tree";
 import { parseSensitiveKeys, stringifySensitiveKeys } from "../lib/sensitive";
 import { Modal } from "./ui";
 import { KVEditor } from "./KVEditor";
@@ -61,6 +62,17 @@ export function ServerFormModal({ parentId, onClose }: Props) {
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
   /** 弹窗内容滚动容器：反馈出现在顶部时把视图滚回去，保证看得到 */
   const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  /** 实时重名检查：新建按目标父目录，编辑按节点所在目录（排除自身）。
+   *  同步目录是树形镜像布局，同目录同名 Server 会在磁盘上互相覆盖。 */
+  const conflictParent = editNode ? editNode.parent_id : parentId;
+  const nameConflict = siblingNameConflict(
+    nodes,
+    conflictParent ?? null,
+    name,
+    "server",
+    editNode?.id,
+  );
 
   /* 保存校验错误 / 连通性测试反馈出现时滚回弹窗顶部（反馈区固定在顶部展示） */
   useEffect(() => {
@@ -139,6 +151,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
       setError("请填写别名");
       return;
     }
+    if (nameConflict) {
+      setError("同目录下已存在同名 Server，请换一个别名");
+      return;
+    }
     const err = validateConfig();
     if (err) {
       setError(err);
@@ -167,6 +183,7 @@ export function ServerFormModal({ parentId, onClose }: Props) {
         void selectNode(node.id);
       }
       await reloadNodes();
+      scheduleSyncExport(); // 实时同步：配置已变更，防抖写盘到同步目录
       onClose();
     } catch (e) {
       setError(String(e));
@@ -236,6 +253,11 @@ export function ServerFormModal({ parentId, onClose }: Props) {
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
+            {nameConflict && (
+              <p className="mt-1 text-[11.5px] text-err">
+                同目录下已存在同名 Server，请换一个别名
+              </p>
+            )}
           </div>
 
           {/* 传输类型 */}

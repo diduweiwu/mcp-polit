@@ -33,7 +33,7 @@ import {
 } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
-import { buildTree, collectIds, type TreeEntry } from "../lib/tree";
+import { buildTree, collectIds, siblingNameConflict, type TreeEntry } from "../lib/tree";
 import type { BranchInfo, TreeNode } from "../types";
 import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
@@ -47,18 +47,32 @@ import { ServerFormModal } from "./ServerFormModal";
 let dragSrc: { id: number; descendantIds: Set<number> } | null = null;
 
 /**
- * 执行移动：调用 store.moveNode 并统一处理失败（如后端防环校验拦截），
+ * 执行移动：调用 store.moveNode 并统一处理失败，
  * 错误写入日志面板归属到源节点，不静默吞掉。
+ *
+ * 移动前先做同级同类重名前置检查（同步目录是树形镜像布局，同目录同名会
+ * 互相覆盖）：拖放是高频误操作路径，冲突时提前取消并写 warn 日志，不发无效请求；
+ * 后端同级重名校验兜底拦截。
  *
  * @example
  * dropMove(dragSrc.id, targetFolderId); // 拖到目录上
  * dropMove(dragSrc.id, null);           // 拖到空白区 = 移回根层
  */
 async function dropMove(srcId: number, parentId: number | null) {
+  const { nodes, moveNode, addLog } = useAppStore.getState();
+  const src = nodes.find((n) => n.id === srcId);
+  if (src && siblingNameConflict(nodes, parentId, src.name, src.node_type, srcId)) {
+    addLog(
+      "warn",
+      `移动取消：目标目录下已存在同名${src.node_type === "folder" ? "目录" : "Server"}「${src.name}」`,
+      srcId,
+    );
+    return;
+  }
   try {
-    await useAppStore.getState().moveNode(srcId, parentId);
+    await moveNode(srcId, parentId);
   } catch (e) {
-    useAppStore.getState().addLog("error", `移动失败：${String(e)}`, srcId);
+    addLog("error", `移动失败：${String(e)}`, srcId);
   }
 }
 
@@ -97,8 +111,12 @@ export function TreePane() {
   const [folderOpen, setFolderOpen] = useState(false);
   const [folderParent, setFolderParent] = useState<number | null>(null);
   const [folderName, setFolderName] = useState("");
+  /** 新建目录的失败反馈（后端同级重名校验兜底拦截时显示） */
+  const [folderError, setFolderError] = useState("");
   const [renameTarget, setRenameTarget] = useState<TreeNode | null>(null);
   const [renameName, setRenameName] = useState("");
+  /** 重命名的失败反馈（后端同级重名校验兜底拦截时显示） */
+  const [renameError, setRenameError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<TreeNode | null>(null);
   /** 收起动画播放中（淡出结束后才真正折叠） */
   const [closing, setClosing] = useState(false);
@@ -118,14 +136,25 @@ export function TreePane() {
   const newFolderUnder = (parentId: number | null) => {
     setFolderParent(parentId);
     setFolderName("");
+    setFolderError("");
     setFolderOpen(true);
   };
 
-  /** 提交新建目录 */
+  /** 新建目录实时重名检查：目标目录下同名目录（同步目录树形镜像布局会磁盘冲突） */
+  const folderConflict = siblingNameConflict(nodes, folderParent, folderName, "folder");
+
+  /**
+   * 提交新建目录：前端重名拦截 + 后端同级校验兜底，失败反馈在弹窗内（不关闭，可改名重试）。
+   */
   const submitFolder = async () => {
-    if (!folderName.trim()) return;
-    await useAppStore.getState().createNode(folderParent, "folder", folderName.trim());
-    setFolderOpen(false);
+    const name = folderName.trim();
+    if (!name || folderConflict) return;
+    try {
+      await useAppStore.getState().createNode(folderParent, "folder", name);
+      setFolderOpen(false);
+    } catch (e) {
+      setFolderError(String(e));
+    }
   };
 
   /** 右键菜单项统一入口：关闭菜单后执行动作 */
@@ -150,6 +179,25 @@ export function TreePane() {
   const activeName = useAppStore(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.name,
   );
+  /** 重命名实时检查：所在目录下同名同类型冲突（排除自身；目录与 Server 同名不冲突） */
+  const renameConflict = renameTarget
+    ? siblingNameConflict(nodes, renameTarget.parent_id, renameName, renameTarget.node_type, renameTarget.id)
+    : false;
+
+  /**
+   * 提交重命名：前端重名拦截 + 后端同级校验兜底，失败反馈在弹窗内（不关闭，可改名重试）。
+   */
+  const submitRename = async () => {
+    if (!renameTarget) return;
+    const name = renameName.trim();
+    if (!name || renameConflict) return;
+    try {
+      await useAppStore.getState().renameNode(renameTarget.id, name);
+      setRenameTarget(null);
+    } catch (e) {
+      setRenameError(String(e));
+    }
+  };
   /** 当前项目绑定的同步目录（「打开项目目录」按钮用；未绑定时按钮禁用） */
   const activeSyncDir = useAppStore(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.sync_dir ?? null,
@@ -316,6 +364,7 @@ export function TreePane() {
                   const target = ctx.node!;
                   setRenameTarget(target);
                   setRenameName(target.name);
+                  setRenameError("");
                 })} />
                 <div className="my-1 border-t border-line" />
                 <CtxItem icon={<Trash2 size={13} />} label="删除" danger onClick={runMenu(() => setDeleteTarget(ctx.node))} />
@@ -343,7 +392,7 @@ export function TreePane() {
             <button className="btn-ghost" onClick={() => setFolderOpen(false)}>
               取消
             </button>
-            <button className="btn-primary" onClick={() => void submitFolder()}>
+            <button className="btn-primary" disabled={folderConflict} onClick={() => void submitFolder()}>
               创建
             </button>
           </>
@@ -358,6 +407,12 @@ export function TreePane() {
           onChange={(e) => setFolderName(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && void submitFolder()}
         />
+        {folderConflict && (
+          <p className="mt-1.5 text-[11.5px] text-err">同目录下已存在同名目录，请换一个名称</p>
+        )}
+        {folderError && (
+          <p className="mt-1.5 break-all text-[11.5px] text-err">{folderError}</p>
+        )}
       </Modal>
 
       {/* 新建 Server 弹窗 */}
@@ -379,15 +434,7 @@ export function TreePane() {
             <button className="btn-ghost" onClick={() => setRenameTarget(null)}>
               取消
             </button>
-            <button
-              className="btn-primary"
-              onClick={() => {
-                if (renameTarget) {
-                  void useAppStore.getState().renameNode(renameTarget.id, renameName.trim());
-                }
-                setRenameTarget(null);
-              }}
-            >
+            <button className="btn-primary" disabled={renameConflict} onClick={() => void submitRename()}>
               保存
             </button>
           </>
@@ -399,13 +446,14 @@ export function TreePane() {
           autoFocus
           value={renameName}
           onChange={(e) => setRenameName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && renameTarget) {
-              void useAppStore.getState().renameNode(renameTarget.id, renameName.trim());
-              setRenameTarget(null);
-            }
-          }}
+          onKeyDown={(e) => e.key === "Enter" && void submitRename()}
         />
+        {renameConflict && (
+          <p className="mt-1.5 text-[11.5px] text-err">同目录下已存在同名{renameTarget?.node_type === "server" ? " Server" : "目录"}，请换一个名称</p>
+        )}
+        {renameError && (
+          <p className="mt-1.5 break-all text-[11.5px] text-err">{renameError}</p>
+        )}
       </Modal>
 
       {/* 删除确认 */}

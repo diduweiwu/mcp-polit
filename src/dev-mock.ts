@@ -10,7 +10,6 @@
 const settings: Record<string, string> = {
   theme_mode: "light",
   sync_repo_path: "/Users/demo/mcpilot-sync",
-  sync_include_secrets: "0",
   tool_params: JSON.stringify({
     "2:web_search": JSON.stringify({ query: "MCP protocol", count: 5 }),
   }),
@@ -191,6 +190,10 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "project_sync_pull": return [
       { level: "info", message: "项目「演示项目」导入完成：2 目录 / 3 Server（覆盖当前配置）" },
     ];
+    // 自动导出（实时同步）：成功静默返回空日志，与真实 IPC 形态一致
+    case "project_sync_export": return [];
+    // 前端诊断日志落盘：演示模式返回 null 静默，与真实 IPC 形态一致
+    case "append_diag_log": return null;
     case "project_branches": return { current: "main", branches: ["main", "dev", "staging"] };
     case "project_checkout": return null;
     default: return null;

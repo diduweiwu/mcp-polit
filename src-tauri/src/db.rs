@@ -43,7 +43,8 @@ pub fn init(db_path: &Path) -> Result<Connection, AppError> {
 }
 
 /// 执行建表迁移（幂等，全部使用 `IF NOT EXISTS`）。
-fn migrate(conn: &Connection) -> Result<(), AppError> {
+/// `pub(crate)`：sync 模块的测试需要在内存库上构建表结构。
+pub(crate) fn migrate(conn: &Connection) -> Result<(), AppError> {
     conn.execute_batch(
         r#"
         BEGIN;
