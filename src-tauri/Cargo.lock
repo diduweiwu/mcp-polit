@@ -2468,9 +2468,11 @@ dependencies = [
 
 [[package]]
 name = "mcpilot"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "http",
+ "objc2",
+ "objc2-foundation",
  "reqwest",
  "rmcp",
  "rusqlite",

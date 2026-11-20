@@ -1,6 +1,6 @@
 [package]
 name = "mcpilot"
-version = "0.1.10"
+version = "0.1.11"
 description = "MCPilot — 本地 MCP 调试工作台（MCP Inspector 客户端）"
 authors = ["MCPilot"]
 edition = "2024"
@@ -50,6 +50,11 @@ tauri-plugin-decorum = "1.1.1"
 tauri-plugin-dialog = "2"
 # 系统默认浏览器/文件管理器打开 URL 与路径：顶栏、关于页的 GitHub 仓库入口
 tauri-plugin-opener = "2"
+
+# macOS 专属：ObjC 未捕获异常（NSException）记录到 crash.log（诊断 SIGABRT 崩溃用）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSException", "NSString", "NSArray"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
