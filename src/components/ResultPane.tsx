@@ -15,6 +15,7 @@ import {
   History,
   ListTree,
   Loader2,
+  PanelLeftOpen,
   ScrollText,
   Search,
   Trash2,
@@ -33,27 +34,41 @@ type PaneTab = "results" | "history";
 export function ResultPane() {
   const { results, running, clearResults, history, clearHistory } =
     useAppStore();
+  /** 参数栏折叠时在栏头提供展开入口 */
+  const paramsCollapsed = useAppStore((s) => s.paramsCollapsed);
   const [tab, setTab] = useState<PaneTab>("results");
   const [logOpen, setLogOpen] = useState(false);
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-2">
-        {/* 标签页切换 */}
-        <div className="flex overflow-hidden rounded-md border border-line">
-          <TabBtn active={tab === "results"} onClick={() => setTab("results")}>
-            调用结果
-          </TabBtn>
-          <TabBtn active={tab === "history"} onClick={() => setTab("history")}>
-            <span className="flex items-center gap-1">
-              <History size={12} /> 历史
-              {history.length > 0 && (
-                <span className="rounded-full bg-panel2 px-1 text-[10px] text-inksoft">
-                  {history.length}
-                </span>
-              )}
-            </span>
-          </TabBtn>
+        <div className="flex min-w-0 items-center">
+          {/* 参数栏折叠时提供展开入口（折叠栏的展开按钮放在右侧第一个可见栏） */}
+          {paramsCollapsed && (
+            <button
+              className="mr-1 rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
+              title="展开参数栏"
+              onClick={() => useAppStore.getState().toggleParamsCollapsed()}
+            >
+              <PanelLeftOpen size={14} />
+            </button>
+          )}
+          {/* 标签页切换 */}
+          <div className="flex overflow-hidden rounded-md border border-line">
+            <TabBtn active={tab === "results"} onClick={() => setTab("results")}>
+              调用结果
+            </TabBtn>
+            <TabBtn active={tab === "history"} onClick={() => setTab("history")}>
+              <span className="flex items-center gap-1">
+                <History size={12} /> 历史
+                {history.length > 0 && (
+                  <span className="rounded-full bg-panel2 px-1 text-[10px] text-inksoft">
+                    {history.length}
+                  </span>
+                )}
+              </span>
+            </TabBtn>
+          </div>
         </div>
 
         {/* 清空按钮（随 tab 变化） */}

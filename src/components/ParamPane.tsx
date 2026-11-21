@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { json } from "@codemirror/lang-json";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { BookmarkPlus, Play, Table2, Braces, Loader2, SlidersHorizontal } from "lucide-react";
+import { BookmarkPlus, Play, Table2, Braces, Loader2, SlidersHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useAppStore } from "../store";
 import { buildDefaults, pruneArgs, SchemaForm, type FormValue } from "./SchemaForm";
 import { Modal, SearchSelect } from "./ui";
@@ -34,6 +34,17 @@ export function ParamPane() {
   }, [tools, selectedNodeId, selectedToolName]);
 
   const node = nodes.find((n) => n.id === selectedNodeId) ?? null;
+  /** 收起动画播放中（淡出结束后才真正折叠；展开重建时由根容器播放入场） */
+  const [closing, setClosing] = useState(false);
+
+  /** 收起本栏：先播 160ms 淡出，再触发折叠（与资源树/工具列表栏同一节奏） */
+  const collapseWithAnim = () => {
+    if (closing) return;
+    setClosing(true);
+    window.setTimeout(() => {
+      useAppStore.getState().toggleParamsCollapsed();
+    }, 160);
+  };
 
   /** 缓存/Case 的 key */
   const paramKey = selectedNodeId != null && selectedToolName ? `${selectedNodeId}:${selectedToolName}` : null;
@@ -102,8 +113,10 @@ export function ParamPane() {
 
   if (!node || !tool) {
     return (
-      <div className="flex h-full flex-col overflow-hidden bg-panel/50">
-        <PaneHeader title="参数" tool={null} mode={mode} setMode={setMode} />
+      <div
+        className={`flex h-full flex-col overflow-hidden bg-panel/50 ${closing ? "anim-fade-out" : "anim-pane-in"}`}
+      >
+        <PaneHeader title="参数" tool={null} mode={mode} setMode={setMode} onCollapse={collapseWithAnim} />
         <div className="flex flex-1 items-center justify-center text-[13px] text-inksoft">
           选择一个工具后在此填写参数
         </div>
@@ -154,8 +167,10 @@ export function ParamPane() {
   };
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-panel/50">
-      <PaneHeader title={`参数 · ${tool.name}`} tool={tool} mode={mode} setMode={switchMode} />
+    <div
+      className={`flex h-full flex-col overflow-hidden bg-panel/50 ${closing ? "anim-fade-out" : "anim-pane-in"}`}
+    >
+      <PaneHeader title={`参数 · ${tool.name}`} tool={tool} mode={mode} setMode={switchMode} onCollapse={collapseWithAnim} />
 
       <div key={selectedToolName ?? "empty"} className="anim-fade-in flex-1 overflow-y-auto p-3">
         {/* 参数 Case 条：可搜索下拉一键带入（输入关键字过滤），「管理」打开弹窗查看/删除 */}
@@ -331,31 +346,67 @@ export function ParamPane() {
   );
 }
 
-/** 栏头：标题 + 模式切换 */
+/**
+ * 栏头：展开入口（左邻栏折叠时）+ 标题 + 模式切换 + 本栏收起按钮。
+ *
+ * 折叠栏的展开入口链：资源树折叠 → 工具列表/参数栏头展开；工具列表折叠 →
+ * 参数栏头展开；本栏（参数）收起由 onCollapse 触发（带淡出动画）。
+ */
 function PaneHeader({
   title,
   tool,
   mode,
   setMode,
+  onCollapse,
 }: {
   title: string;
   tool: { description: string | null } | null;
   mode: "form" | "json";
   setMode: (m: "form" | "json") => void;
+  /** 收起本栏（由父级播放淡出动画后折叠） */
+  onCollapse: () => void;
 }) {
+  const treeCollapsed = useAppStore((s) => s.treeCollapsed);
+  const toolsCollapsed = useAppStore((s) => s.toolsCollapsed);
+  /** 左邻折叠栏的展开按钮（icon + title 区分目标栏） */
+  const expandBtn = (title: string, action: () => void) => (
+    <button
+      className="mr-1 rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
+      title={title}
+      onClick={action}
+    >
+      <PanelLeftOpen size={14} />
+    </button>
+  );
+
   return (
     <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
-      <span className="truncate text-[12px] font-semibold text-inksoft">{title}</span>
-      {tool && (
-        <div className="flex overflow-hidden rounded-md border border-line">
-          <ModeBtn active={mode === "form"} onClick={() => setMode("form")} icon={<Table2 size={12} />}>
-            表单
-          </ModeBtn>
-          <ModeBtn active={mode === "json"} onClick={() => setMode("json")} icon={<Braces size={12} />}>
-            JSON
-          </ModeBtn>
-        </div>
-      )}
+      <div className="flex min-w-0 items-center">
+        {treeCollapsed &&
+          expandBtn("展开资源树", () => useAppStore.getState().toggleTreeCollapsed())}
+        {toolsCollapsed &&
+          expandBtn("展开工具列表", () => useAppStore.getState().toggleToolsCollapsed())}
+        <span className="truncate text-[12px] font-semibold text-inksoft">{title}</span>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {tool && (
+          <div className="flex overflow-hidden rounded-md border border-line">
+            <ModeBtn active={mode === "form"} onClick={() => setMode("form")} icon={<Table2 size={12} />}>
+              表单
+            </ModeBtn>
+            <ModeBtn active={mode === "json"} onClick={() => setMode("json")} icon={<Braces size={12} />}>
+              JSON
+            </ModeBtn>
+          </div>
+        )}
+        <button
+          className="rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
+          title="收起参数栏"
+          onClick={onCollapse}
+        >
+          <PanelLeftClose size={14} />
+        </button>
+      </div>
     </div>
   );
 }

@@ -11,7 +11,6 @@ import {
   FolderPlus,
   Monitor,
   Moon,
-  Plus,
   Settings,
   SlidersHorizontal,
   Sun,
@@ -83,6 +82,12 @@ export function TopBar() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 环境管理弹窗：环境变量集中定义（Server 配置以 {{变量名}} 引用） */
   const [envManageOpen, setEnvManageOpen] = useState(false);
+  /** 项目下拉的关键字过滤（每次打开下拉时清空） */
+  const [projectKw, setProjectKw] = useState("");
+  /** 按关键字过滤后的项目列表（不区分大小写，匹配项目名） */
+  const filteredProjects = projects.filter((p) =>
+    p.name.toLowerCase().includes(projectKw.trim().toLowerCase()),
+  );
 
   /* 全局快捷键：⌘,（macOS）/ Ctrl+,（其他平台）打开设置（桌面应用惯例键位）。
      已打开时重复触发幂等；Esc 关闭由 Modal 自带 */
@@ -139,7 +144,10 @@ export function TopBar() {
           trigger={(open, toggle) => (
             <button
               className="btn-ghost h-8 gap-2 !px-2.5"
-              onClick={toggle}
+              onClick={() => {
+                setProjectKw("");
+                toggle();
+              }}
               title="切换项目"
             >
               <span
@@ -158,33 +166,40 @@ export function TopBar() {
         >
           {(close) => (
             <>
-              {projects.map((p) => (
-                <MenuItem
-                  key={p.id}
-                  label={p.name}
-                  icon={
-                    p.id === activeProjectId ? (
-                      <Check size={14} className="text-primarystrong" />
-                    ) : (
-                      <span className="w-[14px]" />
-                    )
-                  }
-                  onClick={() => {
-                    void setActiveProject(p.id);
-                    close();
-                  }}
+              {/* 关键字过滤（项目多时快速定位）；新建入口用顶栏「新建项目」按钮，不在面板里重复 */}
+              <div className="px-2 pb-1 pt-0.5">
+                <input
+                  className="field !py-1 text-[12.5px]"
+                  autoFocus
+                  placeholder="搜索项目…"
+                  value={projectKw}
+                  onChange={(e) => setProjectKw(e.target.value)}
                 />
-              ))}
-              <div className="my-1 border-t border-line" />
-              <MenuItem
-                icon={<Plus size={14} />}
-                label="新建项目"
-                onClick={() => {
-                  setNewName("");
-                  setNewOpen(true);
-                  close();
-                }}
-              />
+              </div>
+              <div className="max-h-[260px] overflow-y-auto">
+                {filteredProjects.map((p) => (
+                  <MenuItem
+                    key={p.id}
+                    label={p.name}
+                    icon={
+                      p.id === activeProjectId ? (
+                        <Check size={14} className="text-primarystrong" />
+                      ) : (
+                        <span className="w-[14px]" />
+                      )
+                    }
+                    onClick={() => {
+                      void setActiveProject(p.id);
+                      close();
+                    }}
+                  />
+                ))}
+                {filteredProjects.length === 0 && (
+                  <div className="px-3 py-2 text-[12px] text-inksoft/70">
+                    没有匹配的项目
+                  </div>
+                )}
+              </div>
             </>
           )}
         </Dropdown>

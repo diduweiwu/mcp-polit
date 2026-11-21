@@ -84,6 +84,10 @@ interface AppState {
 
   /* 布局：资源树栏是否折叠 */
   treeCollapsed: boolean;
+  /** 工具列表栏是否折叠 */
+  toolsCollapsed: boolean;
+  /** 参数栏是否折叠 */
+  paramsCollapsed: boolean;
   /** 均分布局信号（计数器；TopBar 触发，Workspace 监听） */
   layoutEqualizeSignal: number;
 
@@ -167,6 +171,10 @@ interface AppState {
 
   /** 切换资源树栏折叠/展开 */
   toggleTreeCollapsed: () => void;
+  /** 切换工具列表栏折叠/展开 */
+  toggleToolsCollapsed: () => void;
+  /** 切换参数栏折叠/展开 */
+  toggleParamsCollapsed: () => void;
   /** 触发四栏均分布局 */
   equalizeLayout: () => void;
 
@@ -235,6 +243,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   results: [],
   seq: 0,
   treeCollapsed: false,
+  toolsCollapsed: false,
+  paramsCollapsed: false,
   layoutEqualizeSignal: 0,
   history: [],
   hasMoreHistory: false,
@@ -612,6 +622,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleTreeCollapsed() {
     set((s) => ({ treeCollapsed: !s.treeCollapsed }));
+  },
+
+  toggleToolsCollapsed() {
+    set((s) => ({ toolsCollapsed: !s.toolsCollapsed }));
+  },
+
+  toggleParamsCollapsed() {
+    set((s) => ({ paramsCollapsed: !s.paramsCollapsed }));
   },
 
   equalizeLayout() {

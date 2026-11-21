@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Clock,
   Globe,
+  PanelLeftClose,
   PanelLeftOpen,
   Pencil,
   Plug,
@@ -45,6 +46,28 @@ export function ToolPane() {
   const list = selectedNodeId != null ? (tools[selectedNodeId] ?? []) : [];
   const status = selectedNodeId != null ? (connStates[selectedNodeId] ?? "disconnected") : "disconnected";
   const err = selectedNodeId != null ? (connErrors[selectedNodeId] ?? "") : "";
+  /** 收起动画播放中（淡出结束后才真正折叠；展开重建时由 PaneWrap 播放入场） */
+  const [closing, setClosing] = useState(false);
+
+  /** 收起本栏：先播 160ms 淡出，再触发折叠（与资源树栏折叠同一节奏） */
+  const collapseWithAnim = () => {
+    if (closing) return;
+    setClosing(true);
+    window.setTimeout(() => {
+      useAppStore.getState().toggleToolsCollapsed();
+    }, 160);
+  };
+
+  /** 栏头右侧的收起按钮（空态/正常态共用） */
+  const collapseBtn = (
+    <button
+      className="rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
+      title="收起工具列表"
+      onClick={collapseWithAnim}
+    >
+      <PanelLeftClose size={14} />
+    </button>
+  );
   /** 按关键词过滤（名称 + 描述） */
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
@@ -60,6 +83,7 @@ export function ToolPane() {
     return (
       <PaneWrap
         title="工具列表"
+        className={closing ? "anim-fade-out" : "anim-pane-in"}
         lead={
           treeCollapsed ? (
             <button
@@ -71,6 +95,7 @@ export function ToolPane() {
             </button>
           ) : undefined
         }
+        right={collapseBtn}
       >
         <EmptyState icon={<Wrench size={36} strokeWidth={1.2} />} text="在左侧选择一个 MCP Server，这里会列出它的全部工具。" />
       </PaneWrap>
@@ -80,6 +105,7 @@ export function ToolPane() {
   return (
     <PaneWrap
       title={`工具列表 · ${node.name}`}
+      className={closing ? "anim-fade-out" : "anim-pane-in"}
       lead={
         treeCollapsed ? (
           <button
@@ -91,6 +117,7 @@ export function ToolPane() {
           </button>
         ) : undefined
       }
+      right={collapseBtn}
     >
       {/* 已连接：「Server 配置」折叠条紧跟栏头标题（固定，不随工具列表滚动） */}
       {status === "connected" && (
@@ -264,20 +291,24 @@ function ConnectedConfigBar({ node }: { node: TreeNode }) {
   );
 }
 
-/** 栏外壳：标题 + 内容（lead 为标题左侧可选元素；right 为标题右侧可选区域，如环境控件） */
+/** 栏外壳：标题 + 内容（lead 为标题左侧可选元素；right 为标题右侧可选区域；className 透传到根容器承载出入场动画） */
 function PaneWrap({
   title,
   children,
   lead,
   right,
+  className,
 }: {
   title: string;
   children: React.ReactNode;
   lead?: React.ReactNode;
   right?: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <div className="flex h-full flex-col overflow-hidden border-r border-line bg-panel/50">
+    <div
+      className={`flex h-full flex-col overflow-hidden border-r border-line bg-panel/50 ${className ?? ""}`}
+    >
       <div className="flex h-9 shrink-0 items-center border-b border-line px-3">
         {lead}
         <span className="min-w-0 truncate text-[12px] font-semibold text-inksoft">{title}</span>
