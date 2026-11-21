@@ -277,21 +277,21 @@ export function ServerFormModal({ parentId, onClose }: Props) {
             )}
           </div>
 
-          {/* 传输类型 */}
+          {/* 传输类型（HTTP 在前：远程连接是更常用的新建场景） */}
           <div>
             <label className="label">连接方式</label>
             <div className="flex gap-2">
-              <Radio
-                checked={cfg.transport_type === "stdio"}
-                onChange={() => patch({ transport_type: "stdio" })}
-                label="stdio（本地子进程）"
-                desc="通过命令在本机启动，如 npx / uvx"
-              />
               <Radio
                 checked={cfg.transport_type === "streamable_http"}
                 onChange={() => patch({ transport_type: "streamable_http" })}
                 label="Streamable HTTP（远程）"
                 desc="连接远程 MCP 服务地址"
+              />
+              <Radio
+                checked={cfg.transport_type === "stdio"}
+                onChange={() => patch({ transport_type: "stdio" })}
+                label="stdio（本地子进程）"
+                desc="通过命令在本机启动，如 npx / uvx"
               />
             </div>
           </div>
