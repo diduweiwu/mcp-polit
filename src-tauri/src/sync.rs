@@ -124,26 +124,51 @@ pub async fn push_project(
     };
     let repo = std::path::PathBuf::from(&dir);
     if !repo.is_dir() {
-        logs.push(entry("error", format!("同步目录不存在：{dir}")));
+        logs.push(entry("error", format!(
+            "同步目录不存在：{dir}。目录可能被移动或删除，请在项目设置重新绑定同步目录（或恢复原目录）"
+        )));
         return logs;
     }
-    ensure_git_repo(&repo, &mut logs).await;
+    if !ensure_git_repo(&repo, &mut logs).await {
+        return logs;
+    }
     let branch = current_branch(&repo).await;
-
-    // 同步远端基线。实时同步（自动导出）让工作树常驻未提交改动，脏树直接 pull
-    // 会因文件冲突失败，加 --autostash 先暂存本地改动、拉取后自动恢复
-    // （随后 add -A 提交的仍是本地导出的完整内容）
-    let dirty = git_async(&repo, &["status", "--porcelain"])
+    // 是否配置了远端：没有远端就跳过 pull/push（本地仓库提交即可，不再刷 pull/push 警告）
+    let has_remote = git_async(&repo, &["remote"])
         .await
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    let pull_args: Vec<&str> = if dirty {
-        vec!["pull", "--ff-only", "--autostash"]
+
+    // 同步远端基线。实时同步（自动导出）让工作树常驻未提交改动，脏树直接 pull
+    // 会因文件冲突失败，加 --autostash 先暂存本地改动、拉取后自动恢复
+    // （随后 add -A 提交的仍是本地导出的完整内容）。
+    // ⚠ 显式指定 `origin <分支>`：本地分支可能没有 upstream tracking 配置
+    // （用户手动 `git push origin <分支>` 不带 -u 不会建立），裸 `git pull` 会报
+    // 「no tracking information」——在哪个分支并不代表 pull 能找到远端基线
+    if has_remote {
+        let dirty = git_async(&repo, &["status", "--porcelain"])
+            .await
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let pull_args: Vec<&str> = if dirty {
+            vec!["pull", "origin", &branch, "--ff-only", "--autostash"]
+        } else {
+            vec!["pull", "origin", &branch, "--ff-only"]
+        };
+        if let Err(e) = git_async(&repo, &pull_args).await {
+            if is_conflict_error(&e) {
+                // 远端与本地历史分叉（无法快进）等冲突：继续提交推送只会再被拒绝，
+                // 中止本次推送并让用户手动处理（强行自动合并可能产生意料之外的合并结果）
+                logs.push(entry("error", format!(
+                    "git pull 遇到冲突（分支 {branch}）：远端与本地历史分叉，无法自动合并，已中止本次推送。\
+                     请在同步目录「{dir}」手动处理（如 git pull 合并解决冲突或 git pull --rebase）后重新推送"
+                )));
+                return logs;
+            }
+            logs.push(entry("warn", format!("git pull 失败（分支 {branch}，继续推送本地内容）：{e}")));
+        }
     } else {
-        vec!["pull", "--ff-only"]
-    };
-    if let Err(e) = git_async(&repo, &pull_args).await {
-        logs.push(entry("warn", format!("git pull 失败（分支 {branch}，继续推送本地内容）：{e}")));
+        logs.push(entry("info", "未配置远端仓库：跳过远端同步，仅提交到本地仓库".into()));
     }
 
     // 导出该项目（配置明文，json 即完整可用配置）
@@ -153,7 +178,9 @@ pub async fn push_project(
         if let Err(e) =
             write_project_files(&repo, &project.name, &nodes, &servers, environments.as_deref())
         {
-            logs.push(entry("error", format!("写入同步文件失败：{e}")));
+            logs.push(entry("error", format!(
+                "写入同步文件失败：{e}。请检查磁盘空间与目录权限（或文件是否被其他程序占用）后重试"
+            )));
             return logs;
         }
         logs.push(entry("info", format!(
@@ -173,20 +200,81 @@ pub async fn push_project(
         .filter(|s| !s.is_empty())
         .map(String::from)
         .unwrap_or_else(|| "MCPilot 配置同步".into());
-    let _ = git_async(&repo, &["add", "-A"]).await;
+    // 本地是否有未推送的提交（HEAD 与远端跟踪分支比对；远端分支不存在视为有差异）：
+    // 「内容无变化」时用它区分「无需推送」与「需要补推上次失败的提交」
+    let unpushed = if has_remote {
+        match (
+            git_async(&repo, &["rev-parse", "HEAD"]).await.ok(),
+            git_async(&repo, &["rev-parse", &format!("origin/{branch}")]).await.ok(),
+        ) {
+            (Some(head), Some(remote_head)) => head.trim() != remote_head.trim(),
+            _ => true,
+        }
+    } else {
+        false
+    };
+    // 暂存全部变更：失败（如 .git/index.lock 被并发 git 占用、文件权限异常）会让
+    // 提交拿到旧内容甚至静默无提交，必须中止并提示手动处理，不能吞掉
+    if let Err(e) = git_async(&repo, &["add", "-A"]).await {
+        logs.push(entry("error", format!(
+            "git add 失败（分支 {branch}）：{e}。常见原因是 git 并发占用（index.lock）或文件权限异常，\
+             请在同步目录「{dir}」手动处理后重试"
+        )));
+        return logs;
+    }
+    let mut nothing_new = false;
     match git_async(&repo, &["-c", "user.name=MCPilot", "-c", "user.email=mcpilot@local", "commit", "-m", &commit_msg]).await {
-        Ok(_) => {
-            logs.push(entry("info", format!("已提交到本地仓库（分支 {branch}）")));
-            match git_async(&repo, &["push"]).await {
-                Ok(_) => logs.push(entry("info", format!("已推送到远端（分支 {branch}）"))),
-                Err(e) => logs.push(entry("warn", format!("git push 失败（分支 {branch}，本地提交已完成，可稍后手动推送）：{e}"))),
-            }
+        Ok(_) => logs.push(entry("info", format!("已提交到本地仓库（分支 {branch}）"))),
+        Err(e) if e.contains("nothing to commit") => {
+            // 无变化不是错误（git 把这条提示打在 stdout 且退出码非 0）；
+            // 是否跳过推送由下方按「本地是否有未推送提交」决定（有则补推，无则提示无需推送）
+            nothing_new = true;
+            logs.push(entry("info", if unpushed {
+                "内容无变化，但本地有未推送成功的提交，本次将补推".into()
+            } else {
+                "内容无变化，无需推送".into()
+            }));
+        }
+        Err(e) if is_conflict_error(&e) => {
+            // 工作区存在未解决的冲突（unmerged）：提交无从谈起，让用户手动处理
+            logs.push(entry("error", format!(
+                "git commit 失败（分支 {branch}）：工作区存在未解决的冲突。\
+                 请在同步目录「{dir}」手动解决冲突（编辑冲突文件后 git add）再重新推送"
+            )));
+            return logs;
         }
         Err(e) => {
-            if e.contains("nothing to commit") {
-                logs.push(entry("info", "内容无变化，未产生新提交".into()));
-            } else {
-                logs.push(entry("error", format!("git commit 失败（分支 {branch}）：{e}")));
+            logs.push(entry("error", format!("git commit 失败（分支 {branch}）：{e}")));
+            return logs;
+        }
+    }
+
+    // 推送：带 -u 建立/刷新 upstream tracking（用户手动 `git push origin <分支>` 不会建立，
+    // 补齐后裸 git pull/push 也能用）；显式指定分支，不依赖用户本地 push.default 配置。
+    // 内容无变化且本地与远端一致时跳过（提示「无需推送」）；有未推送的提交时补推
+    let has_commit = git_async(&repo, &["rev-parse", "--verify", "HEAD"]).await.is_ok();
+    if !has_remote {
+        logs.push(entry("info", format!(
+            "未配置远端仓库，内容已提交到本地（分支 {branch}）；需要远端备份时可手动 git remote add 后重新推送"
+        )));
+    } else if !has_commit {
+        logs.push(entry("info", "仓库还没有任何提交，跳过推送".into()));
+    } else if nothing_new && !unpushed {
+        logs.push(entry("info", "内容无变化，本地与远端一致，无需推送".into()));
+    } else {
+        match git_async(&repo, &["push", "-u", "origin", &branch]).await {
+            Ok(_) => logs.push(entry("info", format!("已推送到远端（分支 {branch}，已设置 upstream）"))),
+            Err(e) => {
+                if is_conflict_error(&e) {
+                    // 远端有本地没有的新提交（历史分叉）：本地提交已保留，需用户手动对齐后重推
+                    logs.push(entry("error", format!(
+                        "推送被拒绝（分支 {branch}）：远端有本地没有的新提交（历史分叉），本地提交已保留。\
+                         请在同步目录「{dir}」手动处理：git pull --rebase 解决可能的冲突后重新推送；\
+                         确认要覆盖远端历史时再使用 git push --force"
+                    )));
+                } else {
+                    logs.push(entry("warn", format!("git push 失败（分支 {branch}，本地提交已完成，可稍后手动推送）：{e}")));
+                }
             }
         }
     }
@@ -287,6 +375,22 @@ async fn current_branch(repo: &Path) -> String {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "?".into())
+}
+
+/// 判断 git 错误是否属于「历史分叉 / 冲突」类（需要用户手动处理，自动重试无意义）：
+/// push 被拒（non-fast-forward / fetch first）、pull 无法快进、autostash 恢复冲突、
+/// 工作区存在未解决冲突（unmerged）等。git 的 stderr 已并入错误串，按关键词识别。
+fn is_conflict_error(e: &str) -> bool {
+    let s = e.to_lowercase();
+    s.contains("non-fast-forward")
+        || s.contains("fetch first")
+        || s.contains("rejected")
+        || s.contains("not possible to fast-forward")
+        || s.contains("conflict")
+        || s.contains("merge failed")
+        || s.contains("unmerged")
+        || s.contains("needs merge")
+        || s.contains("would be overwritten")
 }
 
 /// 项目绑定新的空同步目录后，把项目当前数据迁移进去：导出 JSON + 创建初始提交。
@@ -614,11 +718,22 @@ fn export_git_tree(repo: &Path, git_ref: &str) -> Result<std::path::PathBuf, Str
 }
 
 /// 目录不是 git 仓库时自动 init。
-async fn ensure_git_repo(repo: &Path, logs: &mut Vec<LogEntry>) {
-    if !repo.join(".git").exists() {
-        match git_async(repo, &["init"]).await {
-            Ok(_) => logs.push(entry("info", format!("{} 不是 git 仓库，已自动 git init", repo.display()))),
-            Err(e) => logs.push(entry("error", format!("git init 失败：{e}"))),
+/// 确保目录是 git 仓库（没有 .git 则自动 init）。返回 false 表示初始化失败
+/// （日志已写入错误与手动处理引导，调用方应中止后续 git 操作）。
+async fn ensure_git_repo(repo: &Path, logs: &mut Vec<LogEntry>) -> bool {
+    if repo.join(".git").exists() {
+        return true;
+    }
+    match git_async(repo, &["init"]).await {
+        Ok(_) => {
+            logs.push(entry("info", format!("{} 不是 git 仓库，已自动 git init", repo.display())));
+            true
+        }
+        Err(e) => {
+            logs.push(entry("error", format!(
+                "git init 失败：{e}。请检查 git 是否可用、目录权限后手动处理（或在同步目录手动执行 git init）"
+            )));
+            false
         }
     }
 }
@@ -766,10 +881,24 @@ fn write_project_files(
     environments: Option<&[SyncEnvironment]>,
 ) -> Result<(), String> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // 只清理应用管理的文件，保留 `.git`：树形镜像布局后同步目录本身是仓库根，
+    // 整目录删除会把仓库炸掉（推送报 not a git repository、分支读取失败）。
+    // `.git` 兼容目录与 worktree 的文件形态，统一按文件名判断
     if dir.exists() {
-        std::fs::remove_dir_all(dir).map_err(|e| format!("清理旧目录失败：{e}"))?;
+        for entry in std::fs::read_dir(dir).map_err(|e| format!("读取同步目录失败：{e}"))? {
+            let path = entry.map_err(|e| format!("读取同步目录失败：{e}"))?.path();
+            if path.file_name().is_some_and(|n| n == ".git") {
+                continue;
+            }
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).map_err(|e| format!("清理旧目录失败：{e}"))?;
+            } else {
+                std::fs::remove_file(&path).map_err(|e| format!("清理旧文件失败：{e}"))?;
+            }
+        }
+    } else {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
     let tree = serde_json::json!({ "project": project_name, "nodes": nodes });
     std::fs::write(dir.join(TREE_META_FILE), serde_json::to_string_pretty(&tree).unwrap_or_default() + "\n")
         .map_err(|e| format!("写入 tree.json 失败：{e}"))?;
@@ -1228,7 +1357,12 @@ async fn git_async(repo: &Path, args: &[&str]) -> Result<String, String> {
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(format!("git {}：{}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()))
+        // git 会把部分失败提示打在 stdout（如空仓库提交的「nothing to commit」）：
+        // stderr 为空时并入 stdout，避免出现无内容的报错，也让上层能按输出内容分类处理
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        Err(format!("git {}：{}", args.join(" "), detail))
     }
 }
 
@@ -1462,6 +1596,124 @@ mod tests {
         conn
     }
 
+    /// 在目录执行 git 命令，返回 (成功?, stderr)（冲突识别测试用真实 git 输出）。
+    fn run_git(dir: &std::path::Path, args: &[&str]) -> (bool, String) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )
+    }
+
+    /// 冲突识别：用真实 git 制造「push 被拒（历史分叉）」「pull 无法快进」两种场景，
+    /// 确认关键词表能命中真实 stderr（不是拍脑袋的关键词）。
+    #[test]
+    fn 冲突识别_命中真实git分叉输出() {
+        let base = std::env::temp_dir().join(format!("mcpilot-conflict-detect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let origin = base.join("origin.git");
+        assert!(run_git(&base, &["init", "--bare", origin.to_str().unwrap()]).0);
+        let work = base.join("work");
+        assert!(run_git(&base, &["clone", origin.to_str().unwrap(), work.to_str().unwrap()]).0);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        assert!(run_git(&work, &["add", "-A"]).0);
+        assert!(run_git(&work, &["commit", "-m", "init"]).0);
+        assert!(run_git(&work, &["push", "-u", "origin", "HEAD"]).0, "首次推送应成功");
+
+        // 第二个克隆提交并推送 → origin 领先 work 一个提交（历史分叉前置条件）
+        let work2 = base.join("work2");
+        assert!(run_git(&base, &["clone", origin.to_str().unwrap(), work2.to_str().unwrap()]).0);
+        std::fs::write(work2.join("b.txt"), "b").unwrap();
+        assert!(run_git(&work2, &["add", "-A"]).0);
+        assert!(run_git(&work2, &["commit", "-m", "from-work2"]).0);
+        assert!(run_git(&work2, &["push"]).0, "work2 推送应成功");
+
+        // work 本地提交后 push：真实 git 报 non-fast-forward / rejected
+        std::fs::write(work.join("c.txt"), "c").unwrap();
+        assert!(run_git(&work, &["add", "-A"]).0);
+        assert!(run_git(&work, &["commit", "-m", "from-work"]).0);
+        let (ok, stderr) = run_git(&work, &["push"]);
+        assert!(!ok, "push 应被拒绝");
+        let push_err = format!("git push：{stderr}");
+        assert!(is_conflict_error(&push_err), "push 被拒未被识别：{push_err}");
+
+        // work 本地新提交后 pull --ff-only：真实 git 报 not possible to fast-forward
+        std::fs::write(work.join("d.txt"), "d").unwrap();
+        assert!(run_git(&work, &["add", "-A"]).0);
+        assert!(run_git(&work, &["commit", "-m", "local-only"]).0);
+        let (ok, stderr) = run_git(&work, &["pull", "--ff-only"]);
+        assert!(!ok, "pull 应失败");
+        let pull_err = format!("git pull --ff-only：{stderr}");
+        assert!(is_conflict_error(&pull_err), "pull 分叉未被识别：{pull_err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 推送/拉取显式指定 origin + 分支：不依赖 upstream tracking 配置。
+    /// 场景还原：用户手动 `git push origin <分支>`（不带 -u）不会建立 tracking，
+    /// 裸 `git pull`/`git push` 会报 no tracking information / no upstream branch。
+    #[test]
+    fn 推送拉取_不依赖upstream配置() {
+        let base = std::env::temp_dir().join(format!("mcpilot-no-upstream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let origin = base.join("origin.git");
+        assert!(run_git(&base, &["init", "--bare", origin.to_str().unwrap()]).0);
+        // work：手动 init + remote add（不 clone，天然没有 upstream 配置；固定分支名 master）
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        assert!(run_git(&work, &["init", "-b", "master"]).0);
+        assert!(run_git(&work, &["remote", "add", "origin", origin.to_str().unwrap()]).0);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        assert!(run_git(&work, &["add", "-A"]).0);
+        assert!(run_git(&work, &["commit", "-m", "init"]).0);
+        assert!(run_git(&work, &["push", "origin", "master"]).0, "手动推送（无 -u）应成功");
+
+        // 此时裸 pull / 裸 push 都会失败（无 tracking 信息）——还原用户遇到的报错
+        let (ok, stderr) = run_git(&work, &["pull", "--ff-only"]);
+        assert!(!ok);
+        assert!(stderr.to_lowercase().contains("tracking"), "实际：{stderr}");
+        let (ok, stderr) = run_git(&work, &["push"]);
+        assert!(!ok);
+        assert!(stderr.to_lowercase().contains("upstream"), "实际：{stderr}");
+
+        // 修复路径：显式 origin + 分支的 pull/push 成功，且 push -u 补齐 tracking
+        assert!(run_git(&work, &["pull", "origin", "master", "--ff-only"]).0, "显式 pull 应成功");
+        std::fs::write(work.join("b.txt"), "b").unwrap();
+        assert!(run_git(&work, &["add", "-A"]).0);
+        assert!(run_git(&work, &["commit", "-m", "b"]).0);
+        assert!(run_git(&work, &["push", "-u", "origin", "master"]).0, "显式 push -u 应成功");
+        // 补齐 upstream 后，裸 pull / 裸 push 也恢复可用
+        assert!(run_git(&work, &["pull", "--ff-only"]).0);
+        assert!(run_git(&work, &["push"]).0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// git_async 失败时必须并入 stdout：git 把「nothing to commit」这类提示打在
+    /// stdout 且退出码非 0，只读 stderr 会得到空错误串（推送误报「git commit 失败：」的实际回归）。
+    #[tokio::test]
+    async fn git异步命令_失败时stdout并入错误() {
+        let base = std::env::temp_dir().join(format!("mcpilot-git-async-stdout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(run_git(&base, &["init", "-b", "master"]).0);
+        // 空仓库无任何文件：commit 退出码非 0，提示「nothing to commit」在 stdout
+        let e = git_async(&base, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "x"])
+            .await
+            .unwrap_err();
+        assert!(e.contains("nothing to commit"), "stdout 未并入错误：{e}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// 构造 tree.json 树节点（测试便捷封装）。
     fn node(id: &str, parent: Option<&str>, ty: &str, name: &str, order: i64) -> SyncNode {
         SyncNode {
@@ -1650,7 +1902,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 环境库导出：environments.json 落盘、解析往返一致；不被当成 Server 配置导入；
+    /// 导出清理旧文件时必须保留 `.git`：同步目录本身是仓库根，整目录删除会让
+    /// 推送报 not a git repository、分支读取失败（v0.1.11~0.1.14 的实际回归）。
+    #[test]
+    fn 导出保留git目录与worktree文件形态() {
+        let base = std::env::temp_dir().join(format!("mcpilot-export-keep-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // 仓库形态：.git 目录 + 旧导出残留文件
+        std::fs::create_dir_all(base.join(".git/objects")).unwrap();
+        std::fs::write(base.join(".git/HEAD"), "ref: refs/heads/master\n").unwrap();
+        std::fs::write(base.join("旧文件.json"), "{}").unwrap();
+        let nodes = vec![node("n0", None, "server", "root", 0)];
+        let layout = compute_layout(&nodes);
+        let servers = vec![(layout["n0"].clone(), server_cfg("node root.js"))];
+        write_project_files(&base, "p", &nodes, &servers, None).unwrap();
+
+        // .git 目录保留（含内容），旧文件被清理，新文件正常写入
+        assert!(base.join(".git/HEAD").is_file());
+        assert!(!base.join("旧文件.json").exists());
+        assert!(base.join("tree.json").is_file());
+        assert!(base.join("root.json").is_file());
+
+        // worktree 形态：.git 是文件（内容为 gitdir: 指向）同样保留
+        let wt = std::env::temp_dir().join(format!("mcpilot-export-keep-git-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), "gitdir: /somewhere/else\n").unwrap();
+        write_project_files(&wt, "p", &nodes, &servers, None).unwrap();
+        assert!(wt.join(".git").is_file());
+        assert!(wt.join("tree.json").is_file());
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&wt);
+    }
     /// 名为 environments 的根层 Server 自动加后缀消解，不与元数据文件冲突。
     #[test]
     fn 环境库文件往返且不被当成server() {
