@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
+  AlertTriangle,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -29,7 +30,6 @@ import {
   Terminal,
   Trash2,
   Upload,
-  X,
 } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
@@ -478,7 +478,8 @@ export function TreePane() {
 /**
  * 同步条：项目绑定了 git 目录时显示。
  * 分支下拉（点击切换，checkout 后刷新树）+ 推送（弹窗填写提交信息后 commit+push）/
- * 拉取（pull+导入）；同步结果与错误以横幅形式就地提醒，错误需手动关闭。
+ * 拉取（pull+导入）；同步结果与错误压缩为栏头一枚状态图标（按级别变色，
+ * 悬浮显示全文、点击关闭），不占正文空间。
  */
 function SyncBar() {
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -625,6 +626,29 @@ function SyncBar() {
         ) : (
           <span className="text-[11.5px] text-inksoft/70">Git 同步</span>
         )}
+        {/* 同步结果/错误提醒：压缩成栏头一枚状态图标（悬浮显示全文，点击关闭），
+            不再占大块横幅空间；error 红 / warn 黄 / info 绿 */}
+        {notice && (
+          <button
+            className={`shrink-0 rounded p-0.5 transition-colors hover:bg-panel ${
+              notice.level === "error"
+                ? "text-err"
+                : notice.level === "warn"
+                  ? "text-warn"
+                  : "text-ok"
+            }`}
+            title={`${notice.text}（点击关闭）`}
+            onClick={() => setNotice(null)}
+          >
+            {notice.level === "info" ? (
+              <CheckCircle2 size={13} />
+            ) : notice.level === "warn" ? (
+              <AlertTriangle size={13} />
+            ) : (
+              <AlertCircle size={13} />
+            )}
+          </button>
+        )}
         <span className="flex-1" />
         <button
           className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
@@ -646,33 +670,6 @@ function SyncBar() {
           {busy === "pull" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
         </button>
       </div>
-
-      {/* 结果/错误提醒横幅：error/warn 常驻（手动关闭），info 绿色 6s 自动消失 */}
-      {notice && (
-        <div
-          className={`flex items-start gap-1.5 border-b px-2 py-1.5 text-[11.5px] leading-relaxed anim-fade-in ${
-            notice.level === "error"
-              ? "border-err/20 bg-err/10 text-err"
-              : notice.level === "warn"
-                ? "border-warn/20 bg-warn/10 text-warn"
-                : "border-ok/20 bg-ok/10 text-ok"
-          }`}
-        >
-          {notice.level === "info" ? (
-            <CheckCircle2 size={13} className="mt-0.5 shrink-0" />
-          ) : (
-            <AlertCircle size={13} className="mt-0.5 shrink-0" />
-          )}
-          <span className="min-w-0 break-all">{notice.text}</span>
-          <button
-            className="ml-auto shrink-0 rounded p-0.5 hover:bg-panel/60"
-            title="关闭提醒"
-            onClick={() => setNotice(null)}
-          >
-            <X size={12} />
-          </button>
-        </div>
-      )}
 
       {/* 推送确认弹窗：填写提交信息（可留空用默认），展示目标项目与分支 */}
       <Modal
@@ -710,9 +707,9 @@ function SyncBar() {
   );
 }
 
-/** 同步条提醒横幅的数据 */
+/** 同步条提醒的数据（栏头状态图标展示：图标按级别变色，悬浮显示全文） */
 interface SyncNotice {
-  /** 提醒级别：error/warn 常驻红色/黄色，info 绿色自动消失 */
+  /** 提醒级别：error 红 / warn 黄 / info 绿（info 6s 自动消失，其余常驻到手动关闭） */
   level: "info" | "warn" | "error";
   /** 展示文本（含手动处理引导） */
   text: string;
