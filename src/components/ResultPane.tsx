@@ -15,7 +15,6 @@ import {
   History,
   ListTree,
   Loader2,
-  PanelLeftOpen,
   ScrollText,
   Search,
   Trash2,
@@ -34,8 +33,6 @@ type PaneTab = "results" | "history";
 export function ResultPane() {
   const { results, running, clearResults, history, clearHistory } =
     useAppStore();
-  /** 参数栏折叠时在栏头提供展开入口 */
-  const paramsCollapsed = useAppStore((s) => s.paramsCollapsed);
   const [tab, setTab] = useState<PaneTab>("results");
   const [logOpen, setLogOpen] = useState(false);
 
@@ -43,16 +40,6 @@ export function ResultPane() {
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-2">
         <div className="flex min-w-0 items-center">
-          {/* 参数栏折叠时提供展开入口（折叠栏的展开按钮放在右侧第一个可见栏） */}
-          {paramsCollapsed && (
-            <button
-              className="mr-1 rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
-              title="展开参数栏"
-              onClick={() => useAppStore.getState().toggleParamsCollapsed()}
-            >
-              <PanelLeftOpen size={14} />
-            </button>
-          )}
           {/* 标签页切换 */}
           <div className="flex overflow-hidden rounded-md border border-line">
             <TabBtn active={tab === "results"} onClick={() => setTab("results")}>

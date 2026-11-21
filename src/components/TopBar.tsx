@@ -294,7 +294,7 @@ export function TopBar() {
       <div className="flex items-center gap-1.5">
         <button
           className="btn-ghost h-8 !px-2"
-          title="四栏均分宽度"
+          title="四栏均分宽度（有折叠栏时先全部展开）"
           onClick={() => useAppStore.getState().equalizeLayout()}
         >
           <Columns3 size={15} />

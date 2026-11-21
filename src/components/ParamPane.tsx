@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { json } from "@codemirror/lang-json";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { BookmarkPlus, Play, Table2, Braces, Loader2, SlidersHorizontal, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { BookmarkPlus, Play, Table2, Braces, Loader2, SlidersHorizontal, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../store";
 import { buildDefaults, pruneArgs, SchemaForm, type FormValue } from "./SchemaForm";
 import { Modal, SearchSelect } from "./ui";
@@ -366,26 +366,9 @@ function PaneHeader({
   /** 收起本栏（由父级播放淡出动画后折叠） */
   onCollapse: () => void;
 }) {
-  const treeCollapsed = useAppStore((s) => s.treeCollapsed);
-  const toolsCollapsed = useAppStore((s) => s.toolsCollapsed);
-  /** 左邻折叠栏的展开按钮（icon + title 区分目标栏） */
-  const expandBtn = (title: string, action: () => void) => (
-    <button
-      className="mr-1 rounded p-1 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
-      title={title}
-      onClick={action}
-    >
-      <PanelLeftOpen size={14} />
-    </button>
-  );
-
   return (
     <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
       <div className="flex min-w-0 items-center">
-        {treeCollapsed &&
-          expandBtn("展开资源树", () => useAppStore.getState().toggleTreeCollapsed())}
-        {toolsCollapsed &&
-          expandBtn("展开工具列表", () => useAppStore.getState().toggleToolsCollapsed())}
         <span className="truncate text-[12px] font-semibold text-inksoft">{title}</span>
       </div>
       <div className="flex shrink-0 items-center gap-1">
