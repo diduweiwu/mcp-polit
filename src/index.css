@@ -85,6 +85,15 @@ input,
 textarea {
   cursor: text;
 }
+/* 勾选类控件是点击目标不是文本输入：手型光标（禁用态用禁止光标） */
+input[type="checkbox"],
+input[type="radio"] {
+  cursor: pointer;
+}
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  cursor: not-allowed;
+}
 
 /* ---------- 过渡动画 ---------- */
 
