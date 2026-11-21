@@ -1,10 +1,11 @@
 /**
- * 通用 UI 原语：模态框、下拉菜单、状态点、空态占位。
+ * 通用 UI 原语：模态框、下拉菜单、悬浮提示、状态点、空态占位。
  * 保持零第三方 UI 依赖，风格与整体设计一致。
  */
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -272,6 +273,152 @@ export function MenuItem({
       {icon}
       {label}
     </button>
+  );
+}
+
+/** 悬浮提示属性 */
+interface TooltipProps {
+  /** 提示内容（较长时自动换行） */
+  content: string;
+  /** 触发元素（悬浮在其上时显示气泡） */
+  children: ReactNode;
+  /** 弹出方位：bottom 在触发元素下方 / top 在上方；默认 bottom */
+  side?: "bottom" | "top";
+  /** 水平对齐：start 左对齐 / end 右对齐（触发元素靠右缘时防气泡溢出窗口）；默认 start */
+  align?: "start" | "end";
+  /** 置 true 时禁用悬浮提示（如点击已弹出内容相同的面板时避免重复展示）；默认 false */
+  disabled?: boolean;
+}
+
+/**
+ * 悬浮提示气泡：替代原生 title 属性的自定义提示。
+ *
+ * 背景：macOS 的 WKWebView（Tauri）不渲染原生 title tooltip（WebKit 已知限制，
+ * WebView2 正常），导致 title 写的信息全平台表现不一致，故用本组件统一实现。
+ *
+ * 实现：气泡通过 Portal 渲染到 body 并用 fixed 定位——Allotment 分栏容器有
+ * overflow-hidden，absolute 气泡溢出栏宽会被裁剪（弹窗/右键菜单 Portal 的同一原因）。
+ * 显示时按触发元素位置计算坐标，再用气泡自身 offsetWidth/offsetHeight（布局尺寸，
+ * 不受入场 scale 动画影响）做视口边缘收拢，保证长文本不被窗口边缘截断。
+ *
+ * 交互：悬浮约 250ms 后显示（快速滑过不闪现），移开后约 120ms 隐藏（缓冲气泡
+ * 与触发元素之间的间隙）；页面滚动/窗口缩放时气泡跟随触发元素重新定位
+ * （fixed 定位不随文档滚动），触发元素滚出视口则隐藏；
+ * 气泡为纯展示（pointer-events-none），不阻挡下方点击。
+ *
+ * 使用示例：
+ * ```tsx
+ * <Tooltip content="推送：导出当前配置并 commit + push">
+ *   <button><Upload size={13} /></button>
+ * </Tooltip>
+ * ```
+ */
+export function Tooltip({
+  content,
+  children,
+  side = "bottom",
+  align = "start",
+  disabled = false,
+}: TooltipProps) {
+  const [show, setShow] = useState(false);
+  /** 气泡 fixed 定位坐标（显示后由布局 effect 按气泡实际尺寸精修） */
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  /** 延迟显示定时器 */
+  const showTimer = useRef<number | undefined>(undefined);
+  /** 延迟隐藏定时器 */
+  const hideTimer = useRef<number | undefined>(undefined);
+  /** 触发元素包装层（测量锚点） */
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+  /** 气泡元素（测量实际宽高用） */
+  const bubbleRef = useRef<HTMLSpanElement | null>(null);
+
+  /** 清理两个定时器 */
+  const clearTimers = () => {
+    window.clearTimeout(showTimer.current);
+    window.clearTimeout(hideTimer.current);
+  };
+
+  /* 卸载时清理定时器，防止对已卸载组件 setState */
+  useEffect(() => clearTimers, []);
+
+  /**
+   * 依据触发元素与气泡实际尺寸计算气泡坐标，并收拢进视口边缘。
+   * 气泡未挂载时（显示前）宽高按最大宽度估算，挂载后的布局 effect 会精修。
+   */
+  const placeBubble = (): { top: number; left: number } | null => {
+    const el = wrapRef.current;
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    const w = bubbleRef.current?.offsetWidth ?? 320;
+    const h = bubbleRef.current?.offsetHeight ?? 40;
+    let left = align === "end" ? r.right - w : r.left;
+    left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+    const top = side === "bottom" ? r.bottom + 5 : r.top - h - 5;
+    return { top, left };
+  };
+
+  /* 显示后按气泡实际尺寸精修位置（挂载前布局 effect 先于绘制执行，无跳位） */
+  useLayoutEffect(() => {
+    if (!show) return;
+    const p = placeBubble();
+    if (p && (p.top !== pos?.top || p.left !== pos?.left)) setPos(p);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [show, side, align]);
+
+  /* 气泡显示期间页面滚动/窗口缩放时跟随触发元素重新定位（fixed 定位不随文档滚动）；
+     触发元素滚出视口则隐藏，避免气泡悬空指向不可见内容 */
+  useEffect(() => {
+    if (!show) return;
+    const reposition = () => {
+      const el = wrapRef.current;
+      if (!el) return setShow(false);
+      const r = el.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight || r.right < 0 || r.left > window.innerWidth) {
+        setShow(false);
+        return;
+      }
+      setPos(placeBubble());
+    };
+    window.addEventListener("scroll", reposition, true);
+    window.addEventListener("resize", reposition);
+    return () => {
+      window.removeEventListener("scroll", reposition, true);
+      window.removeEventListener("resize", reposition);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [show, side, align]);
+
+  /** 悬浮进入：清除待执行的隐藏后延迟显示（先按估算坐标放置，挂载后精修） */
+  const handleEnter = () => {
+    clearTimers();
+    showTimer.current = window.setTimeout(() => {
+      setPos(placeBubble());
+      setShow(true);
+    }, 250);
+  };
+
+  /** 悬浮离开：延迟隐藏（给滑过间隙留缓冲） */
+  const handleLeave = () => {
+    clearTimers();
+    hideTimer.current = window.setTimeout(() => setShow(false), 120);
+  };
+
+  return (
+    <span className="relative inline-flex" ref={wrapRef} onMouseEnter={handleEnter} onMouseLeave={handleLeave}>
+      {children}
+      {show && !disabled && pos &&
+        createPortal(
+          <span
+            role="tooltip"
+            ref={bubbleRef}
+            style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 45 }}
+            className="anim-pop-in pointer-events-none w-max max-w-[320px] whitespace-pre-wrap rounded-md border border-line bg-panel px-2.5 py-1.5 text-[11.5px] leading-relaxed text-ink shadow-lg"
+          >
+            {content}
+          </span>,
+          document.body,
+        )}
+    </span>
   );
 }
 

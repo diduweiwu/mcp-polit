@@ -3,7 +3,7 @@
  *
  * 支持：目录无限嵌套、右键菜单（新建/复制/重命名/删除/编辑配置/断开）、拖拽移动、连接状态点。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
@@ -35,7 +35,7 @@ import * as api from "../api";
 import { useAppStore } from "../store";
 import { buildTree, collectIds, siblingNameConflict, type TreeEntry } from "../lib/tree";
 import type { BranchInfo, TreeNode } from "../types";
-import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot } from "./ui";
+import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot, Tooltip } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
 /**
@@ -227,22 +227,6 @@ export function TreePane() {
           {activeName ? `${activeName} · 资源树` : "资源树"}
         </span>
         <div className="flex items-center gap-0.5">
-          <button
-            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-            title="新建根目录"
-            disabled={noProject}
-            onClick={() => newFolderUnder(null)}
-          >
-            <FolderPlus size={14} />
-          </button>
-          <button
-            className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
-            title="新建 Server"
-            disabled={noProject}
-            onClick={() => newUnder(null)}
-          >
-            <Server size={14} />
-          </button>
           <button
             className="rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
             title={activeSyncDir ? "在文件管理器中打开项目目录" : "当前项目未绑定同步目录"}
@@ -478,8 +462,10 @@ export function TreePane() {
 /**
  * 同步条：项目绑定了 git 目录时显示。
  * 分支下拉（点击切换，checkout 后刷新树）+ 推送（弹窗填写提交信息后 commit+push）/
- * 拉取（pull+导入）；同步结果与错误压缩为栏头一枚状态图标（按级别变色，
- * 悬浮显示全文、点击关闭），不占正文空间。
+ * 拉取（pull+导入）；每 10s 定时检查仓库状态（外部删 .git / 手动 git init 恢复及时反映）；
+ * 目录读不到分支时推送/拉取先弹确认（自动 git init 是显式动作，不再静默成功）；
+ * 同步结果与错误压缩为栏头一枚状态图标（按级别变色，悬浮显示全文、点击弹详情弹窗，
+ * 常驻到下次同步结果替换），不占正文空间。
  */
 function SyncBar() {
   const activeProjectId = useAppStore((s) => s.activeProjectId);
@@ -487,30 +473,63 @@ function SyncBar() {
   const { addLogs, reloadNodes } = useAppStore();
   const [info, setInfo] = useState<BranchInfo | null>(null);
   const [busy, setBusy] = useState<"push" | "pull" | null>(null);
-  /** 结果/错误提醒横幅（info 自动消失，warn/error 常驻需手动关闭） */
+  /** 结果/错误提醒横幅（info 自动消失，warn/error 常驻：不提供手动清除，
+      直到下次同步产出新结果被替换——成功即绿色 info 自动消失=问题已解决） */
   const [notice, setNotice] = useState<SyncNotice | null>(null);
+  /** 同步结果详情弹窗（点击状态图标打开；Portal 到 body 不受分栏裁剪） */
+  const [noticeOpen, setNoticeOpen] = useState(false);
   /** 推送确认弹窗：填写提交信息（可留空用默认） */
   const [pushOpen, setPushOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
+  /** 推送/拉取前确认：目录读不到分支（非 git 仓库或 git 不可用）时先征求同意再自动初始化，不再静默成功 */
+  const [initConfirm, setInitConfirm] = useState<"push" | "pull" | null>(null);
+  /** 分支/仓库状态是否处于异常（定时检查用它防同一异常反复刷提醒） */
+  const branchBrokenRef = useRef(false);
 
   const hasSync = !!project?.sync_dir;
 
-  /* 项目切换/挂载时拉取分支信息；读取失败时横幅提醒（不再只静默写日志，否则同步条看不到分支名） */
-  useEffect(() => {
-    setInfo(null);
-    setNotice(null);
-    if (!hasSync || activeProjectId == null) return;
+  /**
+   * 读取分支信息（挂载/切项目/定时检查/同步完成 后共用）。
+   * 成功：更新分支下拉，并清除「分支读取失败」类提醒（目录可能被外部 git init 恢复）。
+   * 失败：清空下拉；仅在「正常 → 异常」跃迁时提醒，定时检查不反复刷同一告警。
+   */
+  const refreshBranches = useCallback((pid: number) => {
     api
-      .projectBranches(activeProjectId)
-      .then(setInfo)
+      .projectBranches(pid)
+      .then((next) => {
+        branchBrokenRef.current = false;
+        setInfo(next);
+        setNotice((n) => (n?.kind === "branch" ? null : n));
+      })
       .catch((e) => {
+        if (branchBrokenRef.current) return;
+        branchBrokenRef.current = true;
+        setInfo(null);
         useAppStore.getState().addLog("warn", String(e));
         setNotice({
           level: "warn",
-          text: `无法读取分支信息：${String(e)}。请检查同步目录是否存在、git 是否可用后手动处理`,
+          kind: "branch",
+          text: `无法读取分支信息：${String(e)}。同步目录可能不是 git 仓库（或 git 不可用），请检查目录后手动处理`,
         });
       });
-  }, [hasSync, activeProjectId]);
+  }, []);
+
+  /* 项目切换/挂载时读取分支信息；读取失败时图标提醒（不再只静默写日志，否则同步条看不到分支名） */
+  useEffect(() => {
+    branchBrokenRef.current = false;
+    setInfo(null);
+    setNotice(null);
+    if (!hasSync || activeProjectId == null) return;
+    refreshBranches(activeProjectId);
+  }, [hasSync, activeProjectId, refreshBranches]);
+
+  /* 定时检查仓库状态（10s）：外部删掉 .git / 手动 git init 恢复等变化及时反映到栏头，
+     分支下拉与推送/拉取按钮的确认逻辑随之更新 */
+  useEffect(() => {
+    if (!hasSync || activeProjectId == null) return;
+    const t = window.setInterval(() => refreshBranches(activeProjectId), 10_000);
+    return () => window.clearInterval(t);
+  }, [hasSync, activeProjectId, refreshBranches]);
 
   /* info 级提醒 6 秒后自动消失（仅清理仍然为 info 的横幅，避免误关新错误） */
   useEffect(() => {
@@ -531,17 +550,18 @@ function SyncBar() {
     const label = dir === "push" ? "推送" : "拉取";
     const err = logs.find((l) => l.level === "error");
     if (err) {
-      return {
-        level: "error",
-        text: `${label}失败：${err.message}。请检查同步目录 / 远端仓库（网络、权限、冲突）后手动处理，完整信息见日志面板`,
-      };
+      // 冲突类错误的后端日志已自带「手动处理」引导，不再重复拼接通用文案
+      const text = err.message.includes("手动处理")
+        ? `${label}失败：${err.message}，完整信息见日志面板`
+        : `${label}失败：${err.message}。请检查同步目录 / 远端仓库（网络、权限、冲突）后手动处理，完整信息见日志面板`;
+      return { level: "error", kind: "sync", text };
     }
     const warn = logs.find((l) => l.level === "warn");
     if (warn) {
-      return { level: "warn", text: `${label}完成但有警告：${warn.message}。建议检查处理，完整信息见日志面板` };
+      return { level: "warn", kind: "sync", text: `${label}完成但有警告：${warn.message}。建议检查处理，完整信息见日志面板` };
     }
     const ok = logs.length ? logs[logs.length - 1].message : `${label}完成`;
-    return { level: "info", text: `${label}完成：${ok}` };
+    return { level: "info", kind: "sync", text: `${label}完成：${ok}` };
   };
 
   /** 执行推送 / 拉取（push 传入弹窗填写的提交信息，可为 null 用默认） */
@@ -555,11 +575,15 @@ function SyncBar() {
       addLogs(logs);
       setNotice(noticeOf(logs, dir));
       if (dir === "pull") await reloadNodes();
+      /* 推送/拉取会改变仓库状态（如推送对旧版误删 .git 的目录自动 git init 重建、
+         首次提交让 unborn 分支诞生），完成后刷新分支下拉，无需重启应用 */
+      refreshBranches(project.id);
     } catch (e) {
       const label = dir === "push" ? "推送" : "拉取";
       useAppStore.getState().addLog("error", String(e));
       setNotice({
         level: "error",
+        kind: "sync",
         text: `${label}失败：${String(e)}。请检查同步目录 / 远端仓库后手动处理，完整信息见日志面板`,
       });
     } finally {
@@ -574,10 +598,10 @@ function SyncBar() {
       await api.projectCheckout(project.id, branch);
       const next = await api.projectBranches(project.id);
       setInfo(next);
-      setNotice({ level: "info", text: `已切换分支：${branch}（分支间内容可能不同，可点击「拉取」加载该分支配置）` });
+      setNotice({ level: "info", kind: "sync", text: `已切换分支：${branch}（分支间内容可能不同，可点击「拉取」加载该分支配置）` });
     } catch (e) {
       useAppStore.getState().addLog("error", String(e));
-      setNotice({ level: "error", text: `切换分支失败：${String(e)}。请检查仓库状态（可能有未提交改动）后手动处理` });
+      setNotice({ level: "error", kind: "sync", text: `切换分支失败：${String(e)}。请检查仓库状态（可能有未提交改动）后手动处理` });
     }
   };
 
@@ -585,6 +609,24 @@ function SyncBar() {
   const confirmPush = () => {
     setPushOpen(false);
     void doSync("push", commitMsg.trim() || null);
+  };
+
+  /**
+   * 推送/拉取入口（按钮共用）：目录读不到分支（非 git 仓库或 git 不可用）时
+   * 先弹确认征求同意——自动 git init 是显式动作，不再静默成功；正常目录行为不变。
+   */
+  const startSync = (dir: "push" | "pull") => {
+    if (busy != null) return;
+    if (info == null) {
+      setInitConfirm(dir);
+      return;
+    }
+    if (dir === "push") {
+      setCommitMsg("");
+      setPushOpen(true);
+    } else {
+      void doSync("pull");
+    }
   };
 
   return (
@@ -626,46 +668,52 @@ function SyncBar() {
         ) : (
           <span className="text-[11.5px] text-inksoft/70">Git 同步</span>
         )}
-        {/* 同步结果/错误提醒：压缩成栏头一枚状态图标（悬浮显示全文，点击关闭），
-            不再占大块横幅空间；error 红 / warn 黄 / info 绿 */}
+        {/* 同步结果/错误提醒：压缩成栏头一枚状态图标；悬浮显示全文气泡（自定义
+            Tooltip：WKWebView 不渲染原生 title），点击弹「同步结果」弹窗看全文——
+            详情不再用栏内下拉（窄栏下会被 overflow-hidden 裁剪，Portal 弹窗不受限）；
+            图标不因点击消失，常驻到下次同步结果替换；
+            error 红 / warn 黄 / info 绿 */}
         {notice && (
-          <button
-            className={`shrink-0 rounded p-0.5 transition-colors hover:bg-panel ${
-              notice.level === "error"
-                ? "text-err"
-                : notice.level === "warn"
-                  ? "text-warn"
-                  : "text-ok"
-            }`}
-            title={`${notice.text}（点击关闭）`}
-            onClick={() => setNotice(null)}
-          >
-            {notice.level === "info" ? (
-              <CheckCircle2 size={13} />
-            ) : notice.level === "warn" ? (
-              <AlertTriangle size={13} />
-            ) : (
-              <AlertCircle size={13} />
-            )}
-          </button>
+          <Tooltip content={`${notice.text}（点击查看详情）`}>
+            <button
+              aria-label={`同步结果提醒（点击查看详情）：${notice.text}`}
+              className={`shrink-0 rounded p-0.5 transition-colors hover:bg-panel ${
+                notice.level === "error"
+                  ? "text-err"
+                  : notice.level === "warn"
+                    ? "text-warn"
+                    : "text-ok"
+              }`}
+              onClick={() => setNoticeOpen(true)}
+            >
+              {notice.level === "info" ? (
+                <CheckCircle2 size={13} />
+              ) : notice.level === "warn" ? (
+                <AlertTriangle size={13} />
+              ) : (
+                <AlertCircle size={13} />
+              )}
+            </button>
+          </Tooltip>
         )}
         <span className="flex-1" />
         <button
           className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
-          title={`推送：导出当前配置并 commit + push${info ? `（分支 ${info.current}）` : ""}`}
+          title={info == null
+            ? "推送：当前读不到分支信息，点击后需确认自动初始化仓库"
+            : `推送：导出当前配置并 commit + push（分支 ${info.current}）`}
           disabled={busy != null}
-          onClick={() => {
-            setCommitMsg("");
-            setPushOpen(true);
-          }}
+          onClick={() => startSync("push")}
         >
           {busy === "push" ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
         </button>
         <button
           className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink disabled:opacity-50"
-          title={`拉取：pull 并覆盖加载该分支的配置${info ? `（分支 ${info.current}）` : ""}`}
+          title={info == null
+            ? "拉取：当前读不到分支信息，点击后需确认自动初始化仓库"
+            : `拉取：pull 并覆盖加载该分支的配置（分支 ${info.current}）`}
           disabled={busy != null}
-          onClick={() => void doSync("pull")}
+          onClick={() => startSync("pull")}
         >
           {busy === "pull" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
         </button>
@@ -703,14 +751,72 @@ function SyncBar() {
           onKeyDown={(e) => e.key === "Enter" && confirmPush()}
         />
       </Modal>
+
+      {/* 同步结果详情弹窗：Portal 到 body，不受分栏 overflow 裁剪。
+          弹窗仅用于阅读，不提供手动清除：warn/error 图标常驻，直到下次同步
+          产出新结果被替换（成功→绿色 info 自动消失=问题已解决）。
+          notice 为 null（info 自动消失）时弹窗随之关闭 */}
+      <Modal
+        open={noticeOpen && notice != null}
+        title="同步结果"
+        onClose={() => setNoticeOpen(false)}
+        width={440}
+        footer={
+          <button className="btn-primary" onClick={() => setNoticeOpen(false)}>
+            知道了
+          </button>
+        }
+      >
+        {notice && (
+          <div className="flex items-start gap-2.5">
+            <span
+              className={`mt-0.5 shrink-0 ${
+                notice.level === "error" ? "text-err" : notice.level === "warn" ? "text-warn" : "text-ok"
+              }`}
+            >
+              {notice.level === "info" ? (
+                <CheckCircle2 size={18} />
+              ) : notice.level === "warn" ? (
+                <AlertTriangle size={18} />
+              ) : (
+                <AlertCircle size={18} />
+              )}
+            </span>
+            <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink">{notice.text}</p>
+          </div>
+        )}
+      </Modal>
+
+      {/* 非 git 仓库目录的推送/拉取确认：自动 git init 重建仓库是显式动作，
+          用户知情后继续才执行（对旧版误删 .git 的目录这也是恢复入口） */}
+      <ConfirmDialog
+        open={initConfirm != null}
+        title={initConfirm === "pull" ? "拉取前确认" : "推送前确认"}
+        message={`无法读取分支信息，同步目录可能不是 git 仓库（或 git 不可用）。继续将自动执行 git init 初始化仓库，然后${initConfirm === "pull" ? "从仓库拉取导入配置" : "提交并推送全部内容"}。`}
+        confirmText="继续"
+        danger={false}
+        onConfirm={() => {
+          const dir = initConfirm;
+          setInitConfirm(null);
+          if (dir === "pull") {
+            void doSync("pull");
+          } else {
+            setCommitMsg("");
+            setPushOpen(true);
+          }
+        }}
+        onCancel={() => setInitConfirm(null)}
+      />
     </>
   );
 }
 
-/** 同步条提醒的数据（栏头状态图标展示：图标按级别变色，悬浮显示全文） */
+/** 同步条提醒的数据（栏头状态图标展示：图标按级别变色，悬浮/点击弹详情查看全文） */
 interface SyncNotice {
-  /** 提醒级别：error 红 / warn 黄 / info 绿（info 6s 自动消失，其余常驻到手动关闭） */
+  /** 提醒级别：error 红 / warn 黄 / info 绿（info 6s 自动消失，其余常驻到下次同步结果替换） */
   level: "info" | "warn" | "error";
+  /** 提醒来源：branch=分支/仓库状态读取失败（定时检查发现恢复后自动清除）；sync=推送/拉取/切分支结果 */
+  kind: "branch" | "sync";
   /** 展示文本（含手动处理引导） */
   text: string;
 }
