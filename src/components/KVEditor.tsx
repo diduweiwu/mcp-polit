@@ -72,6 +72,70 @@ export function KVEditor({
   /** 展示行：优先草稿（含待填写的空行），否则为 JSON 解析结果 */
   const rows = draft ?? parsed;
 
+  /**
+   * 值输入框内 `{{变量名}}` 的补全状态（availableVars 非空时启用）：
+   * 光标前存在未闭合的 `{{` 即触发下拉提示，选择项后按 braceStart/cursor
+   * 切割替换为 `{{变量名}}` 完整引用。
+   */
+  const [suggest, setSuggest] = useState<{
+    /** 触发补全的行下标 */
+    row: number;
+    /** 值中 `{{` 的起始位置（含两个花括号） */
+    braceStart: number;
+    /** 触发时的光标位置 */
+    cursor: number;
+    /** 已输入的过滤前缀（`{{` 之后到光标的原文） */
+    prefix: string;
+  } | null>(null);
+  /** 补全下拉的高亮项下标（↑↓ 移动、Enter 确认） */
+  const [suggestIdx, setSuggestIdx] = useState(0);
+
+  /** 检测光标前是否有未闭合的 `{{`：有则打开/更新补全，否则关闭 */
+  const detectSuggest = (row: number, text: string, cursor: number | null) => {
+    if (!availableVars?.length || cursor == null) {
+      setSuggest(null);
+      return;
+    }
+    const before = text.slice(0, cursor);
+    const idx = before.lastIndexOf("{{");
+    if (idx < 0) {
+      setSuggest(null);
+      return;
+    }
+    const rest = before.slice(idx + 2);
+    if (rest.includes("}}")) {
+      // 已闭合：关闭补全（引用已写完）
+      setSuggest(null);
+      return;
+    }
+    setSuggest({ row, braceStart: idx, cursor, prefix: rest });
+    setSuggestIdx(0);
+  };
+
+  /** 当前补全候选（按前缀不区分大小写过滤；前缀空 = 全部变量） */
+  const suggestCandidates = suggest
+    ? (availableVars ?? []).filter((name) =>
+        name.toLowerCase().includes(suggest.prefix.trim().toLowerCase()),
+      )
+    : [];
+  const suggestVisible =
+    suggest != null &&
+    rows[suggest.row] != null &&
+    suggestCandidates.length > 0;
+
+  /** 应用补全：把触发区间替换为 `{{变量名}}` 完整引用并关闭下拉 */
+  const applySuggest = (name: string) => {
+    if (!suggest) return;
+    const next = [...rows];
+    const [k, v] = next[suggest.row];
+    next[suggest.row] = [
+      k,
+      v.slice(0, suggest.braceStart) + `{{${name}}}` + v.slice(suggest.cursor),
+    ];
+    setRows(next);
+    setSuggest(null);
+  };
+
   /** 行变化：有效行写回 JSON；含空 key 行时保留在草稿中供继续填写 */
   const setRows = (next: Array<[string, string]>) => {
     const valid = next.filter(([k]) => k.trim() !== "");
@@ -150,7 +214,7 @@ export function KVEditor({
           return (
             <div key={i} className="flex items-center gap-1.5">
               <input
-                className="field font-mono !py-1"
+                className="field min-w-0 flex-1 font-mono !py-1"
                 placeholder={keyPlaceholder}
                 value={k}
                 onChange={(e) => {
@@ -161,17 +225,61 @@ export function KVEditor({
                   renameInSensitive(k, newK);
                 }}
               />
-              <input
-                className={`field font-mono !py-1 ${masked ? "!pr-1 tracking-widest" : ""}`}
-                placeholder={valuePlaceholder}
-                type={masked ? "password" : "text"}
-                value={v}
-                onChange={(e) => {
-                  const next = [...rows];
-                  next[i] = [k, e.target.value];
-                  setRows(next);
-                }}
-              />
+              {/* 值输入框：relative 容器承载 {{变量}} 补全下拉 */}
+              <span className="relative flex min-w-0 flex-1">
+                <input
+                  className={`field font-mono !py-1 ${masked ? "!pr-1 tracking-widest" : ""}`}
+                  placeholder={valuePlaceholder}
+                  type={masked ? "password" : "text"}
+                  value={v}
+                  onChange={(e) => {
+                    const next = [...rows];
+                    next[i] = [k, e.target.value];
+                    setRows(next);
+                    detectSuggest(i, e.target.value, e.target.selectionStart);
+                  }}
+                  onKeyUp={(e) => {
+                    // 打字/移动光标都可能改变 {{ 触发区（onChange 覆盖不了纯移动光标）
+                    detectSuggest(i, (e.target as HTMLInputElement).value, (e.target as HTMLInputElement).selectionStart);
+                  }}
+                  onBlur={() => setSuggest(null)}
+                  onKeyDown={(e) => {
+                    if (!suggestVisible) return;
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setSuggestIdx((n) => Math.min(n + 1, suggestCandidates.length - 1));
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setSuggestIdx((n) => Math.max(n - 1, 0));
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      applySuggest(suggestCandidates[suggestIdx]);
+                    } else if (e.key === "Escape") {
+                      setSuggest(null);
+                    }
+                  }}
+                />
+                {/* {{变量}} 补全下拉：mousedown 阻止默认以保持输入框焦点 */}
+                {suggestVisible && (
+                  <span className="absolute left-0 top-full z-20 mt-1 max-h-[150px] w-full overflow-y-auto rounded-md border border-line bg-panel py-1 shadow-lg">
+                    {suggestCandidates.map((name, ci) => (
+                      <button
+                        key={name}
+                        className={`flex w-full items-center px-2.5 py-1 text-left font-mono text-[12px] transition-colors ${
+                          ci === suggestIdx ? "bg-hover text-ink" : "text-inksoft hover:bg-hover hover:text-ink"
+                        }`}
+                        // mousedown 先于 blur：preventDefault 保住输入框焦点，点击后主动关闭
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          applySuggest(name);
+                        }}
+                      >
+                        <span className="truncate text-primarystrong">{"{{"}{name}{"}}"}</span>
+                      </button>
+                    ))}
+                  </span>
+                )}
+              </span>
               {sensitive && (
                 <button
                   className="shrink-0 rounded p-0.5 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
@@ -216,9 +324,14 @@ export function KVEditor({
           <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-inksoft">
             <span className="shrink-0">可引用：</span>
             {availableVars.length > 0 ? (
-              availableVars.map((name) => <VarChip key={name} name={name} />)
+              <>
+                <span className="shrink-0 text-inksoft/60">（输入 {"{{"} 可弹出提示）</span>
+                {availableVars.map((name) => <VarChip key={name} name={name} />)}
+              </>
             ) : (
-              <span className="text-inksoft/70">当前环境暂无变量，可在顶栏「环境」中添加。</span>
+              <span className="text-inksoft/70">
+                暂无可引用变量：在顶栏「环境」中选择环境并添加变量后，值里输入 {"{{"} 即可弹出提示。
+              </span>
             )}
           </div>
         )}

@@ -169,10 +169,10 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
           </>
         }
       >
-        <div className="flex h-full min-h-0 gap-3">
-          {/* 左栏：环境列表 */}
-          <div className="flex w-[210px] shrink-0 flex-col rounded-md bg-panel2 p-1.5">
-            <div className="flex items-center justify-between px-2 pb-1 pt-0.5">
+        <div className="flex h-full min-h-0">
+          {/* 左栏：环境列表（白底 + 竖向分割线与右栏分隔） */}
+          <div className="flex w-[210px] shrink-0 flex-col border-r border-line pr-2">
+            <div className="flex items-center justify-between px-2 pb-1">
               <span className="text-[11px] font-medium text-inksoft/70">环境</span>
               <span className="text-[11px] text-inksoft/50">{draft.length}</span>
             </div>
@@ -212,7 +212,7 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
                       <button
                         className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors ${
                           active
-                            ? "bg-panel text-ink shadow-sm"
+                            ? "bg-panel2 text-ink"
                             : "text-inksoft hover:bg-hover hover:text-ink"
                         }`}
                         title={e.name}
@@ -234,7 +234,7 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
                     {/* 重命名 / 删除：hover 出现，选中项常显（可发现性） */}
                     {renamingIdx !== i && (
                       <span
-                        className={`absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded bg-panel px-0.5 transition-opacity ${
+                        className={`absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded bg-inherit px-0.5 transition-opacity ${
                           active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                         }`}
                       >
@@ -319,7 +319,7 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
           </div>
 
           {/* 右栏：当前环境的变量表格 */}
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex min-w-0 flex-1 flex-col pl-3">
             {cur ? (
               <>
                 <div className="mb-2 flex shrink-0 items-center gap-2">
