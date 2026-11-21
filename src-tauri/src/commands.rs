@@ -382,6 +382,12 @@ pub async fn disconnect_server(app: AppHandle, node_id: i64) -> CmdResult<()> {
     McpManager::disconnect(app, node_id).await
 }
 
+/// 中断进行中的连接尝试（连接中状态下的「中断」按钮；对已建立连接等同断开）。
+#[tauri::command]
+pub async fn cancel_connect_server(app: AppHandle, node_id: i64) -> CmdResult<()> {
+    McpManager::cancel_connect(&app, node_id).await
+}
+
 /// 刷新工具列表（走重连路径，拿到最新缓存）。
 #[tauri::command]
 pub async fn refresh_tools(

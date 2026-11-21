@@ -157,6 +157,8 @@ interface AppState {
   updateConfigCache: (cfg: ServerConfig) => void;
   /** 连接指定 server 并加载工具 */
   connect: (id: number) => Promise<void>;
+  /** 中断进行中的连接尝试（连接中状态；后端取消握手并广播断开） */
+  cancelConnect: (id: number) => Promise<void>;
   /** 断开指定 server */
   disconnect: (id: number) => Promise<void>;
   /** 刷新工具列表（重连） */
@@ -175,7 +177,9 @@ interface AppState {
   toggleToolsCollapsed: () => void;
   /** 切换参数栏折叠/展开 */
   toggleParamsCollapsed: () => void;
-  /** 触发四栏均分布局 */
+  /** 均分伴随展开标记：true 表示本次均分触发了折叠栏展开，Workspace 重建的新分栏应直接按等宽挂载（消费后清除） */
+  equalizeFromExpand: boolean;
+  /** 触发四栏均分布局（有折叠栏时先全部展开再均分，一键回到标准四栏布局） */
   equalizeLayout: () => void;
 
   /** 追加一条日志；nodeId 可选，缺省为全局日志（项目操作、Git 同步等） */
@@ -246,6 +250,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   toolsCollapsed: false,
   paramsCollapsed: false,
   layoutEqualizeSignal: 0,
+  equalizeFromExpand: false,
   history: [],
   hasMoreHistory: false,
   loadingHistory: false,
@@ -513,11 +518,31 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ selectedToolName: tools[0].name });
       }
     } catch (e) {
+      const msg = String(e);
+      // 手动中断：后端已广播断开事件，恢复空闲态而非错误态（info 日志提示）
+      if (msg.includes("手动中断")) {
+        set((s) => ({
+          connStates: { ...s.connStates, [id]: "disconnected" },
+          connErrors: { ...s.connErrors, [id]: "" },
+          tools: { ...s.tools, [id]: [] },
+        }));
+        get().addLog("info", `已中断连接（未等超时）`, id);
+        return;
+      }
       set((s) => ({
         connStates: { ...s.connStates, [id]: "error" },
-        connErrors: { ...s.connErrors, [id]: String(e) },
+        connErrors: { ...s.connErrors, [id]: msg },
         tools: { ...s.tools, [id]: [] },
       }));
+    }
+  },
+
+  /** 中断进行中的连接尝试：后端取消握手；无论如何把本地状态归位为未连接 */
+  async cancelConnect(id) {
+    try {
+      await api.cancelConnect(id);
+    } finally {
+      set((s) => ({ connStates: { ...s.connStates, [id]: "disconnected" } }));
     }
   },
 
@@ -633,7 +658,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   equalizeLayout() {
-    set((s) => ({ layoutEqualizeSignal: s.layoutEqualizeSignal + 1 }));
+    /* 一键均分 = 标准四栏布局：有折叠栏时先全部展开再等分。展开标志与均分信号
+       在同一次 set 里原子更新——「伴随展开的均分」会让 Workspace 的分栏随 key
+       重建，新实例的尺寸测量（ResizeObserver）落地前调用 resize 不生效，
+       所以用 equalizeFromExpand 标记让新分栏直接以等宽挂载，绕开 resize 时序 */
+    set((s) => ({
+      treeCollapsed: false,
+      toolsCollapsed: false,
+      paramsCollapsed: false,
+      layoutEqualizeSignal: s.layoutEqualizeSignal + 1,
+      equalizeFromExpand: s.treeCollapsed || s.toolsCollapsed || s.paramsCollapsed,
+    }));
   },
 
   addLog(level, message, nodeId) {

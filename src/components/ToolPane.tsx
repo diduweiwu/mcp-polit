@@ -8,13 +8,13 @@ import {
   Clock,
   Globe,
   PanelLeftClose,
-  PanelLeftOpen,
   Pencil,
   Plug,
   PlugZap,
   RefreshCw,
   Search,
   Settings2,
+  Square,
   Terminal,
   Unplug,
   Wrench,
@@ -27,7 +27,7 @@ import { ServerFormModal } from "./ServerFormModal";
 
 /** 工具列表栏 */
 export function ToolPane() {
-  const { selectedNodeId, nodes, tools, connStates, connErrors, selectedToolName, selectTool, connect, disconnect, refreshTools, treeCollapsed, toggleTreeCollapsed } =
+  const { selectedNodeId, nodes, tools, connStates, connErrors, selectedToolName, selectTool, connect, cancelConnect, disconnect, refreshTools } =
     useAppStore();
 
   const [keyword, setKeyword] = useState("");
@@ -81,44 +81,14 @@ export function ToolPane() {
 
   if (!node) {
     return (
-      <PaneWrap
-        title="工具列表"
-        className={closing ? "anim-fade-out" : "anim-pane-in"}
-        lead={
-          treeCollapsed ? (
-            <button
-              className="mr-1 rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
-              title="展开资源树"
-              onClick={toggleTreeCollapsed}
-            >
-              <PanelLeftOpen size={14} />
-            </button>
-          ) : undefined
-        }
-        right={collapseBtn}
-      >
+      <PaneWrap title="工具列表" className={closing ? "anim-fade-out" : "anim-pane-in"} right={collapseBtn}>
         <EmptyState icon={<Wrench size={36} strokeWidth={1.2} />} text="在左侧选择一个 MCP Server，这里会列出它的全部工具。" />
       </PaneWrap>
     );
   }
 
   return (
-    <PaneWrap
-      title={`工具列表 · ${node.name}`}
-      className={closing ? "anim-fade-out" : "anim-pane-in"}
-      lead={
-        treeCollapsed ? (
-          <button
-            className="mr-1 rounded p-1 text-inksoft hover:bg-panel2 hover:text-ink"
-            title="展开资源树"
-            onClick={toggleTreeCollapsed}
-          >
-            <PanelLeftOpen size={14} />
-          </button>
-        ) : undefined
-      }
-      right={collapseBtn}
-    >
+    <PaneWrap title={`工具列表 · ${node.name}`} className={closing ? "anim-fade-out" : "anim-pane-in"} right={collapseBtn}>
       {/* 已连接：「Server 配置」折叠条紧跟栏头标题（固定，不随工具列表滚动） */}
       {status === "connected" && (
         <div className="shrink-0 px-1.5 pt-1.5">
@@ -151,12 +121,13 @@ export function ToolPane() {
                   <Unplug size={14} />
                 </IconBtn>
               </>
+            ) : status === "connecting" ? (
+              // 连接中：提供「中断」入口，避免连不上时干等 30s 超时
+              <IconBtn title="中断连接（不必等超时）" onClick={() => void cancelConnect(node.id)}>
+                <Square size={11} className="fill-current text-err" />
+              </IconBtn>
             ) : (
-              <IconBtn
-                title={status === "connecting" ? "连接中…" : "连接"}
-                disabled={status === "connecting"}
-                onClick={() => void connect(node.id)}
-              >
+              <IconBtn title="连接" onClick={() => void connect(node.id)}>
                 {status === "error" ? <AlertCircle size={14} className="text-err" /> : <PlugZap size={14} />}
               </IconBtn>
             )}
@@ -295,13 +266,11 @@ function ConnectedConfigBar({ node }: { node: TreeNode }) {
 function PaneWrap({
   title,
   children,
-  lead,
   right,
   className,
 }: {
   title: string;
   children: React.ReactNode;
-  lead?: React.ReactNode;
   right?: React.ReactNode;
   className?: string;
 }) {
@@ -310,7 +279,6 @@ function PaneWrap({
       className={`flex h-full flex-col overflow-hidden border-r border-line bg-panel/50 ${className ?? ""}`}
     >
       <div className="flex h-9 shrink-0 items-center border-b border-line px-3">
-        {lead}
         <span className="min-w-0 truncate text-[12px] font-semibold text-inksoft">{title}</span>
         <span className="flex-1" />
         {right}

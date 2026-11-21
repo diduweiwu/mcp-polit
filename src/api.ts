@@ -168,6 +168,10 @@ export const connectServer = (nodeId: number) =>
 export const disconnectServer = (nodeId: number) =>
   invoke<void>("disconnect_server", { nodeId });
 
+/** 中断进行中的连接尝试（连接中状态的「中断」按钮；对已建立连接等同断开） */
+export const cancelConnect = (nodeId: number) =>
+  invoke<void>("cancel_connect_server", { nodeId });
+
 /** 刷新工具列表（重连） */
 export const refreshTools = (nodeId: number) =>
   invoke<ToolInfo[]>("refresh_tools", { nodeId });

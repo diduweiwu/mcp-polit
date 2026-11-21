@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "mcpilot"
-version = "0.1.12"
+version = "0.1.14"
 dependencies = [
  "http",
  "objc2",
@@ -2487,6 +2487,7 @@ dependencies = [
  "tauri-plugin-updater",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

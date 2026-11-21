@@ -40,6 +40,7 @@ const nodes = [
   { id: 3, project_id: 1, parent_id: 1, node_type: "server", name: "网页摘要", sort_order: 1, created_at: "", updated_at: "" },
   { id: 4, project_id: 1, parent_id: null, node_type: "folder", name: "本地工具", sort_order: 1, created_at: "", updated_at: "" },
   { id: 5, project_id: 1, parent_id: 4, node_type: "server", name: "文件系统", sort_order: 0, created_at: "", updated_at: "" },
+  { id: 6, project_id: 1, parent_id: 4, node_type: "server", name: "慢速服务", sort_order: 1, created_at: "", updated_at: "" },
 ];
 
 const configs: Record<number, unknown> = {
@@ -64,6 +65,15 @@ const configs: Record<number, unknown> = {
     sensitive_headers: null,
     timeout_ms: 30000, enabled: true, note: null, envs: null, active_env: null,
   },
+  6: {
+    node_id: 6, transport_type: "stdio", command: "npx",
+    args: JSON.stringify(["-y", "@demo/slow-mcp-server"]),
+    env: null, working_dir: null, url: null, headers: null,
+    sensitive_headers: null,
+    timeout_ms: 30000, enabled: true,
+    note: "演示连接中断：握手挂起 60 秒，可在「连接中」状态点击中断按钮提前取消",
+    envs: null, active_env: null,
+  },
 };
 
 const toolsByNode: Record<number, Array<{ name: string; title: string | null; description: string | null; input_schema: unknown }>> = {
@@ -84,6 +94,9 @@ const connStates: Record<number, string> = { 2: "connected", 3: "error", 5: "dis
 const connErrors: Record<number, string> = {
   3: "连接失败：unexpected server response 401 Unauthorized（检查 x-api-key）",
 };
+
+/** 慢速连接（节点 6）挂起中的 reject 入口：cancel_connect_server 时中断握手 */
+const slowConnectRejecters = new Map<number, (e: Error) => void>();
 
 let seq = 100;
 /** 演示模式的历史编号（append_history 返回值，模拟后端自增 id） */
@@ -178,8 +191,32 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       configs[cfg.node_id] = args.config;
       return null;
     }
-    case "connect_server": return toolsByNode[args.nodeId as number] ?? [];
+    case "connect_server": {
+      const nid = args.nodeId as number;
+      // 慢速服务：握手挂起 60 秒，模拟「连不上要干等超时」的场景（中断按钮演示用）
+      if (nid === 6) {
+        connStates[6] = "connecting";
+        return new Promise((resolve, reject) => {
+          slowConnectRejecters.set(nid, reject);
+          window.setTimeout(() => {
+            if (slowConnectRejecters.delete(nid)) resolve([]);
+          }, 60000);
+        });
+      }
+      return toolsByNode[nid] ?? [];
+    }
     case "disconnect_server": connStates[args.nodeId as number] = "disconnected"; return null;
+    // 中断连接：让挂起的握手以「连接已手动中断」拒绝（与真实后端行为一致）
+    case "cancel_connect_server": {
+      const nid = args.nodeId as number;
+      const rej = slowConnectRejecters.get(nid);
+      if (rej) {
+        slowConnectRejecters.delete(nid);
+        connStates[nid] = "disconnected";
+        rej(new Error("连接已手动中断"));
+      }
+      return null;
+    }
     case "refresh_tools": return toolsByNode[args.nodeId as number] ?? [];
     case "get_cached_tools": return connStates[args.nodeId as number] === "connected" ? (toolsByNode[args.nodeId as number] ?? []) : (() => { throw new Error("未连接"); })();
     case "get_conn_state": return { node_id: args.nodeId, status: connStates[args.nodeId as number] ?? "disconnected", message: connErrors[args.nodeId as number] ?? null };
@@ -189,9 +226,17 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       demoHistory.unshift({ ...result, node_id: args.nodeId, server_name: "GitHub Copilot", timestamp: "now" });
       return result;
     }
-    // 推送：message 以 FAIL 开头时返回错误日志，用于演示/验证失败提醒横幅
+    // 推送：message 以 FAIL 开头时返回错误日志（失败提醒演示），
+    // 以 CONFLICT 开头时返回推送被拒日志（历史分叉冲突提示演示）
     case "project_sync_push": {
       const msg = (args.message as string)?.trim();
+      if (msg?.startsWith("CONFLICT")) {
+        return [
+          { level: "info", message: "项目「演示项目」已导出：5 个节点 / 3 个 Server" },
+          { level: "info", message: "已提交到本地仓库（分支 main）" },
+          { level: "error", message: "推送被拒绝（分支 main）：远端有本地没有的新提交（历史分叉），本地提交已保留。请在同步目录手动处理：git pull --rebase 解决可能的冲突后重新推送；确认要覆盖远端历史时再使用 git push --force" },
+        ];
+      }
       if (msg?.startsWith("FAIL")) {
         return [
           { level: "info", message: "项目「演示项目」已导出：5 个节点 / 3 个 Server（已脱敏）" },
@@ -212,7 +257,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "project_sync_export": return [];
     // 前端诊断日志落盘：演示模式返回 null 静默，与真实 IPC 形态一致
     case "append_diag_log": return null;
-    case "project_branches": return { current: "main", branches: ["main", "dev", "staging"] };
+    // 项目名为「坏仓库」时模拟同步目录不是 git 仓库（演示分支读取失败/推送确认门用）
+    case "project_branches": {
+      const p = projects.find((x) => x.id === (args.projectId as number));
+      if (p?.name === "坏仓库") throw new Error("fatal: not a git repository (or any of the parent directories): .git");
+      return { current: "main", branches: ["main", "dev", "staging"] };
+    }
     case "project_checkout": return null;
     default: return null;
   }

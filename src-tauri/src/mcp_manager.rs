@@ -19,6 +19,7 @@ use rmcp::transport::{
 use rmcp::ServiceExt;
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
+use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
 use crate::error::{AppError, CmdResult};
@@ -47,6 +48,8 @@ pub struct McpManager {
     conns: Mutex<HashMap<i64, Arc<ConnHandle>>>,
     /// node_id -> 最近一次状态（连接断开后仍保留 error 信息供前端展示）
     states: Mutex<HashMap<i64, ConnState>>,
+    /// node_id -> 进行中的连接握手取消令牌（握手结束后注销；中断/断开时取消）
+    connect_tokens: Mutex<HashMap<i64, Arc<CancellationToken>>>,
 }
 
 impl McpManager {
@@ -55,6 +58,7 @@ impl McpManager {
         Self {
             conns: Mutex::new(HashMap::new()),
             states: Mutex::new(HashMap::new()),
+            connect_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -97,9 +101,20 @@ impl McpManager {
             return Err(AppError::new("该 Server 已停用，请先在配置中启用"));
         }
 
-        Self::report(&app, node_id, ConnStatus::Connecting, None);
-        // 若已有旧连接，先静默断开（"刷新工具"走重连路径）
+        // 先静默清理旧连接（旧的中断令牌随上一轮连接结束时已注销，此处不会误伤）
         Self::disconnect_inner(&app, node_id).await;
+        // 注册本次握手的取消令牌：断开/中断操作可提前取消握手（不必等 30s 超时）
+        let token = {
+            let manager = app.state::<McpManager>();
+            let t = Arc::new(CancellationToken::new());
+            manager
+                .connect_tokens
+                .lock()
+                .unwrap()
+                .insert(node_id, t.clone());
+            t
+        };
+        Self::report(&app, node_id, ConnStatus::Connecting, None);
 
         // 环境插值解析（短锁）：失败（未定义引用等）与传输构建失败同样走 Error 状态上报
         let config = {
@@ -113,7 +128,7 @@ impl McpManager {
             }
         };
 
-        match config.transport_type {
+        let result = match config.transport_type {
             TransportType::Stdio => {
                 let transport = match build_stdio_transport(&config) {
                     Ok(t) => t,
@@ -122,7 +137,7 @@ impl McpManager {
                         return Err(e);
                     }
                 };
-                Self::do_connect(app, node_id, config, transport).await
+                Self::do_connect(app, node_id, config, transport, token).await
             }
             TransportType::StreamableHttp => {
                 let transport = match build_http_transport(&config) {
@@ -132,26 +147,48 @@ impl McpManager {
                         return Err(e);
                     }
                 };
-                Self::do_connect(app, node_id, config, transport).await
+                Self::do_connect(app, node_id, config, transport, token).await
             }
-        }
+        };
+        result
     }
 
     /// 连接的通用后半段：握手 -> 工具列表 -> 入表 -> 广播。
     ///
     /// 泛型 `T` 同时覆盖 stdio 与 streamable_http 两种传输实现。
+    /// `token` 为本次握手的取消令牌：外部（中断按钮/断开操作）取消后握手提前退出，
+    /// 广播 Disconnected 并返回「连接已手动中断」错误。
     async fn do_connect<T, E, A>(
         app: AppHandle,
         node_id: i64,
         config: ServerConfig,
         transport: T,
+        token: Arc<CancellationToken>,
     ) -> CmdResult<Vec<ToolInfo>>
     where
         T: IntoTransport<RoleClient, E, A>,
         E: std::error::Error + Send + Sync + 'static,
     {
-        // 握手 + 初始化，固定 30 秒上限，避免无限等待
-        let served = tokio::time::timeout(Duration::from_secs(30), ().serve(transport)).await;
+        // 握手 + 初始化：30s 超时上限避免无限等待；取消令牌支持手动中断
+        let served = tokio::select! {
+            r = tokio::time::timeout(Duration::from_secs(30), ().serve(transport)) => r,
+            _ = token.cancelled() => {
+                // 手动中断：注销令牌并广播断开（前端恢复空闲态）
+                app.state::<McpManager>()
+                    .connect_tokens
+                    .lock()
+                    .unwrap()
+                    .remove(&node_id);
+                Self::report(&app, node_id, ConnStatus::Disconnected, None);
+                return Err(AppError::new("连接已手动中断"));
+            }
+        };
+        // 握手已结束（成功/失败/超时），注销取消令牌
+        app.state::<McpManager>()
+            .connect_tokens
+            .lock()
+            .unwrap()
+            .remove(&node_id);
         let service = match served {
             Ok(Ok(s)) => Arc::new(s),
             Ok(Err(e)) => {
@@ -206,9 +243,28 @@ impl McpManager {
         Ok(())
     }
 
+    /// 中断进行中的连接尝试：取消握手令牌，`do_connect` 的 select 分支会广播
+    /// Disconnected 并以「连接已手动中断」结束。没有进行中的握手时按断开处理
+    /// （幂等：对已建立会话等同 disconnect，无任何状态时仅归位状态）。
+    pub async fn cancel_connect(app: &AppHandle, node_id: i64) -> CmdResult<()> {
+        let manager = app.state::<McpManager>();
+        let token = manager.connect_tokens.lock().unwrap().remove(&node_id);
+        if let Some(t) = token {
+            t.cancel();
+            return Ok(());
+        }
+        Self::disconnect_inner(&app, node_id).await;
+        Self::report(&app, node_id, ConnStatus::Disconnected, None);
+        Ok(())
+    }
+
     /// 内部断开：只移除并关闭会话，不广播状态。
     async fn disconnect_inner(app: &AppHandle, node_id: i64) {
         let manager = app.state::<McpManager>();
+        // 进行中的连接尝试一并取消（否则断开后握手完成又变回已连接）
+        if let Some(t) = manager.connect_tokens.lock().unwrap().remove(&node_id) {
+            t.cancel();
+        }
         let removed = manager.conns.lock().unwrap().remove(&node_id);
         if let Some(handle) = removed {
             // 通过取消令牌触发优雅关闭（可在 Arc 共享状态下调用），随后 Drop 兜底清理

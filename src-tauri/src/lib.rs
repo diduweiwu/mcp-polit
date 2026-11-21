@@ -123,6 +123,7 @@ pub fn run() {
             // 连接与调用
             commands::connect_server,
             commands::disconnect_server,
+            commands::cancel_connect_server,
             commands::test_server_config,
             commands::refresh_tools,
             commands::call_tool,
