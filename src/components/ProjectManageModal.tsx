@@ -10,9 +10,11 @@
 import { useState } from "react";
 import { Check, Pencil, Trash2 } from "lucide-react";
 import { useAppStore } from "../store";
-import type { Project } from "../types";
+import { syncDirStatus } from "../api";
+import type { Project, SyncDirResolve } from "../types";
 import { ConfirmDialog, Modal } from "./ui";
 import { SyncDirField } from "./SyncDirField";
+import { SyncDirConflictDialog } from "./SyncDirConflictDialog";
 
 /** 管理项目弹窗属性 */
 interface ProjectManageModalProps {
@@ -48,8 +50,15 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
   const [editSyncDir, setEditSyncDir] = useState("");
   /** 编辑表单：校验/保存失败的错误信息（展示在表单内） */
   const [editError, setEditError] = useState("");
+  /** 保存提交中标记：防双击重复提交（重命名/绑定目录请求重复发起） */
+  const [saving, setSaving] = useState(false);
   /** 待删除的项目（非 null 时显示删除确认框） */
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  /**
+   * 同步目录数据冲突：编辑中的目录是已有数据的 MCPilot 同步仓库，等待用户选择
+   * 数据方向。非 null 时弹冲突选择弹窗（编辑表单保持打开，Esc 关闭临时让位）。
+   */
+  const [editConflict, setEditConflict] = useState<string | null>(null);
 
   /** 进入某项目的内联编辑：带入该项目当前的基础信息 */
   const startEdit = (p: Project) => {
@@ -57,19 +66,25 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
     setEditName(p.name);
     setEditSyncDir(p.sync_dir ?? "");
     setEditError("");
+    setEditConflict(null);
   };
 
-  /** 取消内联编辑：收起表单并清空错误 */
+  /** 取消内联编辑：收起表单并清空错误与冲突状态 */
   const cancelEdit = () => {
     setEditingId(null);
     setEditError("");
+    setEditConflict(null);
   };
 
   /**
    * 提交内联编辑：名称与同步目录分别按需保存（无变化的字段不发起请求）。
+   *
+   * 新目录绑定前先检测目录状态（sync_dir_status）：有内容且不是 MCPilot 同步
+   * 仓库直接拦截；是同步仓库则暂缓保存，弹冲突选择弹窗，用户选定数据方向后
+   * 带 resolve 重新走本函数完成保存。
    * 成功后收起表单；失败把错误信息留在表单内，不收起。
    */
-  const submitEdit = async () => {
+  const submitEdit = async (resolve?: SyncDirResolve) => {
     const target = projects.find((p) => p.id === editingId);
     if (!target) {
       cancelEdit();
@@ -82,16 +97,37 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
       setEditError("请填写项目名称");
       return;
     }
+    if (saving) return;
+    setSaving(true);
     try {
       if (name !== target.name) await renameProject(target.id, name);
       if (dir !== (target.sync_dir ?? "")) {
+        if (dir && resolve === undefined) {
+          const st = await syncDirStatus(dir);
+          if (st.has_content && !st.is_repo) {
+            setEditError(`目录已有内容且不是 MCPilot 同步仓库，无法绑定：${dir}`);
+            return;
+          }
+          if (st.has_content && st.is_repo) {
+            setEditConflict(dir);
+            return;
+          }
+        }
         // 空串传 null：解除绑定（Git 同步条随之隐藏）
-        await updateProjectSyncDir(target.id, dir || null);
+        await updateProjectSyncDir(target.id, dir || null, resolve);
       }
       setEditingId(null);
     } catch (e) {
       setEditError(String(e));
+    } finally {
+      setSaving(false);
     }
+  };
+
+  /** 冲突选择回调：记录数据方向后回到编辑流程完成保存 */
+  const resolveEditConflict = (resolve: SyncDirResolve) => {
+    setEditConflict(null);
+    void submitEdit(resolve);
   };
 
   /** 确认删除（二次确认回调）；删除激活项目时 store 会自动切换到剩余第一个项目 */
@@ -107,8 +143,8 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
         title="管理项目"
         onClose={onClose}
         width={560}
-        /* 删除确认框打开期间禁用本弹窗的 Esc 关闭：按 Esc 只关最上层的确认框 */
-        escClose={deleteTarget == null}
+        /* 删除确认框 / 目录冲突弹窗打开期间禁用本弹窗的 Esc 关闭：按 Esc 只关最上层 */
+        escClose={deleteTarget == null && editConflict == null}
       >
         {projects.length === 0 ? (
           <p className="py-6 text-center text-[13px] text-inksoft">
@@ -144,7 +180,8 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
                       />
                       <p className="mt-1.5 text-[12px] leading-relaxed text-inksoft">
                         目录必须是<b>空目录</b>（不存在会自动创建，非 git 目录会自动
-                        <span className="font-mono"> git init</span>）；保存后当前项目的数据会自动迁移进去并创建初始提交。清空此字段并保存即解除绑定（原有仓库内容不受影响）。
+                        <span className="font-mono"> git init</span>）；已有数据的 MCPilot
+                        同步仓库可接管，保存时会让你选择以哪边数据为准。保存后当前项目的数据会按所选方向处理并创建初始提交。清空此字段并保存即解除绑定（原有仓库内容不受影响）。
                       </p>
                     </div>
                     {editError && (
@@ -156,8 +193,8 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
                       <button className="btn-ghost" onClick={cancelEdit}>
                         取消
                       </button>
-                      <button className="btn-primary" onClick={() => void submitEdit()}>
-                        保存
+                      <button className="btn-primary" disabled={saving} onClick={() => void submitEdit()}>
+                        {saving ? "保存中…" : "保存"}
                       </button>
                     </div>
                   </div>
@@ -212,6 +249,15 @@ export function ProjectManageModal({ open, onClose }: ProjectManageModalProps) {
         )}
 
       </Modal>
+
+      {/* 编辑表单：同步目录数据冲突选择（选定后带 resolve 回到 submitEdit 完成保存） */}
+      {editConflict != null && (
+        <SyncDirConflictDialog
+          dir={editConflict}
+          onResolve={resolveEditConflict}
+          onCancel={() => setEditConflict(null)}
+        />
+      )}
 
       {/* 删除二次确认：嵌套弹窗，打开时外层 Esc 已禁用 */}
       <ConfirmDialog

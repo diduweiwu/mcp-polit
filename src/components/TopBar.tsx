@@ -18,12 +18,14 @@ import {
 } from "lucide-react";
 import { activeEnvName, useAppStore } from "../store";
 import { THEME_MODE_OPTIONS, type ThemeMode } from "../theme";
-import { openRepoPage, REPO_URL } from "../api";
+import { openRepoPage, REPO_URL, syncDirStatus } from "../api";
+import type { SyncDirResolve } from "../types";
 import { Dropdown, MenuItem, Modal } from "./ui";
 import { GithubIcon } from "./icons";
 import { SettingsModal } from "./SettingsModal";
 import { ProjectManageModal } from "./ProjectManageModal";
 import { SyncDirField } from "./SyncDirField";
+import { SyncDirConflictDialog } from "./SyncDirConflictDialog";
 import { EnvironmentManageModal } from "./EnvironmentManageModal";
 
 /** 风格模式 -> 图标 */
@@ -77,6 +79,15 @@ export function TopBar() {
   const [newOpen, setNewOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newSyncDir, setNewSyncDir] = useState("");
+  /** 新建表单：校验/保存失败的错误信息（展示在表单内，与「管理项目」编辑表单一致） */
+  const [newError, setNewError] = useState("");
+  /** 创建提交中标记：防双击/回车重复提交（后端无重名约束，重复提交会产生同名项目） */
+  const [creating, setCreating] = useState(false);
+  /**
+   * 同步目录数据冲突：目录是已有数据的 MCPilot 同步仓库，等待用户选择数据方向。
+   * 非 null 时弹冲突选择弹窗（新建弹窗保持打开，Esc 关闭临时让位给冲突弹窗）。
+   */
+  const [newConflict, setNewConflict] = useState<string | null>(null);
   /** 管理项目弹窗：全部项目的重命名 / 配置同步目录 / 删除集中在此 */
   const [manageOpen, setManageOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -107,17 +118,54 @@ export function TopBar() {
   const modeLabel =
     THEME_MODE_OPTIONS.find((o) => o.key === themeMode)?.label ?? "亮色";
 
-  /** 提交新建项目（含可选同步目录；目录校验失败时错误信息由后端返回） */
-  const submitNew = async () => {
-    if (!newName.trim()) return;
+  /**
+   * 提交新建项目（含可选同步目录）。
+   *
+   * 绑定目录前先检测目录状态（sync_dir_status）：
+   * - 有内容且不是 MCPilot 同步仓库：错误留在表单内（后端 prepare_sync_dir 同样会拦）；
+   * - 有内容且是同步仓库：暂缓提交，弹冲突选择弹窗；用户选定数据方向后
+   *   带 resolve 重新走本函数完成创建。
+   * 校验失败（名称为空）或后端拒绝时，错误信息显示在表单内——不能只写日志
+   * 面板：弹窗开着时用户看不到日志，会误以为「点击创建没反应」。
+   * 成功后清空表单并关闭弹窗。
+   */
+  const submitNew = async (resolve?: SyncDirResolve) => {
+    const name = newName.trim();
+    const dir = newSyncDir.trim();
+    if (!name) {
+      setNewError("请填写项目名称");
+      return;
+    }
+    if (creating) return;
+    setCreating(true);
+    setNewError("");
     try {
-      await createProject(newName.trim(), newSyncDir.trim() || undefined);
+      if (dir && resolve === undefined) {
+        const st = await syncDirStatus(dir);
+        if (st.has_content && !st.is_repo) {
+          setNewError(`目录已有内容且不是 MCPilot 同步仓库，无法绑定：${dir}`);
+          return;
+        }
+        if (st.has_content && st.is_repo) {
+          setNewConflict(dir);
+          return;
+        }
+      }
+      await createProject(name, dir || undefined, resolve);
       setNewName("");
       setNewSyncDir("");
       setNewOpen(false);
     } catch (e) {
-      useAppStore.getState().addLog("error", `创建项目失败：${e}`);
+      setNewError(String(e));
+    } finally {
+      setCreating(false);
     }
+  };
+
+  /** 冲突选择回调：记录日志的方向选择后回到新建流程完成创建 */
+  const resolveNewConflict = (resolve: SyncDirResolve) => {
+    setNewConflict(null);
+    void submitNew(resolve);
   };
 
   return (
@@ -209,6 +257,8 @@ export function TopBar() {
           title="新建项目"
           onClick={() => {
             setNewName("");
+            setNewError("");
+            setNewConflict(null);
             setNewOpen(true);
           }}
         >
@@ -356,19 +406,20 @@ export function TopBar() {
         </button>
       </div>
 
-      {/* 新建项目弹窗 */}
+      {/* 新建项目弹窗（冲突选择弹窗打开期间禁用本弹窗的 Esc 关闭：按 Esc 只关最上层） */}
       <Modal
         open={newOpen}
         title="新建项目"
         onClose={() => setNewOpen(false)}
         width={480}
+        escClose={newConflict == null}
         footer={
           <>
             <button className="btn-ghost" onClick={() => setNewOpen(false)}>
               取消
             </button>
-            <button className="btn-primary" onClick={() => void submitNew()}>
-              创建
+            <button className="btn-primary" disabled={creating} onClick={() => void submitNew()}>
+              {creating ? "创建中…" : "创建"}
             </button>
           </>
         }
@@ -387,13 +438,28 @@ export function TopBar() {
           <SyncDirField value={newSyncDir} onChange={setNewSyncDir} />
           <p className="mt-1.5 text-[12px] leading-relaxed text-inksoft">
             填写后该项目与此目录绑定：目录必须是<b>空目录</b>（不存在会自动创建，非 git 目录会自动
-            <span className="font-mono"> git init</span>）。开启后可在资源树切换分支、推送/拉取配置。
+            <span className="font-mono"> git init</span>；已 init 过的空仓库可直接用）；已有数据的 MCPilot
+            同步仓库可接管，创建时会让你选择以哪边数据为准。开启后可在资源树切换分支、推送/拉取配置。
           </p>
         </div>
+        {newError && (
+          <div className="mt-2 rounded-md border border-err/30 bg-err/10 px-3 py-2 text-[12px] text-err">
+            {newError}
+          </div>
+        )}
         <p className="mt-2 text-[12px] text-inksoft">
           项目用于隔离不同场景的目录与 Server 配置，可随时在左上角切换。
         </p>
       </Modal>
+
+      {/* 新建项目：同步目录数据冲突选择（选定后带 resolve 回到 submitNew 完成创建） */}
+      {newConflict != null && (
+        <SyncDirConflictDialog
+          dir={newConflict}
+          onResolve={resolveNewConflict}
+          onCancel={() => setNewConflict(null)}
+        />
+      )}
 
       {/* 管理项目弹窗：重命名 / 配置同步目录（可选目录） / 删除，集中管理全部项目 */}
       <ProjectManageModal open={manageOpen} onClose={() => setManageOpen(false)} />
