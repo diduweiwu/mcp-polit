@@ -102,6 +102,7 @@ pub fn run() {
             // 项目
             commands::list_projects,
             commands::create_project,
+            commands::sync_dir_status,
             commands::rename_project,
             commands::update_project_sync_dir,
             commands::open_dir,

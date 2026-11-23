@@ -16,6 +16,7 @@ import type {
   ParamCase,
   Project,
   ServerConfig,
+  SyncDirResolve,
   ToolInfo,
   TreeNode,
 } from "./types";
@@ -128,10 +129,21 @@ interface AppState {
   /** 重新加载当前项目节点列表 */
   reloadNodes: () => Promise<void>;
 
-  createProject: (name: string, syncDir?: string) => Promise<void>;
+  /**
+   * 新建项目（可带同步目录）。
+   *
+   * 目录为已有数据的 MCPilot 同步仓库时传 resolve 指明数据方向：
+   * "project" = 以项目数据为准（清空仓库内容）；"git" = 以仓库数据为准（导入为初始数据）。
+   */
+  createProject: (name: string, syncDir?: string, resolve?: SyncDirResolve) => Promise<void>;
   renameProject: (id: number, name: string) => Promise<void>;
-  /** 更新项目同步目录（null 解除绑定）；本地 projects 缓存同步更新 */
-  updateProjectSyncDir: (id: number, syncDir: string | null) => Promise<void>;
+  /**
+   * 更新项目同步目录（null 解除绑定）；本地 projects 缓存同步更新。
+   *
+   * resolve 含义同 createProject；传 "git" 导入会覆盖项目数据，
+   * 若目标为当前活跃项目会自动刷新节点列表。
+   */
+  updateProjectSyncDir: (id: number, syncDir: string | null, resolve?: SyncDirResolve) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
 
   createNode: (parentId: number | null, type: NodeType, name: string) => Promise<void>;
@@ -353,9 +365,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ nodes, expandedIds });
   },
 
-  async createProject(name, syncDir) {
-    const p = await api.createProject(name, syncDir);
+  async createProject(name, syncDir, resolve) {
+    const [p, logs] = await api.createProject(name, syncDir, resolve);
     set((s) => ({ projects: [...s.projects, p] }));
+    // 绑定同步目录时的导入/迁移日志（数据方向详情 / 失败原因）写入日志面板
+    if (logs.length > 0) get().addLogs(logs);
     await get().setActiveProject(p.id);
   },
 
@@ -367,13 +381,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   /** 更新项目同步目录：后端返回含绝对路径的项目，用它覆盖本地缓存（SyncBar 随之显隐） */
-  async updateProjectSyncDir(id, syncDir) {
-    const [updated, logs] = await api.updateProjectSyncDir(id, syncDir);
+  async updateProjectSyncDir(id, syncDir, resolve) {
+    const [updated, logs] = await api.updateProjectSyncDir(id, syncDir, resolve);
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? updated : p)),
     }));
     /* 绑定新目录时的数据迁移日志（迁移详情 / 失败原因）写入日志面板 */
     if (logs.length > 0) get().addLogs(logs);
+    /* 以仓库数据为准导入会覆盖项目节点/Server：活跃项目必须刷新节点列表，
+       否则资源树展示的还是导入前的旧数据 */
+    if (resolve === "git" && get().activeProjectId === id) {
+      await get().reloadNodes();
+    }
   },
 
   async deleteProject(id) {

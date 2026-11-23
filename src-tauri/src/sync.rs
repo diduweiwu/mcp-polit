@@ -449,6 +449,351 @@ pub async fn migrate_project_to_dir(db: &Db, project_id: i64, dir: &Path) -> Vec
     logs
 }
 
+/// 「以 Git 仓库数据为准」的绑定导入：把已有同步仓库的配置导入指定项目（覆盖式）。
+///
+/// 复用拉取导入链路 [`import_tree_dir`]：断开旧连接 -> 清空项目节点 ->
+/// 按 tree.json 重建目录树与 Server + 环境库覆盖导入。
+/// 仓库缺 tree.json（与绑定前检测结果竞态）时仅记 warn 日志，项目数据保持不变。
+pub async fn import_repo_to_project(
+    db: &Db,
+    project_id: i64,
+    dir: &Path,
+    app: &AppHandle,
+) -> Vec<LogEntry> {
+    let mut logs = Vec::new();
+    let project = {
+        let conn = db.0.lock().unwrap();
+        match crate::db::get_project(&conn, project_id) {
+            Ok(p) => p,
+            Err(e) => {
+                logs.push(entry("error", format!("读取项目失败：{e}")));
+                return logs;
+            }
+        }
+    };
+    import_tree_dir(dir, app, db, Some(&project), &mut logs).await;
+    logs
+}
+
+/// 「以项目数据为准」的绑定接管：清空已有仓库的工作区内容（保留 `.git`）后，
+/// 把项目当前数据迁移进去（导出 + 创建初始提交）。
+///
+/// 项目暂无数据时迁移会跳过写盘并给出说明日志，仓库保持空工作区——
+/// 这正是「以项目为准」的语义（目录旧数据让位给项目）。清空失败仅记 error
+/// 日志并继续迁移：迁移内部的清空重建会再次尝试清理并给出具体错误。
+pub async fn take_over_dir_with_project(db: &Db, project_id: i64, dir: &Path) -> Vec<LogEntry> {
+    let mut logs = Vec::new();
+    if let Err(e) = clear_repo_contents(dir) {
+        logs.push(entry("error", format!("清空仓库旧内容失败：{e}")));
+    }
+    logs.extend(migrate_project_to_dir(db, project_id, dir).await);
+    logs
+}
+
+/// 把同步仓库的数据合并进项目（不清空项目现有数据，两边都保留）。
+///
+/// 对齐规则：目录与 Server 按「父目录路径 + 名称」匹配（与工具内同父同名唯一
+/// 约束一致），环境库按环境名匹配。
+/// - 仓库独有：创建进项目；
+/// - 项目独有：原样保留；
+/// - 两边同名：`prefer_git` 为 true 用仓库配置覆盖项目配置，false 保留项目配置。
+///
+/// 合并完成后把结果回写工作区（与拉取后回写一致：文件与工具内数据一致，
+/// 后续推送无噪音）。不断开任何连接：被覆盖配置的 Server 在下次连接时生效。
+pub fn merge_repo_into_project(
+    db: &Db,
+    project_id: i64,
+    dir: &Path,
+    prefer_git: bool,
+) -> Vec<LogEntry> {
+    let mut logs = Vec::new();
+    let project = {
+        let conn = db.0.lock().unwrap();
+        match crate::db::get_project(&conn, project_id) {
+            Ok(p) => p,
+            Err(e) => {
+                logs.push(entry("error", format!("读取项目失败：{e}")));
+                return logs;
+            }
+        }
+    };
+    let tree_path = dir.join(TREE_META_FILE);
+    if !tree_path.is_file() {
+        logs.push(entry("error", format!("合并失败：{} 缺少 tree.json", dir.display())));
+        return logs;
+    }
+    let (project_name, nodes) = match parse_tree(&tree_path) {
+        Ok(v) => v,
+        Err(e) => {
+            logs.push(entry("error", e));
+            return logs;
+        }
+    };
+    let imports = collect_server_imports(dir, &nodes, &mut logs);
+    let _ = project_name; // 合并不改项目名，仅用于日志语义（与导入不同）
+
+    /* 项目现有节点的路径索引：folder 与 server 分开（同父下目录与 Server 同名合法） */
+    let mut folder_path_to_id: HashMap<String, i64> = HashMap::new();
+    let mut server_path_to_id: HashMap<String, i64> = HashMap::new();
+    let mut conn = db.0.lock().unwrap();
+    match crate::db::list_nodes(&conn, project_id) {
+        Ok(existing) => {
+            let by_id: HashMap<i64, &crate::models::TreeNode> =
+                existing.iter().map(|n| (n.id, n)).collect();
+            for n in &existing {
+                let mut parts = Vec::new();
+                let mut cur = Some(n.id);
+                let mut guard = 0;
+                while let Some(id) = cur {
+                    guard += 1;
+                    if guard > 1000 {
+                        break; // 防御成环；实际由 is_descendant 约束不会出现
+                    }
+                    let node = by_id.get(&id);
+                    let Some(node) = node else { break };
+                    parts.push(node.name.clone());
+                    cur = node.parent_id;
+                }
+                parts.reverse();
+                let path = parts.join("/");
+                if n.node_type == crate::models::NodeType::Folder {
+                    folder_path_to_id.insert(path, n.id);
+                } else {
+                    server_path_to_id.insert(path, n.id);
+                }
+            }
+        }
+        Err(e) => {
+            logs.push(entry("error", format!("读取项目现有节点失败：{e}")));
+            return logs;
+        }
+    }
+
+    /* git 侧引用 ID -> 路径（拓扑序建目录时同步填充） */
+    let mut git_id_to_path: HashMap<String, String> = HashMap::new();
+
+    /* 1) 目录：按引用拓扑序创建/复用（父引用就绪时其项目侧父 ID 必已在 id_map） */
+    let mut id_map: HashMap<String, i64> = HashMap::new();
+    let mut folders_created = 0usize;
+    let mut pending: Vec<&SyncNode> = nodes.iter().filter(|n| n.node_type == "folder").collect();
+    let mut guard = 0;
+    while !pending.is_empty() {
+        guard += 1;
+        if guard > 1000 {
+            logs.push(entry("error", format!("项目「{}」节点引用疑似成环，未挂载的节点已跳过", project.name)));
+            break;
+        }
+        let mut progress = false;
+        pending.retain(|n| {
+            let ready = n.parent.is_none() || id_map.contains_key(n.parent.as_deref().unwrap());
+            if !ready {
+                return true;
+            }
+            let parent_db = n.parent.as_deref().and_then(|p| id_map.get(p).copied());
+            let path = match n.parent.as_deref().and_then(|p| git_id_to_path.get(p)) {
+                Some(pp) => format!("{pp}/{}", n.name),
+                None => n.name.clone(),
+            };
+            let result = match folder_path_to_id.get(&path) {
+                /* 项目已有同名路径的目录：复用，不新建 */
+                Some(id) => Ok(*id),
+                None => crate::db::create_node(&conn, project_id, parent_db, crate::models::NodeType::Folder, &n.name)
+                    .map(|t| t.id)
+                    .map_err(|e| e.to_string()),
+            };
+            match result {
+                Ok(id) => {
+                    let existed = folder_path_to_id.contains_key(&path);
+                    id_map.insert(n.id.clone(), id);
+                    git_id_to_path.insert(n.id.clone(), path.clone());
+                    folder_path_to_id.insert(path, id);
+                    if !existed {
+                        folders_created += 1;
+                    }
+                    progress = true;
+                    false
+                }
+                Err(e) => {
+                    logs.push(entry("error", format!("创建目录「{}」失败：{e}", n.name)));
+                    false
+                }
+            }
+        });
+        if !progress {
+            for n in &pending {
+                logs.push(entry("warn", format!("目录「{}」的父节点缺失，已跳过", n.name)));
+            }
+            break;
+        }
+    }
+
+    /* 2) Server：路径命中按偏向处理，未命中创建。
+        父引用优先取 tree.json 节点引用（node_ref 反查节点 parent），文件内容
+        parent 可能被手工编辑丢失；额外扫描文件（无 node_ref）回退文件内 parent */
+    let node_by_id: HashMap<&str, &SyncNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut created = 0usize;
+    let mut overwritten = 0usize;
+    let mut kept = 0usize;
+    for imp in &imports {
+        let ss = &imp.server;
+        let tt = match ss.transport_type.as_str() {
+            "stdio" => crate::models::TransportType::Stdio,
+            "streamable_http" => crate::models::TransportType::StreamableHttp,
+            other => {
+                logs.push(entry("warn", format!(
+                    "Server「{}」transport_type 非法（{other}），跳过", imp.display_name
+                )));
+                continue;
+            }
+        };
+        let git_parent_ref = imp
+            .node_ref
+            .as_deref()
+            .and_then(|r| node_by_id.get(r))
+            .and_then(|n| n.parent.clone())
+            .or_else(|| imp.parent.clone());
+        let path = match git_parent_ref.as_deref().and_then(|p| git_id_to_path.get(p)) {
+            Some(pp) => format!("{pp}/{}", imp.display_name),
+            None => imp.display_name.clone(),
+        };
+        match server_path_to_id.get(&path).copied() {
+            Some(node_id) => {
+                if prefer_git {
+                    let cfg = crate::models::ServerConfig {
+                        node_id,
+                        transport_type: tt,
+                        command: ss.command.clone(),
+                        args: ss.args.clone(),
+                        env: ss.env.clone(),
+                        working_dir: ss.working_dir.clone(),
+                        url: ss.url.clone(),
+                        headers: ss.headers.clone(),
+                        sensitive_headers: ss.sensitive_headers.clone(),
+                        timeout_ms: ss.timeout_ms,
+                        enabled: ss.enabled,
+                        note: ss.note.clone(),
+                        envs: ss.envs.clone(),
+                        active_env: ss.active_env.clone(),
+                    };
+                    match crate::db::upsert_server_config(&conn, &cfg) {
+                        Ok(_) => overwritten += 1,
+                        Err(e) => logs.push(entry("error", format!(
+                            "覆盖 Server「{}」配置失败：{e}", imp.display_name
+                        ))),
+                    }
+                } else {
+                    kept += 1;
+                }
+            }
+            None => {
+                let parent_db = git_parent_ref.as_deref().and_then(|p| id_map.get(p).copied());
+                match crate::db::create_node(&conn, project_id, parent_db, crate::models::NodeType::Server, &imp.display_name) {
+                    Ok(node) => {
+                        let cfg = crate::models::ServerConfig {
+                            node_id: node.id,
+                            transport_type: tt,
+                            command: ss.command.clone(),
+                            args: ss.args.clone(),
+                            env: ss.env.clone(),
+                            working_dir: ss.working_dir.clone(),
+                            url: ss.url.clone(),
+                            headers: ss.headers.clone(),
+                            sensitive_headers: ss.sensitive_headers.clone(),
+                            timeout_ms: ss.timeout_ms,
+                            enabled: ss.enabled,
+                            note: ss.note.clone(),
+                            envs: ss.envs.clone(),
+                            active_env: ss.active_env.clone(),
+                        };
+                        match crate::db::upsert_server_config(&conn, &cfg) {
+                            Ok(_) => created += 1,
+                            Err(e) => logs.push(entry("error", format!(
+                                "保存 Server「{}」配置失败：{e}", imp.display_name
+                            ))),
+                        }
+                    }
+                    Err(e) => logs.push(entry("error", format!(
+                        "创建 Server「{}」失败：{e}", imp.display_name
+                    ))),
+                }
+            }
+        }
+    }
+
+    /* 3) 环境库按名称归并：同名按偏向取值，两边独有都保留 */
+    let env_path = dir.join(ENVIRONMENTS_FILE);
+    if env_path.is_file() {
+        match parse_environments_file(&env_path) {
+            Ok(list) => {
+                let existing = crate::db::list_environments(&conn, project_id).unwrap_or_default();
+                let mut merged: Vec<crate::db::EnvironmentInput> = existing
+                    .iter()
+                    .map(|e| crate::db::EnvironmentInput {
+                        name: e.name.clone(),
+                        variables: e.variables.clone(),
+                    })
+                    .collect();
+                for ge in &list {
+                    let vars = if ge.variables.is_null() {
+                        "{}".into()
+                    } else {
+                        serde_json::to_string(&ge.variables).unwrap_or_else(|_| "{}".into())
+                    };
+                    match merged.iter_mut().find(|m| m.name == ge.name) {
+                        Some(slot) => {
+                            if prefer_git {
+                                slot.variables = vars;
+                            }
+                        }
+                        None => merged.push(crate::db::EnvironmentInput {
+                            name: ge.name.clone(),
+                            variables: vars,
+                        }),
+                    }
+                }
+                match crate::db::replace_environments(&mut conn, project_id, &merged) {
+                    Ok(_) => logs.push(entry("info", format!(
+                        "环境库已合并：共 {} 个环境（项目保留 + 仓库合入，同名以{}为准）",
+                        merged.len(),
+                        if prefer_git { "仓库" } else { "项目" }
+                    ))),
+                    Err(e) => logs.push(entry("error", format!("合并环境库失败：{e}"))),
+                }
+            }
+            Err(e) => logs.push(entry("warn", format!(
+                "environments.json 解析失败，跳过环境库合并：{e}"
+            ))),
+        }
+    }
+
+    let folders_added = folders_created;
+    logs.push(entry("info", format!(
+        "项目「{}」与仓库数据合并完成：新增 {} 目录 / {} Server；同名 Server {}；项目独有配置已保留",
+        project.name,
+        folders_added,
+        created,
+        if prefer_git {
+            format!("以仓库配置覆盖 {overwritten} 个")
+        } else {
+            format!("保留项目配置 {kept} 个")
+        }
+    )));
+
+    /* 4) 回写工作区：合并结果落盘，文件与工具内数据一致（后续推送无噪音）；
+        失败不阻断（下次变更/推送会自动重试） */
+    drop(conn);
+    match load_project_data(db, &project, &mut logs) {
+        Some((write_nodes, servers)) => {
+            let environments = load_environments_data(db, project_id, &mut logs);
+            if let Err(e) = write_project_files(dir, &project.name, &write_nodes, &servers, environments.as_deref()) {
+                logs.push(entry("warn", format!("合并结果回写同步目录失败（下次推送/变更时会自动重试）：{e}")));
+            }
+        }
+        None => {}
+    }
+    logs
+}
+
 /* ==================== 自动导出（实时同步） ==================== */
 
 /// 同步目录写盘互斥：自动导出 / 手动推送 / 拉取回写并发时防止交错写坏文件。
@@ -862,6 +1207,36 @@ fn load_environments_data(
     }
 }
 
+/// 清空目录内容但保留 `.git`（目录与 worktree 文件形态统一按文件名判断）。
+///
+/// 调用方需自行持有 [`WRITE_LOCK`]（本函数不拿锁，便于在已持锁的写盘流程内复用）。
+fn remove_entries_except_git(dir: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir).map_err(|e| format!("读取同步目录失败：{e}"))? {
+        let path = entry.map_err(|e| format!("读取同步目录失败：{e}"))?.path();
+        if path.file_name().is_some_and(|n| n == ".git") {
+            continue;
+        }
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| format!("清理旧目录失败：{e}"))?;
+        } else {
+            std::fs::remove_file(&path).map_err(|e| format!("清理旧文件失败：{e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// 清空同步仓库工作区内容（保留 `.git`），「以项目数据为准」接管已有仓库前调用。
+///
+/// 先清掉仓库旧数据：项目有数据时随后的迁移导出会重新写入全部文件；
+/// 项目暂无数据时迁移会跳过写盘，不先清会导致仓库旧内容残留并被后续推送误提交。
+pub fn clear_repo_contents(dir: &Path) -> Result<(), String> {
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if dir.exists() {
+        remove_entries_except_git(dir)?;
+    }
+    Ok(())
+}
+
 /// 把单个项目的数据写入同步目录（树形镜像布局，先清空重建防残留）。
 ///
 /// 布局：`tree.json`（结构元数据）+ `environments.json`（项目环境库）+
@@ -885,17 +1260,7 @@ fn write_project_files(
     // 整目录删除会把仓库炸掉（推送报 not a git repository、分支读取失败）。
     // `.git` 兼容目录与 worktree 的文件形态，统一按文件名判断
     if dir.exists() {
-        for entry in std::fs::read_dir(dir).map_err(|e| format!("读取同步目录失败：{e}"))? {
-            let path = entry.map_err(|e| format!("读取同步目录失败：{e}"))?.path();
-            if path.file_name().is_some_and(|n| n == ".git") {
-                continue;
-            }
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path).map_err(|e| format!("清理旧目录失败：{e}"))?;
-            } else {
-                std::fs::remove_file(&path).map_err(|e| format!("清理旧文件失败：{e}"))?;
-            }
-        }
+        remove_entries_except_git(dir)?;
     } else {
         std::fs::create_dir_all(dir).map_err(|e| format!("创建目录失败：{e}"))?;
     }
@@ -1075,6 +1440,9 @@ struct ServerImport {
     display_name: String,
     /// 挂载的目录引用 ID（tree.json 引用体系）；None = 根层
     parent: Option<String>,
+    /// tree.json 登记的 server 节点引用 ID（额外扫描的文件为 None）：
+    /// 合并按树结构对齐时优先用它（配置文件内的 parent 可能被手工编辑丢失）
+    node_ref: Option<String>,
     /// 配置内容
     server: SyncServer,
 }
@@ -1133,6 +1501,7 @@ fn collect_server_imports(
                 imports.push(ServerImport {
                     display_name: n.name.clone(),
                     parent: ss.parent.clone(),
+                    node_ref: Some(n.id.clone()),
                     server: ss,
                 });
             }
@@ -1213,6 +1582,7 @@ fn scan_extra_servers(
         out.push(ServerImport {
             display_name: stem,
             parent,
+            node_ref: None,
             server: ss,
         });
     }
@@ -1545,27 +1915,68 @@ fn dir_has_content(dir: &Path) -> bool {
     }
 }
 
-/// 准备项目同步目录：展开 ~、创建目录、校验必须为空目录、必要时 git init。返回可用的仓库路径。
+/// 展开 `~/` 前缀为用户主目录（同步目录路径解析共用）。
+fn expand_home(raw: &str) -> Result<std::path::PathBuf, String> {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = std::env::var("HOME").map_err(|_| "无法确定用户主目录".to_string())?;
+        Ok(std::path::PathBuf::from(home).join(rest))
+    } else {
+        Ok(std::path::PathBuf::from(raw))
+    }
+}
+
+/// 同步目录绑定前检测结果（前端据此决定是否弹「数据冲突」选择框）。
+#[derive(Debug, serde::Serialize)]
+pub struct SyncDirStatus {
+    /// 目录是否存在且是目录（不存在时绑定流程会自动创建）
+    pub exists: bool,
+    /// 忽略 `.git` / `.DS_Store` 后是否有实际内容
+    pub has_content: bool,
+    /// 是否为 MCPilot 同步仓库（含 tree.json 元数据，可作为导入来源）
+    pub is_repo: bool,
+}
+
+/// 检查同步目录状态（绑定前检测，不产生任何副作用）。
+///
+/// `~/` 前缀按主目录展开；路径不存在不报错（返回 `exists=false`，
+/// 绑定流程会自动创建）。
+///
+/// # 示例
+///
+/// ```text
+/// let st = sync_dir_status("~/mcpilot-sync/backend")?;
+/// // st.has_content && st.is_repo -> 目录已有同步仓库数据，需要用户选择数据方向
+/// ```
+pub fn sync_dir_status(raw: &str) -> Result<SyncDirStatus, String> {
+    let expanded = expand_home(raw)?;
+    let exists = expanded.is_dir();
+    let has_content = exists && dir_has_content(&expanded);
+    let is_repo = expanded.join(TREE_META_FILE).is_file();
+    Ok(SyncDirStatus {
+        exists,
+        has_content,
+        is_repo,
+    })
+}
+
+/// 准备项目同步目录：展开 ~、创建目录、校验内容、必要时 git init。返回可用的仓库路径。
 ///
 /// 空目录规则：目录不存在视为合法（自动创建后即为空）；已存在的目录必须为空
 /// （忽略 `.git` / `.DS_Store`），否则拒绝绑定——防止把项目数据绑到已有内容的目录上
 /// 造成推送/拉取互相覆盖。
+/// 例外：MCPilot 同步仓库（含 tree.json）允许绑定，数据方向（覆盖/导入）由用户
+/// 在前端冲突弹窗中选择，命令层按 `resolve` 参数处理。
 pub fn prepare_sync_dir(raw: &str) -> Result<std::path::PathBuf, String> {
-    let expanded = if let Some(rest) = raw.strip_prefix("~/") {
-        let home = std::env::var("HOME").map_err(|_| "无法确定用户主目录".to_string())?;
-        std::path::PathBuf::from(home).join(rest)
-    } else {
-        std::path::PathBuf::from(raw)
-    };
+    let expanded = expand_home(raw)?;
     if !expanded.exists() {
         std::fs::create_dir_all(&expanded).map_err(|e| format!("创建目录失败：{e}"))?;
     }
     if !expanded.is_dir() {
         return Err(format!("{} 不是目录", expanded.display()));
     }
-    if dir_has_content(&expanded) {
+    if dir_has_content(&expanded) && !expanded.join(TREE_META_FILE).is_file() {
         return Err(format!(
-            "同步目录必须是空目录：「{}」中已有内容。请换一个空目录，或清空该目录后重试",
+            "同步目录必须是空目录：「{}」中已有内容，且不是 MCPilot 同步仓库（缺少 tree.json），无法接管。请换一个空目录，或清空该目录后重试",
             expanded.display()
         ));
     }
@@ -1792,13 +2203,64 @@ mod tests {
     }
 
     #[test]
-    fn 非空目录拒绝绑定() {
+    fn 非仓库的非空目录拒绝绑定() {
         let base = std::env::temp_dir().join(format!("mcpilot-bind-test-{}", std::process::id()));
         let full = base.join("full");
         std::fs::create_dir_all(&full).unwrap();
         std::fs::write(full.join("old.txt"), "x").unwrap();
         let err = prepare_sync_dir(full.to_str().unwrap()).unwrap_err();
         assert!(err.contains("空目录"), "错误信息应说明必须为空目录：{err}");
+        assert!(err.contains("同步仓库"), "错误信息应说明目录不是 MCPilot 同步仓库：{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn 含tree_json的同步仓库放行绑定() {
+        let base = std::env::temp_dir().join(format!("mcpilot-bind-repo-test-{}", std::process::id()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("tree.json"), "{}").unwrap();
+        let ok = prepare_sync_dir(repo.to_str().unwrap()).unwrap();
+        assert_eq!(ok, repo, "同步仓库目录应原样放行");
+        assert!(repo.join(".git").exists(), "放行时应已自动 git init");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn 同步目录状态检测三态() {
+        let base = std::env::temp_dir().join(format!("mcpilot-status-test-{}", std::process::id()));
+        // 不存在：允许绑定（自动创建）
+        let st = sync_dir_status(base.join("absent").to_str().unwrap()).unwrap();
+        assert!(!st.exists && !st.has_content && !st.is_repo);
+        // 空目录 / 仅 .git：无内容，非仓库
+        let empty = base.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let st = sync_dir_status(empty.to_str().unwrap()).unwrap();
+        assert!(st.exists && !st.has_content && !st.is_repo);
+        // 同步仓库：有内容且含 tree.json
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("tree.json"), "{}").unwrap();
+        let st = sync_dir_status(repo.to_str().unwrap()).unwrap();
+        assert!(st.exists && st.has_content && st.is_repo);
+        // ~ 展开：不存在的主目录相对路径也不报错
+        let _ = sync_dir_status("~/mcpilot-status-test-nonexistent").unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn 清空仓库内容保留git() {
+        let base = std::env::temp_dir().join(format!("mcpilot-clear-test-{}", std::process::id()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git").join("objects")).unwrap();
+        std::fs::create_dir_all(repo.join("网关组")).unwrap();
+        std::fs::write(repo.join("tree.json"), "{}").unwrap();
+        std::fs::write(repo.join("网关组").join("x.json"), "{}").unwrap();
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: main").unwrap();
+        clear_repo_contents(&repo).unwrap();
+        assert!(!repo.join("tree.json").exists(), "tree.json 应被清掉");
+        assert!(!repo.join("网关组").exists(), "分组目录应被清掉");
+        assert!(repo.join(".git").join("HEAD").exists(), ".git 必须完整保留");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1899,6 +2361,134 @@ mod tests {
             .map(|i| i.parent.clone())
             .collect();
         assert_eq!(xs, vec![Some("n1".to_string()), Some("n4".to_string())]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 构造合并测试用的仓库 fixture：目录「网关组」+ 其下「同名服务」+ 根层「仓库独有」，
+    /// 环境库含「共享」（仓库版）与「仓库环境」。
+    fn merge_repo_fixture(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("网关组")).unwrap();
+        let nodes = vec![
+            node("n0", None, "folder", "网关组", 0),
+            node("n1", Some("n0"), "server", "同名服务", 0),
+            node("n2", None, "server", "仓库独有", 1),
+        ];
+        let tree = serde_json::json!({ "project": "仓库项目", "nodes": nodes });
+        std::fs::write(
+            dir.join(TREE_META_FILE),
+            serde_json::to_string_pretty(&tree).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("网关组").join("同名服务.json"),
+            serde_json::to_string_pretty(&server_cfg("repo")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("仓库独有.json"),
+            serde_json::to_string_pretty(&server_cfg("repo_only")).unwrap(),
+        )
+        .unwrap();
+        let envs = serde_json::json!({
+            "environments": [
+                { "name": "共享", "variables": { "K": "repo" } },
+                { "name": "仓库环境", "variables": { "R": "1" } }
+            ]
+        });
+        std::fs::write(dir.join(ENVIRONMENTS_FILE), serde_json::to_string_pretty(&envs).unwrap()).unwrap();
+    }
+
+    /// 给项目写一份最小 stdio Server 配置（合并测试用）。
+    fn put_local_config(conn: &rusqlite::Connection, node_id: i64, command: &str) {
+        crate::db::upsert_server_config(
+            conn,
+            &crate::models::ServerConfig {
+                node_id,
+                transport_type: crate::models::TransportType::Stdio,
+                command: Some(command.into()),
+                args: None,
+                env: None,
+                working_dir: None,
+                url: None,
+                headers: None,
+                sensitive_headers: None,
+                timeout_ms: 30_000,
+                enabled: true,
+                note: None,
+                envs: None,
+                active_env: None,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn 合并仓库数据进项目_同名偏向与两边保留() {
+        let base = std::env::temp_dir().join(format!("mcpilot-merge-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        merge_repo_fixture(&repo);
+
+        let db = Db(std::sync::Mutex::new(mem_db()));
+        let mut conn = db.0.lock().unwrap();
+        let p = crate::db::create_project(&conn, "合并项目", None).unwrap();
+        // 项目现有：网关组/同名服务(项目版配置) + 根层「项目独有」；环境库：共享(项目版) + 项目环境
+        let folder = crate::db::create_node(&conn, p.id, None, NodeType::Folder, "网关组").unwrap();
+        let same = crate::db::create_node(&conn, p.id, Some(folder.id), NodeType::Server, "同名服务").unwrap();
+        put_local_config(&conn, same.id, "local");
+        let solo = crate::db::create_node(&conn, p.id, None, NodeType::Server, "项目独有").unwrap();
+        put_local_config(&conn, solo.id, "local_only");
+        crate::db::replace_environments(
+            &mut conn,
+            p.id,
+            &[
+                crate::db::EnvironmentInput { name: "共享".into(), variables: r#"{"K":"local"}"#.into() },
+                crate::db::EnvironmentInput { name: "项目环境".into(), variables: r#"{"P":"1"}"#.into() },
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        /* prefer_git：同名以仓库为准 */
+        let logs = merge_repo_into_project(&db, p.id, &repo, true);
+        assert!(logs.iter().any(|l| l.message.contains("合并完成")), "应产出汇总日志：{logs:?}");
+        let conn = db.0.lock().unwrap();
+        let nodes = crate::db::list_nodes(&conn, p.id).unwrap();
+        // 仓库独有已创建且挂根层；同名服务复用项目节点；项目独有保留
+        let repo_only = nodes.iter().find(|n| n.name == "仓库独有").expect("仓库独有应被创建");
+        assert_eq!(repo_only.parent_id, None);
+        let same_after = nodes.iter().find(|n| n.name == "同名服务").expect("同名服务应保留");
+        assert_eq!(same_after.parent_id, Some(folder.id), "同名服务应挂在同一目录下");
+        assert!(nodes.iter().any(|n| n.name == "项目独有"), "项目独有应保留");
+        let cfg = crate::db::get_server_config(&conn, same_after.id).unwrap();
+        assert_eq!(cfg.command.as_deref(), Some("repo"), "prefer_git 时同名配置应被仓库覆盖");
+        let envs = crate::db::list_environments(&conn, p.id).unwrap();
+        let shared = envs.iter().find(|e| e.name == "共享").expect("共享环境应保留");
+        assert!(shared.variables.contains("repo"), "prefer_git 时同名环境应取仓库变量：{}", shared.variables);
+        assert!(envs.iter().any(|e| e.name == "仓库环境"), "仓库独有环境应合入");
+        assert!(envs.iter().any(|e| e.name == "项目环境"), "项目独有环境应保留");
+        drop(conn);
+        // 回写后仓库工作区包含项目独有内容（合并结果落盘）
+        assert!(repo.join("项目独有.json").is_file(), "合并结果应回写工作区");
+
+        /* prefer_project：同名以项目为准（重建一套干净数据再验证覆盖方向） */
+        let repo2 = base.join("repo2");
+        merge_repo_fixture(&repo2);
+        let db2 = Db(std::sync::Mutex::new(mem_db()));
+        let conn = db2.0.lock().unwrap();
+        let p2 = crate::db::create_project(&conn, "合并项目2", None).unwrap();
+        let folder2 = crate::db::create_node(&conn, p2.id, None, NodeType::Folder, "网关组").unwrap();
+        let same2 = crate::db::create_node(&conn, p2.id, Some(folder2.id), NodeType::Server, "同名服务").unwrap();
+        put_local_config(&conn, same2.id, "local");
+        drop(conn);
+        let logs2 = merge_repo_into_project(&db2, p2.id, &repo2, false);
+        assert!(logs2.iter().any(|l| l.message.contains("保留项目配置 1 个")), "应保留项目同名配置：{logs2:?}");
+        let conn = db2.0.lock().unwrap();
+        let nodes2 = crate::db::list_nodes(&conn, p2.id).unwrap();
+        let same2_after = nodes2.iter().find(|n| n.name == "同名服务").unwrap();
+        let cfg2 = crate::db::get_server_config(&conn, same2_after.id).unwrap();
+        assert_eq!(cfg2.command.as_deref(), Some("local"), "prefer_project 时同名配置应保留项目版");
+        drop(conn);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2025,11 +2615,13 @@ mod tests {
             ServerImport {
                 display_name: "x".into(),
                 parent: Some("n0".into()),
+                node_ref: None,
                 server: server_cfg("cmd-a"),
             },
             ServerImport {
                 display_name: "x".into(),
                 parent: Some("n9".into()), // 无效引用 → 根层兜底
+                node_ref: None,
                 server: server_cfg("cmd-b"),
             },
         ];

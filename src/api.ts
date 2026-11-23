@@ -11,6 +11,8 @@ import type {
   Environment,
   Project,
   ServerConfig,
+  SyncDirStatus,
+  SyncDirResolve,
   ToolInfo,
   TreeNode,
   NodeType,
@@ -24,9 +26,28 @@ export const REPO_URL = "https://github.com/diduweiwu/mcp-polit";
 /** 列出全部项目 */
 export const listProjects = () => invoke<Project[]>("list_projects");
 
-/** 新建项目（syncDir 为可选的同步目录，后端会校验/创建并 git init） */
-export const createProject = (name: string, syncDir?: string) =>
-  invoke<Project>("create_project", { name, syncDir: syncDir || null });
+/**
+ * 检查同步目录状态（绑定前检测，无副作用）。
+ * 返回是否存在、是否已有内容、是否为 MCPilot 同步仓库（含 tree.json）；
+ * 调用方据此在保存前判断：普通有内容目录直接拦截，同步仓库目录弹「数据冲突」选择框。
+ */
+export const syncDirStatus = (path: string) => invoke<SyncDirStatus>("sync_dir_status", { path });
+
+/**
+ * 新建项目（syncDir 为可选的同步目录，后端会校验/创建并 git init）。
+ *
+ * 目录为已有数据的 MCPilot 同步仓库时需传 resolve 指明数据方向（冲突弹窗的选择结果）：
+ * "project" = 以项目数据为准（清空仓库内容）；"git" = 以仓库数据为准（导入为项目初始数据）；
+ * "merge_git" / "merge_project" = 合并（两边都保留，同名按偏向取值）。
+ *
+ * @returns 元组：[项目，操作日志]——日志（导入/迁移详情）由调用方写入日志面板
+ */
+export const createProject = (name: string, syncDir?: string, resolve?: SyncDirResolve) =>
+  invoke<[Project, Array<{ level: string; message: string }>]>("create_project", {
+    name,
+    syncDir: syncDir || null,
+    resolve: resolve ?? null,
+  });
 
 /** 重命名项目 */
 export const renameProject = (id: number, name: string) =>
@@ -35,15 +56,19 @@ export const renameProject = (id: number, name: string) =>
 /**
  * 更新项目同步目录（传 null 解除绑定）。
  *
- * 目录规则：必须是空目录（不存在会自动创建并 git init），非空目录拒绝绑定；
- * 绑定成功后项目已有数据会自动迁移到该目录并创建初始提交。
+ * 目录规则：必须是空目录（不存在会自动创建并 git init）；MCPilot 同步仓库（含 tree.json）
+ * 允许绑定但需传 resolve 指明数据方向："project" = 以项目数据为准（清空仓库后导出迁移）；
+ * "git" = 以仓库数据为准（导入覆盖项目数据）；"merge_git" / "merge_project" = 合并
+ * （两边都保留，同名按偏向取值）；其余非空目录拒绝绑定。
+ * 空目录绑定成功后项目已有数据会自动迁移到该目录并创建初始提交。
  *
- * @returns 元组：[更新后的项目，操作日志]——日志（迁移/错误信息）由调用方写入日志面板
+ * @returns 元组：[更新后的项目，操作日志]——日志（迁移/导入/错误信息）由调用方写入日志面板
  */
-export const updateProjectSyncDir = (id: number, syncDir: string | null) =>
+export const updateProjectSyncDir = (id: number, syncDir: string | null, resolve?: SyncDirResolve) =>
   invoke<[Project, Array<{ level: string; message: string }>]>("update_project_sync_dir", {
     id,
     syncDir,
+    resolve: resolve ?? null,
   });
 
 /** 用系统文件管理器打开目录（macOS Finder / Windows 资源管理器 / Linux 文件管理器） */

@@ -29,8 +29,21 @@ pub fn list_projects(db: State<'_, Db>) -> CmdResult<Vec<Project>> {
 ///
 /// - `name`: 项目名称
 /// - `sync_dir`: 可选的同步目录；填写时会校验/创建并自动 git init
+/// - `resolve`: 目录为已有数据的 MCPilot 同步仓库时的数据方向（前端冲突弹窗的选择结果）：
+///   `project` = 以项目数据为准（清空仓库内容，新建项目从空开始）；
+///   `git` = 以仓库数据为准（导入仓库配置作为项目初始数据）；
+///   `merge_git` / `merge_project` = 合并（仓库数据并入项目，两边都保留，同名按偏向取值）；
+///   其余/None = 空目录正常绑定
+///
+/// 返回（项目，操作日志）：日志（导入/清空/迁移详情）由前端写入日志面板。
 #[tauri::command]
-pub fn create_project(db: State<'_, Db>, name: String, sync_dir: Option<String>) -> CmdResult<Project> {
+pub async fn create_project(
+    app: AppHandle,
+    db: State<'_, Db>,
+    name: String,
+    sync_dir: Option<String>,
+    resolve: Option<String>,
+) -> CmdResult<(Project, Vec<crate::models::LogEntry>)> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(crate::error::AppError::new("项目名称不能为空"));
@@ -44,8 +57,36 @@ pub fn create_project(db: State<'_, Db>, name: String, sync_dir: Option<String>)
         ),
         None => None,
     };
-    let conn = db.0.lock().unwrap();
-    crate::db::create_project(&conn, &name, dir.as_deref())
+    /* 锁作用域收窄：MutexGuard 不能跨 await（下方导入/迁移是 async） */
+    let project = {
+        let conn = db.0.lock().unwrap();
+        crate::db::create_project(&conn, &name, dir.as_deref())?
+    };
+    let mut logs = Vec::new();
+    if let Some(d) = &dir {
+        let path = std::path::Path::new(d);
+        match resolve.as_deref() {
+            /* 以仓库数据为准：导入仓库配置作为新建项目的初始数据 */
+            Some("git") => logs = crate::sync::import_repo_to_project(&db, project.id, path, &app).await,
+            /* 以项目数据为准：新建项目尚无数据，清空仓库旧内容后走迁移（产出说明日志） */
+            Some("project") => logs = crate::sync::take_over_dir_with_project(&db, project.id, path).await,
+            /* 合并：仓库数据并入项目，两边都保留（同名按偏向取值） */
+            Some("merge_git") => logs = crate::sync::merge_repo_into_project(&db, project.id, path, true),
+            Some("merge_project") => logs = crate::sync::merge_repo_into_project(&db, project.id, path, false),
+            /* 空目录/新建目录：无需处理 */
+            _ => {}
+        }
+    }
+    Ok((project, logs))
+}
+
+/// 检查同步目录状态（绑定前检测）。
+///
+/// 返回是否存在、是否已有内容、是否为 MCPilot 同步仓库（含 tree.json）；
+/// 前端据此在保存前判断：普通有内容目录直接拦截，同步仓库目录弹「数据冲突」选择框。
+#[tauri::command]
+pub fn sync_dir_status(path: String) -> CmdResult<crate::sync::SyncDirStatus> {
+    crate::sync::sync_dir_status(&path).map_err(crate::error::AppError::new)
 }
 
 /// 重命名项目。
@@ -62,17 +103,26 @@ pub fn rename_project(db: State<'_, Db>, id: i64, name: String) -> CmdResult<()>
 /// 更新项目同步目录（编辑项目用）。
 ///
 /// - 目录规则：必须是空目录（不存在时自动创建并 git init；忽略 `.git` / `.DS_Store`
-///   残留），非空目录拒绝绑定，防止项目数据与目录已有内容互相覆盖；
-/// - 数据迁移：绑定成功后，若项目已有数据（目录树 / Server 配置），
-///   会把数据导出到该目录并创建初始 git 提交（不 pull / 不 push）；
+///   残留）；已存在的 MCPilot 同步仓库（含 tree.json）允许绑定，数据方向由 `resolve`
+///   决定；其余非空目录拒绝绑定，防止项目数据与目录已有内容互相覆盖；
+/// - `resolve` = `project`：以项目数据为准——清空仓库工作区内容，再把项目数据
+///   导出迁移进去并创建初始提交；
+/// - `resolve` = `git`：以仓库数据为准——把仓库配置导入项目（覆盖项目现有
+///   节点 / Server / 环境库），不做导出迁移；
+/// - `resolve` = `merge_git` / `merge_project`：合并——仓库数据并入项目（仓库
+///   独有创建、项目独有保留），同名目录/Server/环境按名称对齐后以偏向方覆盖；
+/// - 其余（空目录）：绑定成功后，若项目已有数据，会导出到该目录并创建初始
+///   git 提交（不 pull / 不 push）；
 /// - 传 null 或空串解除绑定（不涉及迁移）。
 ///
 /// 返回（更新后的项目，操作日志）：日志由前端写入日志面板。
 #[tauri::command]
 pub async fn update_project_sync_dir(
+    app: AppHandle,
     db: State<'_, Db>,
     id: i64,
     sync_dir: Option<String>,
+    resolve: Option<String>,
 ) -> CmdResult<(Project, Vec<crate::models::LogEntry>)> {
     let dir = match sync_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(d) => Some(
@@ -90,7 +140,18 @@ pub async fn update_project_sync_dir(
     };
     let mut logs = Vec::new();
     if let Some(d) = &dir {
-        logs = crate::sync::migrate_project_to_dir(&db, id, std::path::Path::new(d)).await;
+        let path = std::path::Path::new(d);
+        match resolve.as_deref() {
+            /* 以仓库数据为准：导入覆盖项目数据（不导出迁移） */
+            Some("git") => logs = crate::sync::import_repo_to_project(&db, id, path, &app).await,
+            /* 以项目数据为准：先清空仓库旧内容，再按迁移流程导出 */
+            Some("project") => logs = crate::sync::take_over_dir_with_project(&db, id, path).await,
+            /* 合并：仓库数据并入项目，两边都保留（同名按偏向取值） */
+            Some("merge_git") => logs = crate::sync::merge_repo_into_project(&db, id, path, true),
+            Some("merge_project") => logs = crate::sync::merge_repo_into_project(&db, id, path, false),
+            /* 空目录绑定：维持原迁移行为 */
+            _ => logs = crate::sync::migrate_project_to_dir(&db, id, path).await,
+        }
     }
     Ok((project, logs))
 }

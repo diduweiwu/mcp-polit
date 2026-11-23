@@ -130,16 +130,25 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     case "get_settings": return Object.entries(settings);
     case "save_setting": settings[args.key as string] = args.value as string; return null;
     case "list_projects": return projects;
+    // 新建项目：返回 [项目, 操作日志] 元组（resolve 数据方向仅真实后端处理，mock 忽略）
     case "create_project": {
       const p = { id: projects.length + 10, name: args.name as string, created_at: "", updated_at: "", sync_dir: (args.syncDir as string) ?? null };
-      projects.push(p); return p;
+      projects.push(p); return [p, []];
     }
     case "rename_project": { const p = projects.find((x) => x.id === args.id); if (p) p.name = args.name as string; return null; }
-    // 更新同步目录：必须返回更新后的完整项目（store 用返回值覆盖本地缓存，返回 null 会导致渲染崩溃）
+    // 更新同步目录：返回 [更新后的完整项目, 操作日志] 元组（store 用返回值覆盖本地缓存，
+    // 返回 null 会导致渲染崩溃；resolve 数据方向仅真实后端处理，mock 忽略）
     case "update_project_sync_dir": {
       const p = projects.find((x) => x.id === args.id);
       if (p) p.sync_dir = (args.syncDir as string) ?? null;
-      return p ?? null;
+      return [p, []];
+    }
+    // 同步目录状态检测：dev 模式约定路径含 "conflict" 时模拟「已有数据的同步仓库」
+    // （可预览数据冲突选择弹窗），其余返回「不存在」视作空目录直接绑定
+    case "sync_dir_status": {
+      const path = (args.path as string) ?? "";
+      if (path.includes("conflict")) return { exists: true, has_content: true, is_repo: true };
+      return { exists: false, has_content: false, is_repo: false };
     }
     case "delete_project": { const i = projects.findIndex((x) => x.id === args.id); if (i >= 0) projects.splice(i, 1); return null; }
     case "list_nodes": return nodes.filter((n) => n.project_id === args.projectId);
