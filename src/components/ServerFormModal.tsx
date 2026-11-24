@@ -196,10 +196,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
         const saved = { ...cfg, node_id: node.id };
         await api.saveServerConfig(saved);
         useAppStore.getState().updateConfigCache(saved);
-        await reloadNodes();
+        await reloadNodes({ keepExpand: true });
         void selectNode(node.id);
       }
-      await reloadNodes();
+      await reloadNodes({ keepExpand: true });
       scheduleSyncExport(); // 实时同步：配置已变更，防抖写盘到同步目录
       onClose();
     } catch (e) {

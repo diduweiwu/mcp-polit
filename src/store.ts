@@ -126,8 +126,15 @@ interface AppState {
 
   /** 切换激活项目 */
   setActiveProject: (id: number) => Promise<void>;
-  /** 重新加载当前项目节点列表 */
-  reloadNodes: () => Promise<void>;
+  /**
+   * 重新加载当前项目节点列表。
+   *
+   * @param opts.keepExpand true = 保留现有目录展开状态（新建/删除等节点级操作后用，
+   *                        节点 ID 稳定，不打扰用户当前视图）；
+   *                        省略 = 重置为「全部展开」兜底（项目加载、git 拉取导入等
+   *                        数据整体替换场景，节点 ID 可能全部变化，按 ID 记忆无意义）
+   */
+  reloadNodes: (opts?: { keepExpand?: boolean }) => Promise<void>;
 
   /**
    * 新建项目（可带同步目录）。
@@ -154,6 +161,8 @@ interface AppState {
   moveNode: (id: number, newParentId: number | null) => Promise<void>;
   /** 展开目录（含沿路祖先） */
   expandNode: (id: number) => void;
+  /** 展开某节点的全部祖先目录（不含自身），保证该节点在树中可见；不改动其他目录的展开状态 */
+  revealNode: (id: number) => void;
   /** 折叠/展开切换 */
   toggleExpand: (id: number) => void;
   /** 一键展开当前项目全部目录 */
@@ -353,10 +362,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  async reloadNodes() {
+  async reloadNodes(opts) {
     const id = get().activeProjectId;
     if (id == null) return;
     const nodes = await api.listNodes(id);
+    // 节点级增删改后的刷新：保留用户当前展开状态，不重置视图
+    if (opts?.keepExpand) {
+      set({ nodes });
+      return;
+    }
     // 默认展开全部目录（少量节点时体验最好）
     const expandedIds: Record<number, boolean> = {};
     for (const n of nodes) {
@@ -412,14 +426,17 @@ export const useAppStore = create<AppState>((set, get) => ({
   async createNode(parentId, type, name) {
     const pid = get().activeProjectId;
     if (pid == null) return;
-    await api.createNode(pid, parentId, type, name);
-    await get().reloadNodes();
+    const node = await api.createNode(pid, parentId, type, name);
+    await get().reloadNodes({ keepExpand: true });
+    // 只保证新建节点可见（展开祖先链）；目录再展开自身，其余目录保持原状
+    get().revealNode(node.id);
+    if (type === "folder") get().expandNode(node.id);
     scheduleSyncExport();
   },
 
   async renameNode(id, name) {
     await api.renameNode(id, name);
-    await get().reloadNodes();
+    await get().reloadNodes({ keepExpand: true });
     scheduleSyncExport();
   },
 
@@ -434,13 +451,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       patch.results = [];
     }
     set(patch as AppState);
-    await get().reloadNodes();
+    await get().reloadNodes({ keepExpand: true });
     scheduleSyncExport();
   },
 
   async moveNode(id, newParentId) {
     await api.moveNode(id, newParentId);
-    await get().reloadNodes();
+    await get().reloadNodes({ keepExpand: true });
+    // 展开目标祖先链：拖进折叠目录时移动结果可见（否则节点像「消失」）
+    get().revealNode(id);
     scheduleSyncExport();
   },
 
@@ -449,13 +468,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!src) return;
     // 副本名称 = 原名 + 4 位随机 base36 后缀，避免同级重名
     const suffix = Math.random().toString(36).slice(2, 6);
-    await api.duplicateNode(id, `${src.name}-${suffix}`);
-    await get().reloadNodes();
+    const copy = await api.duplicateNode(id, `${src.name}-${suffix}`);
+    await get().reloadNodes({ keepExpand: true });
+    // 副本与源同级（祖先已随源展开）；目录副本展开自身即可见其子树
+    get().revealNode(copy.id);
+    if (copy.node_type === "folder") get().expandNode(copy.id);
     scheduleSyncExport();
   },
 
   expandNode(id) {
     set((s) => ({ expandedIds: { ...s.expandedIds, [id]: true } }));
+  },
+
+  revealNode(id) {
+    let cur = get().nodes.find((n) => n.id === id)?.parent_id ?? null;
+    while (cur != null) {
+      get().expandNode(cur);
+      cur = get().nodes.find((n) => n.id === cur)?.parent_id ?? null;
+    }
   },
 
   toggleExpand(id) {
@@ -482,12 +512,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const node = get().nodes.find((n) => n.id === id);
     if (!node || node.node_type !== "server") return;
     // 展开祖先目录，保证选中项可见
-    let cur = node.parent_id;
-    while (cur != null) {
-      get().expandNode(cur);
-      const parent = get().nodes.find((n) => n.id === cur);
-      cur = parent?.parent_id ?? null;
-    }
+    get().revealNode(id);
     set({ selectedNodeId: id, selectedToolName: null, results: [] });
     // 按需加载配置摘要（单击即看配置，不自动连接）
     void get().loadConfig(id);
