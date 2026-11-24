@@ -285,6 +285,13 @@ pub fn rename_node(db: State<'_, Db>, id: i64, name: String) -> CmdResult<TreeNo
     crate::db::rename_node(&conn, id, &name)
 }
 
+/// 设置节点自定义图标（目录 / Server 通用）；`icon` 传 None 恢复默认图标。
+#[tauri::command]
+pub fn set_node_icon(db: State<'_, Db>, id: i64, icon: Option<String>) -> CmdResult<TreeNode> {
+    let conn = db.0.lock().unwrap();
+    crate::db::set_node_icon(&conn, id, icon.as_deref())
+}
+
 /// 移动节点到新的父目录（支持拖拽）。
 #[tauri::command]
 pub fn move_node(db: State<'_, Db>, id: i64, new_parent_id: Option<i64>) -> CmdResult<TreeNode> {
@@ -668,9 +675,29 @@ pub fn list_history(
     crate::db::list_history(&conn, limit, offset.unwrap_or(0))
 }
 
-/// 清空全部调用历史。
+/// 清空全部调用历史（收藏行保留，避免用户显式收藏的数据被静默清除），
+/// 返回本次删除的条数（前端提示「已保留 N 条收藏」用）。
 #[tauri::command]
-pub fn clear_history(db: State<'_, Db>) -> CmdResult<()> {
+pub fn clear_history(db: State<'_, Db>) -> CmdResult<i64> {
     let conn = db.0.lock().unwrap();
     crate::db::clear_history(&conn)
+}
+
+/// 设置一条调用历史的收藏状态。
+///
+/// # 参数
+///
+/// - `id`: 记录 ID（历史条目展示的落库自增编号）。
+/// - `starred`: true = 收藏；false = 取消收藏。
+#[tauri::command]
+pub fn set_history_starred(db: State<'_, Db>, id: i64, starred: bool) -> CmdResult<()> {
+    let conn = db.0.lock().unwrap();
+    crate::db::set_history_starred(&conn, id, starred)
+}
+
+/// 读取全部收藏的调用记录（新 → 旧，不分页）。
+#[tauri::command]
+pub fn list_starred_history(db: State<'_, Db>) -> CmdResult<Vec<HistoryRecord>> {
+    let conn = db.0.lock().unwrap();
+    crate::db::list_starred_history(&conn)
 }

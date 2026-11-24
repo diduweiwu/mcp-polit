@@ -191,10 +191,15 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     }
     case "migrate_legacy_envs": return [];
     case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "streamable_http", command: "", args: "", env: "", working_dir: "", url: "", headers: "", sensitive_headers: "", timeout_ms: 30000, enabled: true, note: "" };
+    // 节点自定义图标：演示模式仅模拟成功（真实落盘在 SQLite tree_nodes.icon）
+    case "set_node_icon": return null;
     // 调用历史：浏览器演示模式不落盘，仅保证启动流程畅通（append 返回模拟编号）
     case "append_history": { historyId += 1; return historyId; }
     case "list_history": return [];
     case "clear_history": return null;
+    // 历史收藏：演示模式无落盘数据，收藏列表恒为空、置状态直接成功（IPC 形态与真实命令一致）
+    case "set_history_starred": return null;
+    case "list_starred_history": return [];
     case "save_server_config": {
       const cfg = args.config as { node_id: number };
       configs[cfg.node_id] = args.config;

@@ -125,6 +125,11 @@ input[type="radio"]:disabled {
   from { opacity: 0; transform: translateX(-14px); }
   to { opacity: 1; transform: translateX(0); }
 }
+/* 右侧抽屉滑入（结果放大查看）：自右向左入场 */
+@keyframes mcp-drawer-in {
+  from { opacity: 0; transform: translateX(40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
 
 .anim-fade-in {
   animation: mcp-fade-in 0.18s ease-out both;
@@ -147,6 +152,10 @@ input[type="radio"]:disabled {
 /* 资源树栏展开时的滑入动画（挂载即播） */
 .anim-pane-in {
   animation: mcp-pane-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+/* 右侧抽屉滑入动画（结果放大查看抽屉挂载即播） */
+.anim-drawer-in {
+  animation: mcp-drawer-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 /* 树形目录展开/收起：grid-rows 高度过渡（0fr -> 1fr），无需测高 */

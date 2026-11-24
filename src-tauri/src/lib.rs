@@ -111,6 +111,7 @@ pub fn run() {
             commands::list_nodes,
             commands::create_node,
             commands::rename_node,
+            commands::set_node_icon,
             commands::move_node,
             commands::delete_node,
             commands::duplicate_node,
@@ -139,6 +140,8 @@ pub fn run() {
             commands::append_diag_log,
             commands::list_history,
             commands::clear_history,
+            commands::set_history_starred,
+            commands::list_starred_history,
             // Git 同步（项目级：推送/拉取/分支/实时自动导出）
             commands::project_sync_push,
             commands::project_sync_pull,

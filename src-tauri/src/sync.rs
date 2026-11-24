@@ -44,6 +44,10 @@ struct SyncNode {
     name: String,
     /// 同层排序
     order: i64,
+    /// 自定义图标 key（前端 icon 注册表）；None = 默认图标。
+    /// 可选反序列化：旧版仓库无此字段也能导入（icon 数据不丢是导出方的责任）
+    #[serde(default)]
+    icon: Option<String>,
 }
 
 /// 单个导出的 Server 配置（`<分组路径>/<别名>.json` 的内容）。
@@ -608,6 +612,8 @@ pub fn merge_repo_into_project(
                     git_id_to_path.insert(n.id.clone(), path.clone());
                     folder_path_to_id.insert(path, id);
                     if !existed {
+                        // 新建目录：带上 tree.json 里的自定义图标（复用已有目录保持其图标不动）
+                        let _ = crate::db::set_node_icon(&conn, id, n.icon.as_deref());
                         folders_created += 1;
                     }
                     progress = true;
@@ -689,6 +695,8 @@ pub fn merge_repo_into_project(
                 let parent_db = git_parent_ref.as_deref().and_then(|p| id_map.get(p).copied());
                 match crate::db::create_node(&conn, project_id, parent_db, crate::models::NodeType::Server, &imp.display_name) {
                     Ok(node) => {
+                        // 新建 Server：带上 tree.json 里的自定义图标（失败不阻塞导入）
+                        let _ = crate::db::set_node_icon(&conn, node.id, imp.icon.as_deref());
                         let cfg = crate::models::ServerConfig {
                             node_id: node.id,
                             transport_type: tt,
@@ -1117,6 +1125,7 @@ fn load_project_data(
             node_type: if n.node_type == NodeType::Folder { "folder" } else { "server" }.into(),
             name: n.name.clone(),
             order: n.sort_order,
+            icon: n.icon.clone(),
         });
     }
     // 补 parent 引用（此时全部节点的引用 ID 已生成；父可能排在子后面，需两段循环）
@@ -1443,6 +1452,8 @@ struct ServerImport {
     /// tree.json 登记的 server 节点引用 ID（额外扫描的文件为 None）：
     /// 合并按树结构对齐时优先用它（配置文件内的 parent 可能被手工编辑丢失）
     node_ref: Option<String>,
+    /// tree.json 登记的自定义图标 key（额外扫描的文件为 None = 默认图标）
+    icon: Option<String>,
     /// 配置内容
     server: SyncServer,
 }
@@ -1502,6 +1513,7 @@ fn collect_server_imports(
                     display_name: n.name.clone(),
                     parent: ss.parent.clone(),
                     node_ref: Some(n.id.clone()),
+                    icon: n.icon.clone(),
                     server: ss,
                 });
             }
@@ -1583,6 +1595,7 @@ fn scan_extra_servers(
             display_name: stem,
             parent,
             node_ref: None,
+            icon: None,
             server: ss,
         });
     }
@@ -1630,6 +1643,8 @@ fn rebuild_project_tree(
                 .map_err(|e| e.to_string());
             match result {
                 Ok(t) => {
+                    // 新建目录：带上 tree.json 里的自定义图标（失败不阻塞导入）
+                    let _ = crate::db::set_node_icon(conn, t.id, n.icon.as_deref());
                     id_map.insert(n.id.clone(), t.id);
                     progress = true;
                     false
@@ -1672,6 +1687,8 @@ fn rebuild_project_tree(
                 continue;
             }
         };
+        // 新建 Server：带上 tree.json 里的自定义图标（失败不阻塞导入）
+        let _ = crate::db::set_node_icon(conn, node.id, imp.icon.as_deref());
         let cfg = ServerConfig {
             node_id: node.id,
             transport_type: tt,
@@ -2133,6 +2150,7 @@ mod tests {
             node_type: ty.into(),
             name: name.into(),
             order,
+            icon: None,
         }
     }
 
@@ -2616,12 +2634,14 @@ mod tests {
                 display_name: "x".into(),
                 parent: Some("n0".into()),
                 node_ref: None,
+                icon: None,
                 server: server_cfg("cmd-a"),
             },
             ServerImport {
                 display_name: "x".into(),
                 parent: Some("n9".into()), // 无效引用 → 根层兜底
                 node_ref: None,
+                icon: None,
                 server: server_cfg("cmd-b"),
             },
         ];

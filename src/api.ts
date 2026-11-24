@@ -128,6 +128,10 @@ export const createNode = (
 export const renameNode = (id: number, name: string) =>
   invoke<TreeNode>("rename_node", { id, name });
 
+/** 设置节点自定义图标（icon 注册表 key）；传 null 恢复默认图标 */
+export const setNodeIcon = (id: number, icon: string | null) =>
+  invoke<TreeNode>("set_node_icon", { id, icon });
+
 /** 移动节点（拖拽） */
 export const moveNode = (id: number, newParentId: number | null) =>
   invoke<TreeNode>("move_node", { id, newParentId });
@@ -245,6 +249,8 @@ export interface StoredHistoryRow extends CallResult {
   server_name: string;
   /** 调用时间：完整本地时间串（YYYY-MM-DD HH:MM:SS） */
   created_at: string;
+  /** 是否已收藏（收藏行不被裁剪删除、清空历史时保留） */
+  starred?: boolean;
 }
 
 /** 追加一条调用历史（id / created_at 由后端生成，传 0 和空串即可），返回新记录的自增 ID */
@@ -255,8 +261,16 @@ export const appendHistory = (record: StoredHistoryRow) =>
 export const listHistory = (limit: number, offset: number) =>
   invoke<StoredHistoryRow[]>("list_history", { limit, offset });
 
-/** 清空全部调用历史 */
-export const clearHistory = () => invoke<void>("clear_history");
+/** 清空全部调用历史（后端保留收藏行），返回本次删除的条数 */
+export const clearHistory = () => invoke<number>("clear_history");
+
+/** 设置一条调用历史的收藏状态（true = 收藏；false = 取消） */
+export const setHistoryStarred = (id: number, starred: boolean) =>
+  invoke<void>("set_history_starred", { id, starred });
+
+/** 读取全部收藏的调用记录（新 → 旧，不分页） */
+export const listStarredHistory = () =>
+  invoke<StoredHistoryRow[]>("list_starred_history");
 
 /* ---------- 项目级同步 ---------- */
 

@@ -48,6 +48,8 @@ export interface TreeNode {
   node_type: NodeType;
   /** 目录名或 Server 别名 */
   name: string;
+  /** 自定义图标 key（lib/node-icons 注册表）；null/缺省 = 使用默认图标 */
+  icon?: string | null;
   sort_order: number;
   created_at: string;
   updated_at: string;
@@ -171,6 +173,8 @@ export interface HistoryEntry extends CallResult {
   server_name: string;
   /** 本地时间 HH:MM:SS */
   timestamp: string;
+  /** 是否已收藏（落盘字段，收藏行不被历史裁剪删除、清空历史时保留） */
+  starred?: boolean;
 }
 
 /** 工具调用结果 */

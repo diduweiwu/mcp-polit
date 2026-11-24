@@ -50,6 +50,7 @@ function rowToEntry(r: api.StoredHistoryRow, seq: number): HistoryEntry {
     node_id: r.node_id,
     server_name: r.server_name,
     timestamp: r.created_at.length >= 19 ? r.created_at.slice(11, 19) : r.created_at,
+    starred: r.starred ?? false,
   };
 }
 
@@ -101,6 +102,13 @@ interface AppState {
   hasMoreHistory: boolean;
   /** 历史分页加载进行中 */
   loadingHistory: boolean;
+
+  /** 收藏的调用记录（落盘跨会话保留；打开收藏 tab 时加载，收藏操作后同步更新） */
+  stars: HistoryEntry[];
+  /** 拉取收藏列表 */
+  loadStars: () => Promise<void>;
+  /** 收藏/取消收藏一条记录（按 entry.id 落盘；历史、结果面板与收藏缓存三处同步） */
+  toggleStar: (entry: HistoryEntry) => Promise<void>;
 
   /* 应用设置缓存（键值对；含按项目存的激活环境 active_env_<projectId>） */
   settings: Record<string, string>;
@@ -155,6 +163,8 @@ interface AppState {
 
   createNode: (parentId: number | null, type: NodeType, name: string) => Promise<void>;
   renameNode: (id: number, name: string) => Promise<void>;
+  /** 设置节点自定义图标（icon 注册表 key；null 恢复默认），刷新节点列表并触发同步导出 */
+  setNodeIcon: (id: number, icon: string | null) => Promise<void>;
   deleteNode: (id: number) => Promise<void>;
   /** 复制节点：目录含整棵子树与各 Server 配置；副本名称自动追加随机后缀 */
   duplicateNode: (id: number) => Promise<void>;
@@ -275,6 +285,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   history: [],
   hasMoreHistory: false,
   loadingHistory: false,
+  stars: [],
   logs: [],
   settings: {},
   environments: [],
@@ -440,6 +451,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     scheduleSyncExport();
   },
 
+  /** 设置节点自定义图标：落盘后刷新节点列表（树随 icon 立即变化）并触发实时同步导出 */
+  async setNodeIcon(id, icon) {
+    await api.setNodeIcon(id, icon);
+    await get().reloadNodes({ keepExpand: true });
+    scheduleSyncExport();
+  },
+
   async deleteNode(id) {
     await api.deleteNode(id);
     const s = get();
@@ -548,6 +566,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   async connect(id) {
+    // 连接握手中不重复发起（如双击树节点、快速点连接按钮），避免并发握手互相干扰
+    if (get().connStates[id] === "connecting") return;
     set((s) => ({ connStates: { ...s.connStates, [id]: "connecting" }, connErrors: { ...s.connErrors, [id]: "" } }));
     try {
       const tools = await api.connectServer(id);
@@ -608,9 +628,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         tools: { ...s.tools, [id]: tools },
       }));
     } catch (e) {
+      const msg = String(e);
+      // 中断重连：后端 refresh 与 connect 共用握手令牌，取消后恢复空闲态而非错误态
+      if (msg.includes("手动中断")) {
+        set((s) => ({
+          connStates: { ...s.connStates, [id]: "disconnected" },
+          connErrors: { ...s.connErrors, [id]: "" },
+          tools: { ...s.tools, [id]: [] },
+        }));
+        get().addLog("info", `已中断重连（未等超时）`, id);
+        return;
+      }
       set((s) => ({
         connStates: { ...s.connStates, [id]: "error" },
-        connErrors: { ...s.connErrors, [id]: String(e) },
+        connErrors: { ...s.connErrors, [id]: msg },
       }));
     }
   },
@@ -630,20 +661,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       .join(":");
     const server_name = get().nodes.find((n) => n.id === nodeId)?.name ?? "";
 
-    /** 结果入列：当前工具结果面板 + 全局历史（含落盘） */
+    /** 结果入列：当前工具结果面板 + 全局历史（含落盘）。两处存同一 entry 引用，
+        落盘回填 id / 收藏状态后两边同时可见（结果卡片因此也能收藏/开抽屉） */
     const commit = (result: CallResult) => {
       const entry: HistoryEntry = {
         ...result,
         node_id: nodeId,
         server_name,
         timestamp,
+        starred: false,
       };
       set((s) => ({
         running: false,
-        results: [result, ...s.results].slice(0, MAX_RESULTS),
+        results: [entry, ...s.results].slice(0, MAX_RESULTS),
         history: [entry, ...s.history].slice(0, HISTORY_KEEP),
       }));
-      // 落盘留痕：成功后把落库自增 id 补写到条目（作为展示编号）；失败静默，不影响调用主流程展示
+      // 落盘留痕：成功后把落库自增 id 补写到条目（作为展示编号 + 收藏操作的主键）；
+      // 失败静默，不影响调用主流程展示
       void api
         .appendHistory({
           id: 0,
@@ -660,6 +694,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         })
         .then((id) =>
           useAppStore.setState((s) => ({
+            // 结果面板与历史里是同一批 entry（按 seq 匹配补 id）
+            results: s.results.map((r) =>
+              r.seq === result.seq && (r as HistoryEntry).id == null
+                ? { ...r, id }
+                : r,
+            ),
             history: s.history.map((h) =>
               h.seq === result.seq && h.id == null ? { ...h, id } : h,
             ),
@@ -745,7 +785,76 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearHistory() {
     set({ history: [], hasMoreHistory: false });
-    void api.clearHistory().catch(() => {});
+    void api
+      .clearHistory()
+      .then((deleted) => {
+        // 后端保留收藏行：提示保留数量，避免用户误以为收藏随历史一起被清掉
+        get()
+          .loadStars()
+          .then(() => {
+            const kept = get().stars.length;
+            get().addLog(
+              "info",
+              kept > 0
+                ? `已清空历史（删除 ${deleted} 条，保留收藏 ${kept} 条）`
+                : `已清空历史（${deleted} 条）`,
+            );
+          });
+      })
+      .catch((e) => get().addLog("error", `清空历史失败：${e}`));
+  },
+
+  /** 拉取收藏列表（打开收藏 tab 时调用；覆盖式刷新本地缓存） */
+  async loadStars() {
+    try {
+      const rows = await api.listStarredHistory();
+      // seq 置 0：收藏条目以落库 id 为身份，列表 key / 展开态均用 id
+      set({ stars: rows.map((r) => rowToEntry(r, 0)) });
+    } catch (e) {
+      get().addLog("error", `加载收藏失败：${e}`);
+    }
+  },
+
+  /**
+   * 收藏 / 取消收藏一条调用记录。
+   *
+   * 乐观更新结果面板、历史与收藏缓存三处（同一落库 id 对齐），落盘失败回滚并写日志；
+   * id 未回填（刚发起、落盘尚未返回）的条目不可收藏。
+   *
+   * @example
+   * void toggleStar(entry); // entry.id 必须已存在
+   */
+  async toggleStar(entry) {
+    const id = entry.id;
+    if (id == null) return;
+    const next = !entry.starred;
+
+    /** 三处缓存中按 id 定位并改写 starred；返回回滚函数。
+        results 声明为 CallResult[] 但实际元素都是 HistoryEntry（commit 存同一引用），
+        故以 id 判断、写入后还原声明类型 */
+    const patchAll = (starred: boolean) => {
+      const s = useAppStore.getState();
+      const flip = <T extends CallResult>(h: T): T =>
+        (h as unknown as HistoryEntry).id === id ? ({ ...h, starred } as T) : h;
+      useAppStore.setState({
+        results: s.results.map(flip),
+        history: s.history.map(flip),
+        stars: starred
+          ? // 收藏缓存可能尚未加载（loadStars 未跑过），按 id 去重插入
+            s.stars.some((x) => x.id === id)
+              ? s.stars.map(flip)
+              : [{ ...entry, starred }, ...s.stars]
+          : s.stars.filter((x) => x.id !== id),
+      });
+      return () => patchAll(!starred);
+    };
+    const rollback = patchAll(next);
+    try {
+      await api.setHistoryStarred(id, next);
+    } catch (e) {
+      rollback();
+      get().addLog("error", `${next ? "收藏" : "取消收藏"}失败：${String(e)}`);
+    }
   },
 
   /** 动态加载更旧的调用历史：按 offset 翻页追加；不足一页即视为全部加载完 */

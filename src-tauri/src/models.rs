@@ -44,6 +44,10 @@ pub struct TreeNode {
     pub node_type: NodeType,
     /// 显示名称：目录名，或 Server 的别名
     pub name: String,
+    /// 自定义图标标识（前端 icon 注册表的 key，如 "database"）；None = 使用默认图标。
+    /// 同步导出写入 tree.json 随仓库分发，旧版应用导入时忽略该字段
+    #[serde(default)]
+    pub icon: Option<String>,
     /// 同层排序序号（小的在前）
     pub sort_order: i64,
     /// 创建时间（本地时间字符串）
@@ -259,7 +263,7 @@ pub struct LogEntry {
 /// 工具调用历史记录：落盘 SQLite，跨会话保留（全局，不限项目）。
 ///
 /// `result` 通过 serde flatten 展开，前端看到的形态为
-/// `{ id, node_id, server_name, created_at, ...CallResult 字段 }`。
+/// `{ id, node_id, server_name, created_at, starred, ...CallResult 字段 }`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryRecord {
     /// 记录 ID：自增主键；前端新增时传 0，由后端落库生成
@@ -270,6 +274,9 @@ pub struct HistoryRecord {
     pub server_name: String,
     /// 调用时间：本地时间字符串（YYYY-MM-DD HH:MM:SS）；前端新增时传空串，由后端生成
     pub created_at: String,
+    /// 是否被收藏。枚举：false-未收藏；true-已收藏。收藏行不被总量裁剪删除，清空历史时保留
+    #[serde(default)]
+    pub starred: bool,
     /// 调用结果主体（工具名、是否出错、content、耗时、入参快照等）
     #[serde(flatten)]
     pub result: CallResult,

@@ -95,7 +95,10 @@ function SchemaField({
   depth: number;
 }) {
   const type = resolveType(schema);
-  const label = schema.title || name;
+  /* 参数名一律显示 schema 里的原始键名：部分 server（如 Pydantic/FastMCP 系）会自动
+     给参数生成拆词 title（user_name → "User Name"），优先展示会把参数名「拆开」，
+     与发送给 server 的真实参数名不一致，故此处不使用 schema.title */
+  const label = name;
 
   /* 枚举 → 下拉 */
   if (isEnumSchema(schema)) {

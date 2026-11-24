@@ -22,19 +22,23 @@ import {
   Globe,
   Loader2,
   PanelLeftClose,
+  Palette,
   Pencil,
   Plug,
   PlugZap,
   Server,
   Settings2,
+  Square,
   Terminal,
   Trash2,
   Upload,
 } from "lucide-react";
+import { Dices } from "lucide-react";
 import * as api from "../api";
 import { useAppStore } from "../store";
 import { buildTree, collectIds, siblingNameConflict, type TreeEntry } from "../lib/tree";
-import type { BranchInfo, TreeNode } from "../types";
+import { NODE_ICONS, nodeIconByKey, randomNodeIcon } from "../lib/node-icons";
+import type { BranchInfo, ConnStatus, TreeNode } from "../types";
 import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot, Tooltip } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
@@ -91,6 +95,53 @@ async function duplicateWithLog(srcId: number) {
   }
 }
 
+/**
+ * 判断树条目自身或其子树内是否存在连接握手中的 server。
+ *
+ * 握手期间该链路上的节点需锁定增删改移：删除/重命名/移动会即时改写同步目录文件，
+ * 与进行中的连接握手产生竞态（如握手完成后按旧节点回填工具、配置已被移走等）。
+ *
+ * @param entry 树条目（含子节点）
+ * @param connStates 各 server 连接状态表（store.connStates）
+ * @returns true = 该条目链路处于连接握手中，应禁止结构变更
+ *
+ * @example
+ * if (entryHasConnecting(entry, connStates)) e.preventDefault(); // 拖拽发起前拦截
+ */
+function entryHasConnecting(entry: TreeEntry, connStates: Record<number, ConnStatus>): boolean {
+  if (entry.node.node_type === "server" && connStates[entry.node.id] === "connecting") return true;
+  return entry.children.some((c) => entryHasConnecting(c, connStates));
+}
+
+/**
+ * 计算握手期间需锁定的节点 ID 集合：连接中的 server 及其全部祖先目录。
+ *
+ * 祖先目录一并锁定（删除祖先会级联删掉其中的连接中 server；重命名/移动
+ * 会连带改写其下配置文件路径），子树内无连接中 server 的节点不受影响。
+ *
+ * @example
+ * const locked = lockedNodeIds(nodes, connStates);
+ * const menuDisabled = ctx.node != null && locked.has(ctx.node.id);
+ */
+function lockedNodeIds(
+  nodes: TreeNode[],
+  connStates: Record<number, ConnStatus>,
+): Set<number> {
+  const ids = new Set<number>();
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  for (const n of nodes) {
+    if (n.node_type === "server" && connStates[n.id] === "connecting") {
+      ids.add(n.id);
+      let p = n.parent_id;
+      while (p != null && !ids.has(p)) {
+        ids.add(p);
+        p = byId.get(p)?.parent_id ?? null;
+      }
+    }
+  }
+  return ids;
+}
+
 /** 右键菜单状态 */
 interface CtxMenu {
   x: number;
@@ -104,8 +155,12 @@ export function TreePane() {
   const tree = useMemo(() => buildTree(nodes), [nodes]);
   /** 未选择项目：全部增删入口禁用（按钮置灰、右键不弹菜单） */
   const noProject = activeProjectId == null;
+  /** 连接握手中需锁定的节点（server 及其祖先目录）：禁增删改移与配置编辑 */
+  const lockedIds = useMemo(() => lockedNodeIds(nodes, connStates), [nodes, connStates]);
 
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
+  /** 右键定位高亮：被右键的节点在弹窗/菜单期间保持选中样式（null = 无，左键点击其他条目时清除） */
+  const [ctxHighlight, setCtxHighlight] = useState<number | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [formParent, setFormParent] = useState<number | null>(null);
   const [folderOpen, setFolderOpen] = useState(false);
@@ -115,6 +170,8 @@ export function TreePane() {
   const [folderError, setFolderError] = useState("");
   const [renameTarget, setRenameTarget] = useState<TreeNode | null>(null);
   const [renameName, setRenameName] = useState("");
+  /** 更换图标弹窗的目标节点（目录 / Server 通用） */
+  const [iconTarget, setIconTarget] = useState<TreeNode | null>(null);
   /** 重命名的失败反馈（后端同级重名校验兜底拦截时显示） */
   const [renameError, setRenameError] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<TreeNode | null>(null);
@@ -163,10 +220,11 @@ export function TreePane() {
     fn();
   };
 
-  /** 打开右键菜单并阻止默认行为 */
+  /** 打开右键菜单并阻止默认行为；同时把目标节点高亮定位（弹窗期间保持，便于看清正在操作谁） */
   const openCtx = (e: React.MouseEvent, node: TreeNode | null) => {
     e.preventDefault();
     e.stopPropagation();
+    setCtxHighlight(node?.id ?? null);
     setCtx({ x: e.clientX, y: e.clientY, node });
   };
 
@@ -300,7 +358,14 @@ export function TreePane() {
           />
         ) : (
           tree.map((entry) => (
-            <TreeItem key={entry.node.id} entry={entry} depth={0} onCtx={openCtx} />
+            <TreeItem
+              key={entry.node.id}
+              entry={entry}
+              depth={0}
+              onCtx={openCtx}
+              highlightId={ctxHighlight}
+              onUserClick={() => setCtxHighlight(null)}
+            />
           ))
         )}
       </div>
@@ -323,35 +388,63 @@ export function TreePane() {
             {ctx.node?.node_type === "server" && (
               <>
                 {(() => {
-                  // 已连接/连接中：不再提供「连接」入口，只留快捷断开；未连接/失败才可发起连接
+                  // 已连接 → 快捷断开；连接中 → 中断（取消握手，不必等超时）；
+                  // 未连接/失败才可发起连接
                   const st = connStates[ctx.node!.id];
-                  const sessionLive = st === "connected" || st === "connecting";
-                  return sessionLive ? (
+                  return st === "connecting" ? (
+                    <CtxItem icon={<Square size={11} className="fill-current" />} label="中断连接" onClick={runMenu(() => void useAppStore.getState().cancelConnect(ctx.node!.id))} />
+                  ) : st === "connected" ? (
                     <CtxItem icon={<PlugZap size={13} />} label="断开连接" onClick={runMenu(() => void useAppStore.getState().disconnect(ctx.node!.id))} />
                   ) : (
                     <CtxItem icon={<Plug size={13} />} label="连接" onClick={runMenu(() => void useAppStore.getState().connect(ctx.node!.id))} />
                   );
                 })()}
-                <CtxItem icon={<Settings2 size={13} />} label="编辑配置" onClick={runMenu(() => {
-                  void useAppStore.getState().selectNode(ctx.node!.id, { autoConnect: false });
-                  setFormParent(null);
-                  setFormOpen(true);
-                })} />
+                <CtxItem
+                  icon={<Settings2 size={13} />}
+                  label="编辑配置"
+                  disabled={connStates[ctx.node!.id] === "connecting"}
+                  onClick={runMenu(() => {
+                    void useAppStore.getState().selectNode(ctx.node!.id, { autoConnect: false });
+                    setFormParent(null);
+                    setFormOpen(true);
+                  })}
+                />
                 <div className="my-1 border-t border-line" />
               </>
             )}
             {ctx.node && (
               <>
-                <CtxItem icon={<Copy size={13} />} label="复制" onClick={runMenu(() => void duplicateWithLog(ctx.node!.id))} />
-                <CtxItem icon={<Pencil size={13} />} label="重命名" onClick={runMenu(() => {
-                  // 闭包内 TS 无法保留 ctx.node 的非空收窄，此处断言安全（位于 ctx.node && 分支内）
-                  const target = ctx.node!;
-                  setRenameTarget(target);
-                  setRenameName(target.name);
-                  setRenameError("");
-                })} />
+                <CtxItem
+                  icon={<Palette size={13} />}
+                  label="更换图标"
+                  onClick={runMenu(() => setIconTarget(ctx.node!))}
+                />
+                <CtxItem
+                  icon={<Copy size={13} />}
+                  label="复制"
+                  disabled={lockedIds.has(ctx.node.id)}
+                  onClick={runMenu(() => void duplicateWithLog(ctx.node!.id))}
+                />
+                <CtxItem
+                  icon={<Pencil size={13} />}
+                  label="重命名"
+                  disabled={lockedIds.has(ctx.node.id)}
+                  onClick={runMenu(() => {
+                    // 闭包内 TS 无法保留 ctx.node 的非空收窄，此处断言安全（位于 ctx.node && 分支内）
+                    const target = ctx.node!;
+                    setRenameTarget(target);
+                    setRenameName(target.name);
+                    setRenameError("");
+                  })}
+                />
                 <div className="my-1 border-t border-line" />
-                <CtxItem icon={<Trash2 size={13} />} label="删除" danger onClick={runMenu(() => setDeleteTarget(ctx.node))} />
+                <CtxItem
+                  icon={<Trash2 size={13} />}
+                  label="删除"
+                  danger
+                  disabled={lockedIds.has(ctx.node.id)}
+                  onClick={runMenu(() => setDeleteTarget(ctx.node))}
+                />
               </>
             )}
             {!ctx.node && (
@@ -455,7 +548,100 @@ export function TreePane() {
           setDeleteTarget(null);
         }}
       />
+
+      {/* 更换图标弹窗：目录 / Server 通用 */}
+      {iconTarget && (
+        <IconPickerModal nodeId={iconTarget.id} onClose={() => setIconTarget(null)} />
+      )}
     </div>
+  );
+}
+
+/**
+ * 更换图标弹窗：网格展示全部注册图标，点击立即应用（可连续试选，实时落盘并触发同步导出）；
+ * 「随机一个」一键换随机图标，「恢复默认」清空自定义回退类型默认图标。
+ * 节点当前图标从 store 实时解析（应用后 reloadNodes，选中高亮跟随更新）。
+ */
+function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => void }) {
+  const node = useAppStore((s) => s.nodes.find((n) => n.id === nodeId));
+  const [error, setError] = useState("");
+  /** 当前生效的自定义图标 key（null = 默认图标；应用后随 store 刷新） */
+  const current = node?.icon ?? null;
+
+  /** 应用一个图标 key（或 null 恢复默认）；失败行内提示，不关弹窗可重试 */
+  const apply = async (key: string | null) => {
+    try {
+      setError("");
+      await useAppStore.getState().setNodeIcon(nodeId, key);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  return (
+    <Modal open title="更换图标" onClose={onClose} width={460}>
+      {/* 当前节点预览 */}
+      <div className="mb-3 flex items-center gap-2 rounded-md bg-panel2 px-2.5 py-2">
+        <span className="text-[12px] text-inksoft">当前节点</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] font-medium text-ink">
+          {node?.name ?? ""}
+        </span>
+        {(() => {
+          const def = nodeIconByKey(current);
+          return def ? (
+            <span className="flex items-center gap-1 text-[11px] text-inksoft/70">
+              <def.Icon size={14} /> {def.label}
+            </span>
+          ) : (
+            <span className="text-[11px] text-inksoft/50">默认图标</span>
+          );
+        })()}
+      </div>
+
+      {/* 图标网格：点击即应用 */}
+      <div className="grid grid-cols-8 gap-1">
+        {NODE_ICONS.map((d) => {
+          const active = current === d.key;
+          return (
+            <button
+              key={d.key}
+              title={d.label}
+              onClick={() => void apply(d.key)}
+              className={`flex h-9 items-center justify-center rounded-md border transition-colors ${
+                active
+                  ? "border-primary bg-primarysoft text-primarystrong"
+                  : "border-line text-inksoft hover:border-primary/50 hover:bg-panel2 hover:text-ink"
+              }`}
+            >
+              <d.Icon size={16} />
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 操作行：一键随机 / 恢复默认 */}
+      <div className="mt-3 flex items-center gap-1.5">
+        <button
+          className="btn-ghost h-8 flex-1 gap-1.5 text-[12px]"
+          title="随机选一个图标"
+          onClick={() => void apply(randomNodeIcon().key)}
+        >
+          <Dices size={14} /> 随机一个
+        </button>
+        <button
+          className="btn-ghost h-8 flex-1 text-[12px]"
+          title="清除自定义图标，回退类型默认图标"
+          disabled={current == null}
+          onClick={() => void apply(null)}
+        >
+          恢复默认
+        </button>
+        <button className="btn-primary h-8 flex-1 text-[12px]" onClick={onClose}>
+          完成
+        </button>
+      </div>
+      {error && <p className="mt-1.5 break-all text-[11.5px] text-err">{error}</p>}
+    </Modal>
   );
 }
 
@@ -821,24 +1007,27 @@ interface SyncNotice {
   text: string;
 }
 
-/** 右键菜单项 */
+/** 右键菜单项（disabled 置灰不可点：如连接握手期间锁定的结构操作） */
 function CtxItem({
   icon,
   label,
   danger,
+  disabled,
   onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   danger?: boolean;
+  disabled?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-panel2 ${
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-panel2 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent ${
         danger ? "text-err" : "text-ink"
       }`}
       onClick={onClick}
+      disabled={disabled}
     >
       {icon}
       {label}
@@ -851,10 +1040,14 @@ interface TreeItemProps {
   entry: TreeEntry;
   depth: number;
   onCtx: (e: React.MouseEvent, node: TreeNode) => void;
+  /** 右键定位高亮的节点 ID（null = 无）；匹配且未选中时显示定位背景 */
+  highlightId: number | null;
+  /** 用户左键点击本条目时回调（清除右键定位高亮，注意力已转移） */
+  onUserClick: () => void;
 }
 
 /** 递归树条目：目录可折叠，Server 点击选中并自动连接 */
-function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
+function TreeItem({ entry, depth, onCtx, highlightId, onUserClick }: TreeItemProps) {
   const { node, children } = entry;
   const {
     expandedIds,
@@ -872,6 +1065,8 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
   const err = connErrors[node.id] || "";
   const selected = selectedNodeId === node.id;
   const [dragOver, setDragOver] = useState(false);
+  /** 自定义图标（注册表查不到的旧 key 回退 undefined = 默认图标，不报错） */
+  const customIcon = nodeIconByKey(node.icon);
 
   return (
     <div>
@@ -879,6 +1074,11 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
         data-tree-item
         draggable
         onDragStart={(e) => {
+          // 自身或子树内有连接握手中的 server：禁止拖动（结构变更与进行中的握手竞态）
+          if (entryHasConnecting(entry, connStates)) {
+            e.preventDefault();
+            return;
+          }
           e.dataTransfer.setData("text/mcpilot-node", String(node.id));
           e.dataTransfer.effectAllowed = "move";
           // 记录源节点与其后代集合：dragover 阶段读不到 dataTransfer，且目录不能放进自己的后代（防环）
@@ -904,14 +1104,32 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
           if (dragSrc) void dropMove(dragSrc.id, node.id);
         }}
         className={`group flex h-8 cursor-pointer select-none items-center gap-1 rounded-md px-1.5 transition-colors ${
-          selected
-            ? "bg-primarysoft text-primarystrong"
+          selected || highlightId === node.id
+            ? /* 单击选中（server）/ 右键定位（目录与 server）：同一选中样式，弹窗期间保持可见 */
+              "bg-primarysoft text-primarystrong"
             : dragOver
               ? "bg-primarysoft ring-1 ring-primary"
-              : "hover:bg-hover"
+              : /* 焦点背景与 hover 同色：点击展开/收起后鼠标移开仍保留聚焦反馈；
+                   纯键盘 Tab 导航（focus-visible）再加内缘细环，与点击场景区分 */
+                "hover:bg-hover focus:outline-none focus:bg-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
         }`}
         style={{ paddingLeft: 6 + depth * 14 }}
-        onClick={() => (isFolder ? toggleExpand(node.id) : void selectNode(node.id))}
+        role="button"
+        tabIndex={0}
+        aria-expanded={isFolder ? expanded : undefined}
+        onClick={() => {
+          onUserClick();
+          if (isFolder) toggleExpand(node.id);
+          else void selectNode(node.id);
+        }}
+        onKeyDown={(e) => {
+          // 键盘可达：Enter/Space 等价单击（目录展开收起 / server 选中），并阻止页面滚动
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            if (isFolder) toggleExpand(node.id);
+            else void selectNode(node.id);
+          }
+        }}
         onDoubleClick={() => !isFolder && void connect(node.id)}
         onContextMenu={(e) => onCtx(e, node)}
         title={
@@ -931,7 +1149,10 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
                 expanded ? "" : "-rotate-90"
               }`}
             />
-            {expanded ? (
+            {/* 自定义图标优先；无自定义时保持默认（展开/收起两态） */}
+            {customIcon ? (
+              <customIcon.Icon size={14} className="shrink-0 text-inksoft" />
+            ) : expanded ? (
               <FolderOpen size={14} className="shrink-0 text-inksoft" />
             ) : (
               <Folder size={14} className="shrink-0 text-inksoft" />
@@ -940,8 +1161,15 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
         ) : (
           <>
             <span className="w-[14px] shrink-0" />
-            {/* 按传输协议着色标识：stdio=终端绿，Streamable HTTP=地球紫 */}
-            {node.transport_type === "streamable_http" ? (
+            {/* 按传输协议着色标识：stdio=终端绿，Streamable HTTP=地球紫（自定义图标同色，视觉体系不乱） */}
+            {customIcon ? (
+              <customIcon.Icon
+                size={14}
+                className={`shrink-0 ${
+                  node.transport_type === "streamable_http" ? "text-violet-500" : "text-emerald-500"
+                }`}
+              />
+            ) : node.transport_type === "streamable_http" ? (
               <Globe size={14} className="shrink-0 text-violet-500" />
             ) : (
               <Terminal size={14} className="shrink-0 text-emerald-500" />
@@ -964,9 +1192,16 @@ function TreeItem({ entry, depth, onCtx }: TreeItemProps) {
                 （空目录）
               </div>
             ) : (
-              children.map((c) => (
-                <TreeItem key={c.node.id} entry={c} depth={depth + 1} onCtx={onCtx} />
-              ))
+            children.map((c) => (
+              <TreeItem
+                key={c.node.id}
+                entry={c}
+                depth={depth + 1}
+                onCtx={onCtx}
+                highlightId={highlightId}
+                onUserClick={onUserClick}
+              />
+            ))
             )}
           </div>
         </div>

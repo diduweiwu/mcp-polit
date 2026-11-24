@@ -186,6 +186,16 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), AppError> {
         "ALTER TABLE server_configs ADD COLUMN sensitive_headers TEXT",
         [],
     );
+    // 调用历史收藏标记：0-未收藏；1-已收藏。收藏行不被总量裁剪删除，清空历史时保留
+    let _ = conn.execute(
+        "ALTER TABLE call_history ADD COLUMN starred INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // 节点自定义图标：前端 icon 注册表的 key（如 "database"），NULL = 使用默认图标
+    let _ = conn.execute(
+        "ALTER TABLE tree_nodes ADD COLUMN icon TEXT",
+        [],
+    );
     Ok(())
 }
 
@@ -301,7 +311,7 @@ fn project_server_ids(conn: &Connection, project_id: i64) -> CmdResult<Vec<i64>>
 pub fn list_nodes(conn: &Connection, project_id: i64) -> CmdResult<Vec<TreeNode>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.project_id, t.parent_id, t.node_type, t.name, t.sort_order,
-                t.created_at, t.updated_at, s.transport_type
+                t.created_at, t.updated_at, s.transport_type, t.icon
          FROM tree_nodes t
          LEFT JOIN server_configs s ON s.node_id = t.id
          WHERE t.project_id = ?1
@@ -311,7 +321,8 @@ pub fn list_nodes(conn: &Connection, project_id: i64) -> CmdResult<Vec<TreeNode>
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 行 -> TreeNode 的映射函数（第 9 列为 LEFT JOIN 的传输类型，目录为 NULL）。
+/// 行 -> TreeNode 的映射函数（第 9 列为 LEFT JOIN 的传输类型，目录为 NULL；
+/// 第 10 列为自定义图标 key，NULL = 默认图标）。
 fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeNode> {
     Ok(TreeNode {
         id: row.get(0)?,
@@ -323,6 +334,7 @@ fn map_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<TreeNode> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         transport_type: row.get::<_, Option<String>>(8)?.map(|s| transport_from_str(&s)),
+        icon: row.get(9)?,
     })
 }
 
@@ -339,7 +351,7 @@ fn node_type_from_str(s: &str) -> NodeType {
 pub fn get_node(conn: &Connection, id: i64) -> CmdResult<TreeNode> {
     conn.query_row(
         "SELECT t.id, t.project_id, t.parent_id, t.node_type, t.name, t.sort_order,
-                t.created_at, t.updated_at, s.transport_type
+                t.created_at, t.updated_at, s.transport_type, t.icon
          FROM tree_nodes t
          LEFT JOIN server_configs s ON s.node_id = t.id
          WHERE t.id = ?1",
@@ -347,6 +359,26 @@ pub fn get_node(conn: &Connection, id: i64) -> CmdResult<TreeNode> {
         map_node,
     )
     .map_err(|e| AppError::new(format!("节点不存在（id={id}）：{e}")))
+}
+
+/// 设置节点自定义图标（None = 恢复默认图标）；同步导出会随 tree.json 分发。
+///
+/// # 参数
+///
+/// - `icon`: 前端 icon 注册表的 key（如 "database"）；None 清除自定义。
+///
+/// # 异常
+///
+/// 节点不存在时返回 [`AppError`]。
+pub fn set_node_icon(conn: &Connection, id: i64, icon: Option<&str>) -> CmdResult<TreeNode> {
+    let changed = conn.execute(
+        "UPDATE tree_nodes SET icon = ?1, updated_at = datetime('now','localtime') WHERE id = ?2",
+        rusqlite::params![icon, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::new(format!("节点不存在（id={id}）")));
+    }
+    get_node(conn, id)
 }
 
 /// 在指定父节点下创建目录或 Server 节点（排到同级末尾）。
@@ -982,9 +1014,10 @@ pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<i6
             record.result.duration_ms
         ],
     )?;
-    // 总量裁剪：防止表无限膨胀（大响应场景尤甚）
+    // 总量裁剪：防止表无限膨胀（大响应场景尤甚）；收藏行（starred=1）不参与裁剪，
+    // 是用户显式要求保留的数据，静默删除属于数据丢失
     conn.execute(
-        "DELETE FROM call_history WHERE id NOT IN
+        "DELETE FROM call_history WHERE starred = 0 AND id NOT IN
                 (SELECT id FROM call_history ORDER BY id DESC LIMIT ?1)",
         rusqlite::params![HISTORY_KEEP],
     )?;
@@ -1000,7 +1033,7 @@ pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<i6
 pub fn list_history(conn: &Connection, limit: i64, offset: i64) -> CmdResult<Vec<HistoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, node_id, server_name, tool_name, is_error, content,
-                structured_content, arguments, duration_ms, created_at
+                structured_content, arguments, duration_ms, created_at, starred
          FROM call_history ORDER BY id DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![limit, offset], map_history_row)?;
@@ -1011,15 +1044,59 @@ pub fn list_history(conn: &Connection, limit: i64, offset: i64) -> CmdResult<Vec
     Ok(out)
 }
 
-/// 清空全部调用历史。
-pub fn clear_history(conn: &Connection) -> CmdResult<()> {
-    conn.execute("DELETE FROM call_history", [])?;
+/// 切换一条历史记录的收藏状态。
+///
+/// # 参数
+///
+/// - `id`: 记录 ID（落库自增主键）。
+/// - `starred`: true = 收藏；false = 取消收藏。
+///
+/// # 异常
+///
+/// 记录不存在或 SQLite 写入失败时返回 [`AppError`]。
+pub fn set_history_starred(conn: &Connection, id: i64, starred: bool) -> CmdResult<()> {
+    let changed = conn.execute(
+        "UPDATE call_history SET starred = ?1 WHERE id = ?2",
+        rusqlite::params![starred as i64, id],
+    )?;
+    if changed == 0 {
+        return Err(crate::error::AppError::new(format!(
+            "收藏失败：调用记录 #{id} 不存在（可能已被清理）"
+        )));
+    }
     Ok(())
+}
+
+/// 读取全部收藏的调用记录（新 → 旧）。
+///
+/// 收藏是用户显式保留的数据，不做分页（量级由用户控制，上限仍受历史总量兜底）。
+pub fn list_starred_history(conn: &Connection) -> CmdResult<Vec<HistoryRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, node_id, server_name, tool_name, is_error, content,
+                structured_content, arguments, duration_ms, created_at, starred
+         FROM call_history WHERE starred = 1 ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([], map_history_row)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 清空全部未收藏的调用历史；收藏行（starred=1）保留，避免用户显式收藏的数据被静默清除。
+///
+/// # 返回
+///
+/// 本次删除的条数（前端提示「已保留 N 条收藏」用）。
+pub fn clear_history(conn: &Connection) -> CmdResult<i64> {
+    let deleted = conn.execute("DELETE FROM call_history WHERE starred = 0", [])?;
+    Ok(deleted as i64)
 }
 
 /// 历史表行映射。SELECT 列序：
 /// `id, node_id, server_name, tool_name, is_error, content, structured_content,
-///  arguments, duration_ms, created_at`。
+///  arguments, duration_ms, created_at, starred`。
 fn map_history_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryRecord> {
     let content_raw: String = row.get(5)?;
     let structured_raw: Option<String> = row.get(6)?;
@@ -1038,6 +1115,8 @@ fn map_history_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryRecord> {
         node_id: row.get(1)?,
         server_name: row.get(2)?,
         created_at: row.get(9)?,
+        // 0-未收藏；1-已收藏
+        starred: row.get::<_, i64>(10)? != 0,
         result: CallResult {
             // seq 为前端会话内序号，落盘无意义，读取时置 0
             seq: 0,

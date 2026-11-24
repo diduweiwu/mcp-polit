@@ -346,7 +346,7 @@ function SummaryRow({ label, children }: { label: string; children: React.ReactN
  */
 function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
   const cfg = useAppStore((s) => s.serverConfigs[node.id]);
-  const { connect, disconnect, refreshTools } = useAppStore();
+  const { connect, cancelConnect, disconnect, refreshTools } = useAppStore();
   /** 当前全局环境名（连接时配置里的 {{}} 引用按它插值；空串 = 未选择） */
   const envName = useAppStore((s) => activeEnvName(s));
   const [editOpen, setEditOpen] = useState(false);
@@ -453,15 +453,27 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
         </>
       ) : (
         <>
+          {connecting ? (
+            /* 连接中：大按钮切换为「中断连接」，不必干等超时（与状态条小按钮同能力） */
+            <button className="btn-ghost h-9 w-full" onClick={() => void cancelConnect(node.id)}>
+              <Square size={12} className="fill-current text-err" />
+              中断连接
+            </button>
+          ) : (
+            <button
+              className="btn-primary h-9 w-full"
+              disabled={!cfg.enabled}
+              onClick={() => void connect(node.id)}
+            >
+              <PlugZap size={14} />
+              {status === "error" ? "重试连接" : "连接"}
+            </button>
+          )}
           <button
-            className="btn-primary h-9 w-full"
-            disabled={connecting || !cfg.enabled}
-            onClick={() => void connect(node.id)}
+            className="btn-ghost mt-1.5 h-8 w-full"
+            disabled={connecting}
+            onClick={() => setEditOpen(true)}
           >
-            <PlugZap size={14} />
-            {connecting ? "连接中…" : status === "error" ? "重试连接" : "连接"}
-          </button>
-          <button className="btn-ghost mt-1.5 h-8 w-full" onClick={() => setEditOpen(true)}>
             <Pencil size={13} /> 编辑配置
           </button>
           <p className="mt-2 text-center text-[11px] text-inksoft/60">
