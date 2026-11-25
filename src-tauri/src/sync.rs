@@ -27,7 +27,7 @@ use serde_json::Value;
 use tauri::AppHandle;
 
 use crate::db::Db;
-use crate::models::{LogEntry, NodeType, Project, ServerConfig, TransportType};
+use crate::models::{LogEntry, NodeType, Project, ServerConfig, TransportType, TreeNode};
 use crate::mcp_manager::McpManager;
 
 /// 单个导出的树节点。
@@ -893,6 +893,306 @@ fn local_has_unpushed_changes(
         return true;
     }
     !local.iter().all(|(rel, v)| disk.get(*rel) == Some(v))
+}
+
+/* ---------- 变更列表：以 git status 为唯一数据源 ---------- */
+
+/// 同步目录的一条未提交变更（git status 视角，变更列表弹窗与资源树黄点共用数据源）。
+///
+/// 应用内的增删改移/编辑配置会实时写盘，自然出现在 git status 里：「新建又马上删除」
+/// 不留残余条目、应用重启后未推送提醒不丢失、外部直接改动文件同样可见。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncChangeEntry {
+    /// 对应资源树节点 ID；None = 不对应单个节点（环境库/树结构/外部文件/已删节点的残留变更）
+    #[serde(rename = "nodeId")]
+    pub node_id: Option<i64>,
+    /// 展示名：节点名 / 文件名 / 「环境库」/「资源树结构」
+    pub name: String,
+    /// 变更动作：create / update / rename / delete / env / tree
+    pub action: String,
+    /// 相对仓库根的路径（rename 取新路径）
+    pub path: String,
+}
+
+/// 项目同步目录的未提交变更集合（`project_changes` 的返回）。
+#[derive(Debug, serde::Serialize)]
+pub struct SyncChanges {
+    /// 同步目录是否为可用 git 仓库（false = 前端隐藏变更徽标）
+    pub available: bool,
+    /// 变更条目（同一节点已按优先级合并）
+    pub entries: Vec<SyncChangeEntry>,
+}
+
+/// 磁盘路径反查到的节点记录（变更条目定位资源树节点用）。
+#[derive(Debug, Clone)]
+struct PathNode {
+    /// 数据库节点 ID
+    id: i64,
+    /// 节点名（目录名或 Server 别名）
+    name: String,
+}
+
+/// 读取项目同步目录的未提交变更集合（git status 视角）。
+///
+/// 「未绑定同步目录 / 目录不存在 / 非 git 仓库 / git 不可用」一律返回 `available=false`
+/// （前端相应隐藏徽标），不写日志面板——变更列表被 10s 定时轮询，静默可避免刷屏；
+/// 仅数据库读取失败返回 `Err`。
+///
+/// # 示例
+///
+/// ```text
+/// let changes = project_changes(&db, project_id).await?;
+/// if changes.available && !changes.entries.is_empty() {
+///     // 展示「未推送变更」徽标与列表
+/// }
+/// ```
+///
+/// # 异常
+///
+/// 项目不存在 / 数据库读取出错时返回 `Err`（错误信息已含上下文）。
+pub async fn project_changes(db: &Db, project_id: i64) -> Result<SyncChanges, String> {
+    let project = {
+        let conn = db.0.lock().unwrap();
+        crate::db::get_project(&conn, project_id)
+            .map_err(|e| format!("读取项目失败：{e}"))?
+    };
+    let Some(dir) = project.sync_dir.clone() else {
+        return Ok(SyncChanges { available: false, entries: Vec::new() });
+    };
+    let repo = std::path::PathBuf::from(&dir);
+    if !repo.is_dir() || !repo.join(".git").exists() {
+        return Ok(SyncChanges { available: false, entries: Vec::new() });
+    }
+    // quotepath=false：含非 ASCII 字符的路径（中文节点名）按原样输出，否则被八进制
+    // 转义无法反查节点；-uall 把未跟踪目录逐文件展开（新分组的 server 文件逐条出现，
+    // 而不是折叠成整个目录一条）
+    let Ok(out) = git_async(
+        &repo,
+        &["-c", "core.quotepath=false", "status", "--porcelain=v1", "--untracked-files=all"],
+    )
+    .await
+    else {
+        return Ok(SyncChanges { available: false, entries: Vec::new() });
+    };
+    // 路径 -> 节点映射：锁作用域只包住 DB 读（MutexGuard 不跨 await）
+    let mapping = {
+        let conn = db.0.lock().unwrap();
+        build_path_node_map(&conn, project_id)
+    };
+    let entries = merge_changes(
+        parse_status_lines(&out)
+            .into_iter()
+            .filter_map(|(code, path)| classify_change(&code, &path, &mapping))
+            .collect(),
+    );
+    Ok(SyncChanges { available: true, entries })
+}
+
+/// 解析 `git status --porcelain=v1` 输出为 (状态码, 路径) 列表。
+///
+/// rename/copy 行取**新路径**（节点映射按当前树推导，旧路径已不在布局中）；
+/// 被 C-quoted 的路径（外部文件含空格/引号/非 ASCII 时）解引还原。
+fn parse_status_lines(out: &str) -> Vec<(String, String)> {
+    let mut lines = Vec::new();
+    for line in out.lines() {
+        // porcelain v1 格式：XY + 空格 + 路径；含空格的路径延伸到行尾，无歧义
+        if line.len() < 4 {
+            continue;
+        }
+        let code = line[..2].to_string();
+        let raw = &line[3..];
+        let path = match raw.rsplit_once(" -> ") {
+            // rename/copy 行：`原路径 -> 新路径`，取新路径
+            Some((_, new)) if code.starts_with('R') || code.starts_with('C') => new.to_string(),
+            _ => raw.to_string(),
+        };
+        lines.push((code, unquote_path(&path)));
+    }
+    lines
+}
+
+/// 还原 git C-quoted 路径：去外层引号并解码反斜杠转义（含八进制，按字节解码后重组
+/// UTF-8）。应用写出的路径通常不触发引号（safe_name 清洗 + quotepath=false），
+/// 手工放入的外部文件可能触发，此处兜底解引保证路径可映射。
+fn unquote_path(p: &str) -> String {
+    if p.len() < 2 || !p.starts_with('"') || !p.ends_with('"') {
+        return p.to_string();
+    }
+    let inner = &p[1..p.len() - 1];
+    let mut bytes: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('n') => bytes.push(b'\n'),
+            Some('t') => bytes.push(b'\t'),
+            Some('r') => bytes.push(b'\r'),
+            Some('\\') => bytes.push(b'\\'),
+            Some('"') => bytes.push(b'"'),
+            Some(o @ '0'..='7') => {
+                // 八进制转义是单字节（0o0~0o377），多字节 UTF-8 逐字节出现，统一按字节攒
+                let mut v = o.to_digit(8).unwrap() as u32;
+                for _ in 0..2 {
+                    match chars.clone().next().and_then(|d| d.to_digit(8)) {
+                        Some(d) => {
+                            v = v * 8 + d;
+                            chars.next();
+                        }
+                        None => break,
+                    }
+                }
+                bytes.push(v as u8);
+            }
+            Some(other) => {
+                bytes.push(b'\\');
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
+            None => bytes.push(b'\\'),
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// git 状态码 -> 变更动作（porcelain v1：首字符 = 暂存区，次字符 = 工作树）。
+///
+/// R=改名（仅暂存过的改名会出现）；A=暂存新增；`??`=未跟踪；C=复制按新增算；
+/// D=删除；其余（M/T/U 及冲突组合）按修改算。
+fn status_action(code: &str) -> &'static str {
+    let mut chars = code.chars();
+    let x = chars.next().unwrap_or(' ');
+    let y = chars.next().unwrap_or(' ');
+    if x == 'R' || y == 'R' {
+        return "rename";
+    }
+    if x == 'A' || x == 'C' || (x == '?' && y == '?') {
+        return "create";
+    }
+    if x == 'D' || y == 'D' {
+        return "delete";
+    }
+    "update"
+}
+
+/// 把一条 git status 记录映射为变更条目：解析动作、反查资源树节点、特殊文件归位。
+///
+/// - `tree.json` -> 「资源树结构」（结构元数据变更：改名/移动/排序/自定义图标）
+/// - `environments.json` -> 「环境库」
+/// - `.gitkeep` -> 归到父目录节点（新建空分组的占位文件；分组已删则忽略）
+/// - Server 配置/其他文件 -> 按当前树路径反查节点（应用内已删除的节点或外部文件
+///   反查不到，以文件名展示、node_id=None）
+///
+/// 反查不到且无展示意义的记录返回 `None`（如仓库根层的 `.gitkeep`）。
+fn classify_change(code: &str, path: &str, mapping: &HashMap<String, PathNode>) -> Option<SyncChangeEntry> {
+    let mk = |node_id: Option<i64>, name: String, action: &str| SyncChangeEntry {
+        node_id,
+        name,
+        action: action.to_string(),
+        path: path.to_string(),
+    };
+    if path == TREE_META_FILE {
+        return Some(mk(None, "资源树结构".into(), "tree"));
+    }
+    if path == ENVIRONMENTS_FILE {
+        return Some(mk(None, "环境库".into(), "env"));
+    }
+    let (dir, file) = match path.rsplit_once('/') {
+        Some((d, f)) => (d, f),
+        None => ("", path),
+    };
+    if file == ".gitkeep" {
+        // 空分组占位归到父目录节点；根层占位（映射不到节点）无展示意义，忽略
+        return mapping.get(dir).map(|n| {
+            let action = if status_action(code) == "create" { "create" } else { "update" };
+            mk(Some(n.id), n.name.clone(), action)
+        });
+    }
+    if let Some(n) = mapping.get(path) {
+        return Some(mk(Some(n.id), n.name.clone(), status_action(code)));
+    }
+    // 反查不到：外部文件，或节点已删除的残留变更 -> 以文件名展示
+    let name = file.strip_suffix(".json").unwrap_or(file).to_string();
+    Some(mk(None, name, status_action(code)))
+}
+
+/// 变更动作的合并优先级（同一节点的多条记录只保留最高优先级的一条）。
+fn change_rank(action: &str) -> u8 {
+    match action {
+        "rename" => 4,
+        "create" | "delete" => 3,
+        "update" => 2,
+        _ => 1, // env / tree
+    }
+}
+
+/// 合并变更条目：同一节点的多条记录保留优先级最高的一条（目录改名/移动会牵连组内
+/// 多个文件，但都指向同一个节点）；无节点的条目按路径去重。保持 git 输出顺序。
+fn merge_changes(entries: Vec<SyncChangeEntry>) -> Vec<SyncChangeEntry> {
+    let mut merged: Vec<SyncChangeEntry> = Vec::new();
+    for e in entries {
+        let rank = change_rank(&e.action);
+        match e.node_id {
+            Some(id) => match merged.iter().position(|x| x.node_id == Some(id)) {
+                Some(pos) if rank > change_rank(&merged[pos].action) => merged[pos] = e,
+                Some(_) => {}
+                None => merged.push(e),
+            },
+            None => {
+                if !merged.iter().any(|x| x.node_id.is_none() && x.path == e.path) {
+                    merged.push(e);
+                }
+            }
+        }
+    }
+    merged
+}
+
+/// 从数据库树推导「磁盘路径 -> 节点」，与导出共用同一布局算法（compute_layout）。
+///
+/// 只覆盖现存节点：应用内已删除节点的路径自然反查不到（其残留变更以文件名展示）。
+/// 引用 ID 生成与 `load_project_data` 一致（按 list 顺序 "n{i}"），同一份数据在
+/// 两处跑出同一布局，保证与磁盘真实文件一一对应。
+fn build_path_node_map(conn: &rusqlite::Connection, project_id: i64) -> HashMap<String, PathNode> {
+    let Ok(nodes) = crate::db::list_nodes(conn, project_id) else {
+        return HashMap::new();
+    };
+    let mut id_of: HashMap<i64, String> = HashMap::new();
+    let mut sync_nodes: Vec<SyncNode> = Vec::with_capacity(nodes.len());
+    for (i, n) in nodes.iter().enumerate() {
+        let sid = format!("n{i}");
+        id_of.insert(n.id, sid.clone());
+        sync_nodes.push(SyncNode {
+            id: sid,
+            parent: None, // 下面统一补（父可能排在子后面）
+            node_type: if n.node_type == NodeType::Folder { "folder" } else { "server" }.into(),
+            name: n.name.clone(),
+            order: n.sort_order,
+            icon: n.icon.clone(),
+        });
+    }
+    for (idx, n) in nodes.iter().enumerate() {
+        sync_nodes[idx].parent = n.parent_id.and_then(|p| id_of.get(&p).cloned());
+    }
+    let by_sid: HashMap<&str, &TreeNode> =
+        nodes.iter().map(|n| (id_of[&n.id].as_str(), n)).collect();
+    compute_layout(&sync_nodes)
+        .into_iter()
+        .filter_map(|(sid, path)| {
+            by_sid.get(sid.as_str()).map(|n| {
+                (
+                    path,
+                    PathNode {
+                        id: n.id,
+                        name: n.name.clone(),
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 /// 收集仓库全部 Server 配置文件（相对路径 -> JSON Value；`tree.json` 元数据与 `.git` 除外）。
@@ -2775,5 +3075,203 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    /* ---------- 变更列表（git status）测试 ---------- */
+
+    /// porcelain 解析：修改/未跟踪/删除/已暂存改名（取新路径）/C-quoted 路径解引。
+    #[test]
+    fn 变更列表_porcelain解析() {
+        // 注意状态码首字符可能是空格（如 " M"），不能用字符串续行写（会吞行首空格）
+        let out = [
+            " M tree.json",
+            "?? 网关组/服务A.json",
+            " D 旧文件.json",
+            "R  网关组/旧名.json -> 网关组/新名.json",
+            "?? \"含 空格.json\"",
+        ]
+        .join("\n");
+        let lines = parse_status_lines(&out);
+        assert_eq!(lines.len(), 5, "每行一条：{lines:?}");
+        assert_eq!(lines[0], (" M".to_string(), "tree.json".to_string()));
+        assert_eq!(lines[1], ("??".to_string(), "网关组/服务A.json".to_string()));
+        assert_eq!(lines[2], (" D".to_string(), "旧文件.json".to_string()));
+        // 改名取新路径
+        assert_eq!(lines[3], ("R ".to_string(), "网关组/新名.json".to_string()));
+        // C-quoted（含空格）解引
+        assert_eq!(lines[4], ("??".to_string(), "含 空格.json".to_string()));
+    }
+
+    /// 八进制转义的中文路径按字节解码重组 UTF-8（quotepath 未关时的兜底形态）。
+    #[test]
+    fn 变更列表_八进制中文路径解引() {
+        // git 对默认 quotepath 下的「服务」二字输出 UTF-8 字节的八进制转义
+        let raw = "\"\\346\\234\\215\\345\\212\\241.json\"";
+        assert_eq!(unquote_path(raw), "服务.json");
+        // 转义引号与反斜杠本身
+        assert_eq!(unquote_path("\"a\\\"b\\\\c\""), "a\"b\\c");
+        // 未加引号的路径原样返回
+        assert_eq!(unquote_path("普通.json"), "普通.json");
+    }
+
+    /// 分类归位：元数据文件归环境库/树结构，server json 反查节点，
+    /// `.gitkeep` 归父目录，反查不到的路径以文件名展示。
+    #[test]
+    fn 变更列表_分类与节点反查() {
+        let mut mapping = HashMap::new();
+        mapping.insert(
+            "网关组".to_string(),
+            PathNode { id: 7, name: "网关组".to_string() },
+        );
+        mapping.insert(
+            "网关组/服务A.json".to_string(),
+            PathNode { id: 8, name: "服务A".to_string() },
+        );
+        // 元数据文件
+        let e = classify_change(" M", "tree.json", &mapping).unwrap();
+        assert_eq!((e.node_id, e.name.as_str(), e.action.as_str()), (None, "资源树结构", "tree"));
+        let e = classify_change("??", "environments.json", &mapping).unwrap();
+        assert_eq!((e.node_id, e.name.as_str(), e.action.as_str()), (None, "环境库", "env"));
+        // server json 反查节点
+        let e = classify_change("??", "网关组/服务A.json", &mapping).unwrap();
+        assert_eq!((e.node_id, e.name.as_str(), e.action.as_str()), (Some(8), "服务A", "create"));
+        // `.gitkeep` 归父目录节点（未跟踪 = 新建分组）
+        let e = classify_change("??", "网关组/.gitkeep", &mapping).unwrap();
+        assert_eq!((e.node_id, e.name.as_str(), e.action.as_str()), (Some(7), "网关组", "create"));
+        // 根层 .gitkeep 映射不到节点：忽略
+        assert!(classify_change("??", ".gitkeep", &mapping).is_none());
+        // 已删节点的残留变更 / 外部文件：以文件名展示
+        let e = classify_change(" D", "网关组/已删.json", &mapping).unwrap();
+        assert_eq!((e.node_id, e.name.as_str(), e.action.as_str()), (None, "已删", "delete"));
+        let e = classify_change("??", "README.md", &mapping).unwrap();
+        assert_eq!((e.node_id, e.name.as_str(), e.action.as_str()), (None, "README.md", "create"));
+    }
+
+    /// 同节点多条记录（目录改名牵连组内多文件）按优先级合并；无节点条目按路径去重。
+    #[test]
+    fn 变更列表_同节点合并去重() {
+        let mk = |node_id: Option<i64>, name: &str, action: &str, path: &str| SyncChangeEntry {
+            node_id,
+            name: name.to_string(),
+            action: action.to_string(),
+            path: path.to_string(),
+        };
+        let entries = vec![
+            mk(Some(8), "服务A", "create", "网关组/服务A.json"),
+            mk(None, "资源树结构", "tree", "tree.json"),
+            mk(Some(8), "服务A", "update", "网关组/服务A.json"),
+            mk(None, "环境库", "env", "environments.json"),
+            mk(None, "环境库", "env", "environments.json"),
+        ];
+        let merged = merge_changes(entries);
+        assert_eq!(merged.len(), 3, "同节点合并 + 无节点按路径去重：{merged:?}");
+        // 同节点保留高优先级动作（create > update）
+        let a = merged.iter().find(|e| e.node_id == Some(8)).unwrap();
+        assert_eq!(a.action, "create");
+    }
+
+    /// 端到端：真实 git 仓库 + 内存库。核心场景「新建又删除不留残余」；
+    /// 未暂存改名按 git 事实呈现为删旧增新；提交后列表清空。
+    #[tokio::test]
+    async fn 变更列表_端到端场景() {
+        let base = std::env::temp_dir().join(format!("mcpilot-changes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        // 空仓库直接用（unborn HEAD 上 git status --porcelain 照常工作，
+        // 全部文件为未跟踪）；不做首次提交（空仓库无内容可提交会失败）
+        assert!(run_git(&repo, &["init", "-b", "master"]).0);
+
+        let db = Db(std::sync::Mutex::new(mem_db()));
+        let p = {
+            let conn = db.0.lock().unwrap();
+            crate::db::create_project(&conn, "变更列表", Some(repo.to_str().unwrap())).unwrap()
+        };
+        // 目录 + 带配置的 Server
+        let (folder, srv) = {
+            let conn = db.0.lock().unwrap();
+            let folder = crate::db::create_node(&conn, p.id, None, NodeType::Folder, "网关组").unwrap();
+            let srv = crate::db::create_node(&conn, p.id, Some(folder.id), NodeType::Server, "服务A").unwrap();
+            put_local_config(&conn, srv.id, "node a.js");
+            drop(conn);
+            (folder, srv)
+        };
+        export_project_dir(&db, p.id);
+
+        // 新建目录 + Server：Server 与树结构在列；目录本身有子项时不写 .gitkeep，
+        // 不产生直接条目（前端黄点靠祖先传导点亮）
+        let changes = project_changes(&db, p.id).await.unwrap();
+        assert!(changes.available);
+        let actions_of = |id: i64| changes.entries.iter().find(|e| e.node_id == Some(id)).map(|e| e.action.clone());
+        assert_eq!(actions_of(srv.id).as_deref(), Some("create"), "{:?}", changes.entries);
+        assert_eq!(actions_of(folder.id), None, "非空分组不应有直接条目：{:?}", changes.entries);
+        assert!(changes.entries.iter().any(|e| e.action == "tree"), "{:?}", changes.entries);
+
+        // 新建空分组：.gitkeep 归位到目录节点（create）
+        let empty = {
+            let conn = db.0.lock().unwrap();
+            let empty = crate::db::create_node(&conn, p.id, None, NodeType::Folder, "空分组").unwrap();
+            drop(conn);
+            export_project_dir(&db, p.id);
+            let changes = project_changes(&db, p.id).await.unwrap();
+            let e = changes.entries.iter().find(|e| e.node_id == Some(empty.id)).expect("空分组应出现在列表：{:?}");
+            assert_eq!(e.action, "create", "{:?}", changes.entries);
+            empty
+        };
+
+        // 新建条目马上删除（导出后工作区回到原样）：不留残余条目 —— 核心诉求
+        {
+            let conn = db.0.lock().unwrap();
+            let tmp = crate::db::create_node(&conn, p.id, Some(folder.id), NodeType::Server, "临时").unwrap();
+            drop(conn);
+            export_project_dir(&db, p.id);
+            let mid = project_changes(&db, p.id).await.unwrap();
+            assert!(mid.entries.iter().any(|e| e.name == "临时"), "删除前应出现：{:?}", mid.entries);
+            let conn = db.0.lock().unwrap();
+            crate::db::delete_node(&conn, tmp.id).unwrap();
+            crate::db::delete_node(&conn, empty.id).unwrap();
+            drop(conn);
+            export_project_dir(&db, p.id);
+        }
+        let changes = project_changes(&db, p.id).await.unwrap();
+        assert!(!changes.entries.iter().any(|e| e.name == "临时"), "新建又删除不应留残余：{:?}", changes.entries);
+        assert!(!changes.entries.iter().any(|e| e.name == "空分组"), "新建又删除的空分组不应留残余：{:?}", changes.entries);
+
+        // 提交后列表清空
+        assert!(run_git(&repo, &["add", "-A"]).0);
+        assert!(run_git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "sync"]).0);
+        let changes = project_changes(&db, p.id).await.unwrap();
+        assert!(changes.available && changes.entries.is_empty(), "提交后应无变更：{:?}", changes.entries);
+
+        // 应用内重命名（未暂存）：git 事实是删旧增新 -> 旧名残留 + 新名 create
+        {
+            let conn = db.0.lock().unwrap();
+            crate::db::rename_node(&conn, srv.id, "服务B").unwrap();
+            drop(conn);
+            export_project_dir(&db, p.id);
+        }
+        let changes = project_changes(&db, p.id).await.unwrap();
+        assert_eq!(
+            changes.entries.iter().find(|e| e.node_id == Some(srv.id)).map(|e| (e.name.as_str(), e.action.as_str())),
+            Some(("服务B", "create")),
+            "重命名后新名应反查到节点：{:?}",
+            changes.entries
+        );
+        assert!(
+            changes.entries.iter().any(|e| e.node_id.is_none() && e.name == "服务A" && e.action == "delete"),
+            "旧名以文件名残留展示：{:?}",
+            changes.entries
+        );
+
+        // 未绑定同步目录：available=false
+        let db2 = Db(std::sync::Mutex::new(mem_db()));
+        let p2 = {
+            let conn = db2.0.lock().unwrap();
+            crate::db::create_project(&conn, "无同步", None).unwrap()
+        };
+        let changes = project_changes(&db2, p2.id).await.unwrap();
+        assert!(!changes.available);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

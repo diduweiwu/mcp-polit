@@ -90,7 +90,8 @@ export function TopBar() {
   const [newConflict, setNewConflict] = useState<string | null>(null);
   /** 管理项目弹窗：全部项目的重命名 / 配置同步目录 / 删除集中在此 */
   const [manageOpen, setManageOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  /* 设置弹窗开关放全局 store：原生菜单「检查更新」需要从 App 层远程打开弹窗 */
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
   /** 环境管理弹窗：环境变量集中定义（Server 配置以 {{变量名}} 引用） */
   const [envManageOpen, setEnvManageOpen] = useState(false);
   /** 项目下拉的关键字过滤（每次打开下拉时清空） */
@@ -107,7 +108,7 @@ export function TopBar() {
       if (e.repeat) return;
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
-        setSettingsOpen(true);
+        useAppStore.getState().openSettings();
       }
     };
     window.addEventListener("keydown", handler);
@@ -352,7 +353,7 @@ export function TopBar() {
         <button
           className="btn-ghost h-8 !px-2"
           title={IS_MAC ? "设置（⌘,）" : "设置（Ctrl+,）"}
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => useAppStore.getState().openSettings()}
         >
           <Settings size={15} />
         </button>
@@ -467,8 +468,8 @@ export function TopBar() {
       {/* 环境管理弹窗：环境变量集中定义与修改（Server 配置只做 {{}} 引用） */}
       <EnvironmentManageModal open={envManageOpen} onClose={() => setEnvManageOpen(false)} />
 
-      {/* 设置弹窗 */}
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {/* 设置弹窗（关闭走 store：顺带清除菜单触发的自动检查标记） */}
+      <SettingsModal open={settingsOpen} onClose={() => useAppStore.getState().closeSettings()} />
     </header>
   );
 }

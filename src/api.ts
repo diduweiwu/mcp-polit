@@ -11,6 +11,7 @@ import type {
   Environment,
   Project,
   ServerConfig,
+  SyncChangeEntry,
   SyncDirStatus,
   SyncDirResolve,
   ToolInfo,
@@ -316,3 +317,13 @@ export const projectBranches = (projectId: number) =>
 /** 切换项目同步仓库的分支 */
 export const projectCheckout = (projectId: number, branch: string) =>
   invoke<void>("project_checkout", { projectId, branch });
+
+/**
+ * 读取项目同步目录的未提交变更列表（git status 视角，未推送变更提醒的唯一数据源）。
+ *
+ * `available` 为 false 表示未绑定同步目录 / 目录缺失 / 非 git 仓库 / git 不可用，
+ * 前端应隐藏变更徽标；entries 见 SyncChangeEntry。目录/仓库异常不报错（静默空列表），
+ * 该命令被前端 10s 定时轮询与实时同步后的刷新共用。
+ */
+export const projectSyncChanges = (projectId: number) =>
+  invoke<{ available: boolean; entries: SyncChangeEntry[] }>("project_sync_changes", { projectId });

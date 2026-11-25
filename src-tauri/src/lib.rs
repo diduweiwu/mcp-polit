@@ -8,10 +8,11 @@ mod db;
 mod diag;
 mod error;
 mod mcp_manager;
+mod menu;
 mod models;
 mod sync;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use db::Db;
 
@@ -28,6 +29,14 @@ pub fn run() {
         // 在线更新：走 GitHub Release 的 latest.json（签名校验），安装后由 process 插件重启
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // 应用菜单三平台统一自建（menu::install）：macOS 关闭默认菜单避免闪现，
+        // 「检查更新」项点击后转发事件给前端复用设置页的更新流程
+        .enable_macos_default_menu(false)
+        .on_menu_event(|app, event| {
+            if event.id() == menu::MENU_CHECK_UPDATES {
+                let _ = app.emit_to("main", "menu-check-updates", ());
+            }
+        })
         // macOS 红绿灯定位：decorum 插件（社区方案，Hoppscotch 生产同款机制）。
         // 仅注册即可：macOS 上插件在 on_window_ready 自动挪按钮（默认 inset 12,16）
         // 并挂 NSWindowDelegate 在 resize/退出全屏时重钉；Windows/Linux 为空操作。
@@ -90,6 +99,9 @@ pub fn run() {
                 _win.set_traffic_lights_inset(12.0, 24.0)?;
             }
 
+            // 原生菜单：三平台统一（macOS 应用菜单 / Win·Linux 窗口菜单栏）
+            menu::install(app.handle())?;
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -148,6 +160,7 @@ pub fn run() {
             commands::project_sync_export,
             commands::project_branches,
             commands::project_checkout,
+            commands::project_sync_changes,
         ])
         .build(tauri::generate_context!())
         .expect("MCPilot 启动失败");

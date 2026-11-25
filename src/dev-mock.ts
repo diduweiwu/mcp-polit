@@ -194,8 +194,12 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
     }
     case "migrate_legacy_envs": return [];
     case "get_server_config": return configs[args.nodeId as number] ?? { node_id: args.nodeId, transport_type: "streamable_http", command: "", args: "", env: "", working_dir: "", url: "", headers: "", sensitive_headers: "", timeout_ms: 30000, enabled: true, note: "" };
-    // 节点自定义图标：演示模式仅模拟成功（真实落盘在 SQLite tree_nodes.icon）
-    case "set_node_icon": return null;
+    // 节点自定义图标：写回 mock 节点（真实落盘在 SQLite tree_nodes.icon，reload 后带回）
+    case "set_node_icon": {
+      const n = nodes.find((x) => x.id === (args.id as number));
+      if (n) (n as { icon?: string | null }).icon = (args.icon as string | null) ?? null;
+      return null;
+    }
     // 调用历史：浏览器演示模式不落盘，仅保证启动流程畅通（append 返回模拟编号）
     case "append_history": { historyId += 1; return historyId; }
     case "list_history": return [];
@@ -281,6 +285,19 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       return { current: "main", branches: ["main", "dev", "staging"] };
     }
     case "project_checkout": return null;
+    // 未推送变更列表（git status 视角）：「坏仓库」模拟不可用（available=false 隐藏徽标），
+    // 其余项目返回固定演示条目（nodeId/action/path 形态与真实 IPC 一致）
+    case "project_sync_changes": {
+      const p = projects.find((x) => x.id === (args.projectId as number));
+      if (p?.name === "坏仓库") return { available: false, entries: [] };
+      return {
+        available: true,
+        entries: [
+          { nodeId: 2, name: "演示 Server", action: "update", path: "演示 Server.json" },
+          { nodeId: null, name: "环境库", action: "env", path: "environments.json" },
+        ],
+      };
+    }
     default: return null;
   }
 }

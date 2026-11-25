@@ -95,10 +95,43 @@ for (const { keys, artifact, signature } of ARTIFACTS) {
 
 const latest = {
   version: VERSION,
-  notes: "MCPilot 桌面客户端安装包。详见 README 的系统版本要求。",
+  notes: extractNotes(VERSION),
   pub_date: new Date().toISOString(),
   platforms,
 };
+
+/**
+ * 从仓库根 CHANGELOG.md 提取指定版本的日志段落，作为 latest.json 的 notes
+ * （应用内「检查更新」发现新版本时的更新日志显示框数据源，与 GitHub Release
+ * 正文的提取规则一致，见 build.yml 的「提取更新日志」步骤）。
+ *
+ * 段落格式：`## vX.Y.Z（日期）` 标题到下一个 `## ` 标题之间；版本号要求
+ * 后跟非数字/非点字符（防 0.1.2 误命中 0.1.21）。文件缺失或无该版本记录时
+ * 回退通用文案——不阻塞发版流程。
+ */
+function extractNotes(version) {
+  const FALLBACK = "MCPilot 桌面客户端安装包。详见 README 的系统版本要求。";
+  let raw;
+  try {
+    raw = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+  } catch {
+    return FALLBACK;
+  }
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^##\\s+v?${escaped}(?![\\d.])`);
+  const out = [];
+  let inSection = false;
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith("## ")) {
+      if (inSection) break; // 下一个版本段落开始，收集结束
+      inSection = re.test(line);
+      continue;
+    }
+    if (inSection) out.push(line);
+  }
+  const body = out.join("\n").trim();
+  return body || FALLBACK;
+}
 
 const json = JSON.stringify(latest, null, 2) + "\n";
 if (args.out) {

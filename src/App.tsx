@@ -19,6 +19,11 @@ export default function App() {
     const unlisten = listen<ConnStateEvent>("conn-state", (ev) => {
       applyConnState(ev.payload);
     });
+    // 原生菜单「检查更新」（macOS 应用菜单 / Win·Linux 菜单栏）：打开设置弹窗
+    // 并自动切「关于」tab 检查一次（复用设置页的整套检查/下载/安装 UI）
+    const unlistenMenu = listen("menu-check-updates", () => {
+      useAppStore.getState().openSettings(true);
+    });
     // 跟随系统主题：系统明暗变化时若当前为 system 模式则实时切换
     const unwatch = watchSystemTheme(() => {
       if (useAppStore.getState().themeMode === "system") {
@@ -27,6 +32,7 @@ export default function App() {
     });
     return () => {
       void unlisten.then((fn) => fn());
+      void unlistenMenu.then((fn) => fn());
       unwatch();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

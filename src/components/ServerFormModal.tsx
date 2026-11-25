@@ -185,13 +185,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
     }
     setSaving(true);
     try {
-      /** 本次保存的节点（编辑用已有节点；新建用刚创建的节点），变更提醒记录用 */
-      let savedNodeId: number;
       if (editNode) {
         if (editNode.name !== name.trim()) {
           await renameNode(editNode.id, name.trim());
         }
-        savedNodeId = editNode.id;
         const saved = { ...cfg, node_id: editNode.id };
         await api.saveServerConfig(saved);
         useAppStore.getState().updateConfigCache(saved);
@@ -202,7 +199,6 @@ export function ServerFormModal({ parentId, onClose }: Props) {
           "server",
           name.trim(),
         );
-        savedNodeId = node.id;
         const saved = { ...cfg, node_id: node.id };
         await api.saveServerConfig(saved);
         useAppStore.getState().updateConfigCache(saved);
@@ -210,13 +206,7 @@ export function ServerFormModal({ parentId, onClose }: Props) {
         void selectNode(node.id);
       }
       await reloadNodes({ keepExpand: true });
-      /* 变更提醒：改名走 renameNode 已记录，此处覆盖为最新动作「修改」/「新建」 */
-      useAppStore.getState().markSyncDirty({
-        nodeId: savedNodeId,
-        name: name.trim(),
-        action: editNode ? "update" : "create",
-      });
-      scheduleSyncExport(); // 实时同步：配置已变更，防抖写盘到同步目录
+      scheduleSyncExport(); // 实时同步：配置已变更，防抖写盘到同步目录（变更列表由 git status 刷新）
       onClose();
     } catch (e) {
       setError(String(e));

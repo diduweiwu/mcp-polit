@@ -8,7 +8,6 @@ import { createPortal } from "react-dom";
 import {
   AlertCircle,
   AlertTriangle,
-  ArrowLeftRight,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -21,6 +20,7 @@ import {
   FolderPlus,
   GitBranch,
   Globe,
+  ListTree,
   Loader2,
   PanelLeftClose,
   Palette,
@@ -43,7 +43,7 @@ import * as api from "../api";
 import { useAppStore } from "../store";
 import { buildTree, collectIds, siblingNameConflict, type TreeEntry } from "../lib/tree";
 import { NODE_ICONS, nodeIconByKey, randomNodeIcon } from "../lib/node-icons";
-import type { BranchInfo, ConnStatus, SyncDirtyAction, SyncDirtyEntry, TreeNode } from "../types";
+import type { BranchInfo, ConnStatus, SyncChangeAction, SyncChangeEntry, TreeNode } from "../types";
 import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot, Tooltip } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
@@ -161,16 +161,17 @@ interface CtxMenu {
 /** 树形栏 */
 export function TreePane() {
   const { nodes, activeProjectId, connStates } = useAppStore();
-  const syncDirty = useAppStore((s) => s.syncDirty);
+  const syncChanges = useAppStore((s) => s.syncChanges);
   const tree = useMemo(() => buildTree(nodes), [nodes]);
   /**
-   * 未推送变更的高亮集合：dirty 节点本身 + 其全部祖先。
+   * 未推送变更的高亮集合：变更节点本身 + 其全部祖先。
    * 目录条目也亮起（子树内有变更即可见），折叠目录中的变更不会被藏住。
+   * 数据源为 git status 变更列表（store 定时轮询 + 导出后刷新）。
    */
   const dirtyIds = useMemo(() => {
     const byId = new Map(nodes.map((n) => [n.id, n]));
     const out = new Set<number>();
-    for (const e of activeProjectId != null ? syncDirty[activeProjectId] ?? [] : []) {
+    for (const e of activeProjectId != null ? syncChanges[activeProjectId] ?? [] : []) {
       if (e.nodeId == null) continue;
       let cur = byId.get(e.nodeId);
       while (cur) {
@@ -179,7 +180,7 @@ export function TreePane() {
       }
     }
     return out;
-  }, [nodes, syncDirty, activeProjectId]);
+  }, [nodes, syncChanges, activeProjectId]);
   /** 未选择项目：全部增删入口禁用（按钮置灰、右键不弹菜单） */
   const noProject = activeProjectId == null;
   /** 连接握手中需锁定的节点（server 及其祖先目录）：禁增删改移与配置编辑 */
@@ -193,6 +194,10 @@ export function TreePane() {
   const [folderOpen, setFolderOpen] = useState(false);
   const [folderParent, setFolderParent] = useState<number | null>(null);
   const [folderName, setFolderName] = useState("");
+  /** 新建目录的待选图标 key（null = 默认图标；创建时随节点一并落盘） */
+  const [folderIcon, setFolderIcon] = useState<string | null>(null);
+  /** 新建目录的图标选择弹窗（叠在创建弹窗上层的 IconPickerModal 选择器模式） */
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
   /** 新建目录的失败反馈（后端同级重名校验兜底拦截时显示） */
   const [folderError, setFolderError] = useState("");
   const [renameTarget, setRenameTarget] = useState<TreeNode | null>(null);
@@ -220,21 +225,26 @@ export function TreePane() {
   const newFolderUnder = (parentId: number | null) => {
     setFolderParent(parentId);
     setFolderName("");
+    setFolderIcon(null);
+    setFolderPickerOpen(false);
     setFolderError("");
     setFolderOpen(true);
   };
 
   /** 新建目录实时重名检查：目标目录下同名目录（同步目录树形镜像布局会磁盘冲突） */
   const folderConflict = siblingNameConflict(nodes, folderParent, folderName, "folder");
+  /** 待选图标的定义（未选/未知 key 时渲染处兜底为类型默认 Folder 图标） */
+  const folderIconDef = folderIcon ? nodeIconByKey(folderIcon) : undefined;
 
   /**
    * 提交新建目录：前端重名拦截 + 后端同级校验兜底，失败反馈在弹窗内（不关闭，可改名重试）。
+   * 选中的自定义图标随创建一并落盘（store.createNode 的 icon 参数）。
    */
   const submitFolder = async () => {
     const name = folderName.trim();
     if (!name || folderConflict) return;
     try {
-      await useAppStore.getState().createNode(folderParent, "folder", name);
+      await useAppStore.getState().createNode(folderParent, "folder", name, folderIcon ?? undefined);
       setFolderOpen(false);
     } catch (e) {
       setFolderError(String(e));
@@ -501,12 +511,13 @@ export function TreePane() {
         document.body,
       )}
 
-      {/* 新建目录弹窗 */}
+      {/* 新建目录弹窗（图标选择弹窗叠开时禁本层 Esc，防一次 Esc 关两层） */}
       <Modal
         open={folderOpen}
         title="新建目录"
         onClose={() => setFolderOpen(false)}
         width={420}
+        escClose={!folderPickerOpen}
         footer={
           <>
             <button className="btn-ghost" onClick={() => setFolderOpen(false)}>
@@ -530,10 +541,49 @@ export function TreePane() {
         {folderConflict && (
           <p className="mt-1.5 text-[11.5px] text-err">同目录下已存在同名目录，请换一个名称</p>
         )}
+        <label className="label">图标（可选）</label>
+        <div className="flex items-center gap-1.5">
+          {/* 当前选择预览：点击打开图标选择弹窗；未选 = 类型默认图标 */}
+          <Tooltip content={folderIconDef ? folderIconDef.label : "点击选择图标"}>
+            <button
+              className="btn-ghost h-8 w-9 !px-0"
+              onClick={() => setFolderPickerOpen(true)}
+            >
+              {(() => {
+                const Def = folderIconDef?.Icon ?? Folder;
+                return <Def size={15} />;
+              })()}
+            </button>
+          </Tooltip>
+          <button
+            className="btn-ghost h-8 flex-1 gap-1.5 text-[12px]"
+            title="随机选一个图标"
+            onClick={() => setFolderIcon(randomNodeIcon().key)}
+          >
+            <Dices size={14} /> 随机
+          </button>
+          <button
+            className="btn-ghost h-8 text-[12px]"
+            title="回退类型默认图标"
+            disabled={folderIcon == null}
+            onClick={() => setFolderIcon(null)}
+          >
+            恢复默认
+          </button>
+        </div>
         {folderError && (
           <p className="mt-1.5 break-all text-[11.5px] text-err">{folderError}</p>
         )}
       </Modal>
+
+      {/* 新建目录的图标选择弹窗：选择器模式，拾取后写回待选状态 */}
+      {folderPickerOpen && (
+        <IconPickerModal
+          selected={folderIcon}
+          onPick={(key) => setFolderIcon(key)}
+          onClose={() => setFolderPickerOpen(false)}
+        />
+      )}
 
       {/* 新建 Server 弹窗 */}
       {formOpen && (
@@ -601,17 +651,36 @@ export function TreePane() {
 }
 
 /**
- * 更换图标弹窗：搜索过滤 + 网格展示全部注册图标，点击立即应用（可连续试选，
- * 实时落盘并触发同步导出）；「随机一个」一键换随机图标，「恢复默认」清空自定义回退
- * 类型默认图标。节点当前图标从 store 实时解析（应用后 reloadNodes，选中高亮跟随更新）。
+ * 图标选择弹窗，两种模式：
+ *
+ * - **更换已有节点**（传 `nodeId`）：点击立即应用落盘（可连续试选不关弹窗），
+ *   实时触发同步导出；节点当前图标从 store 实时解析，选中高亮跟随更新。
+ * - **新建场景选择器**（传 `selected` + `onPick`，如「新建目录」）：点击即回调
+ *   拾取结果并关闭弹窗，落盘时机由调用方掌握（随创建一并提交）。
+ *
+ * 两种模式都提供「随机一个」（randomNodeIcon）与「恢复默认」（清空自定义）。
  */
-function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => void }) {
-  const node = useAppStore((s) => s.nodes.find((n) => n.id === nodeId));
+function IconPickerModal({
+  nodeId,
+  selected,
+  onPick,
+  onClose,
+}: {
+  /** 已有节点模式：节点 ID */
+  nodeId?: number;
+  /** 选择器模式：当前选中 key（null = 默认图标） */
+  selected?: string | null;
+  /** 选择器模式：拾取回调（点击图标/随机/恢复默认后触发并关闭弹窗） */
+  onPick?: (key: string | null) => void;
+  onClose: () => void;
+}) {
+  const selectorMode = onPick != null;
+  const node = useAppStore((s) => (nodeId != null ? s.nodes.find((n) => n.id === nodeId) : undefined));
   const [error, setError] = useState("");
   /** 过滤关键字（匹配图标中文语义名 / 持久化 key，不区分大小写） */
   const [kw, setKw] = useState("");
-  /** 当前生效的自定义图标 key（null = 默认图标；应用后随 store 刷新） */
-  const current = node?.icon ?? null;
+  /** 当前生效的图标 key（null = 默认图标；更换模式下应用后随 store 刷新） */
+  const current = selectorMode ? selected ?? null : node?.icon ?? null;
 
   /** 按关键字过滤后的图标列表（空关键字 = 全部） */
   const filtered = useMemo(() => {
@@ -620,23 +689,26 @@ function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => v
     return NODE_ICONS.filter((d) => d.label.includes(k) || d.key.toLowerCase().includes(k));
   }, [kw]);
 
-  /** 应用一个图标 key（或 null 恢复默认）；失败行内提示，不关弹窗可重试 */
-  const apply = async (key: string | null) => {
-    try {
-      setError("");
-      await useAppStore.getState().setNodeIcon(nodeId, key);
-    } catch (e) {
-      setError(String(e));
+  /** 应用一个图标 key（或 null 恢复默认）：选择器模式回调即关闭；更换模式落盘可重试 */
+  const apply = (key: string | null) => {
+    if (selectorMode) {
+      onPick(key);
+      onClose();
+      return;
     }
+    useAppStore
+      .getState()
+      .setNodeIcon(nodeId!, key)
+      .catch((e) => setError(String(e)));
   };
 
   return (
-    <Modal open title="更换图标" onClose={onClose} width={460}>
-      {/* 当前节点预览 */}
+    <Modal open title={selectorMode ? "选择图标" : "更换图标"} onClose={onClose} width={460}>
+      {/* 当前图标预览：更换模式显示节点名，选择器模式显示「新建目录」 */}
       <div className="mb-3 flex items-center gap-2 rounded-md bg-panel2 px-2.5 py-2">
-        <span className="text-[12px] text-inksoft">当前节点</span>
+        <span className="text-[12px] text-inksoft">{selectorMode ? "新目录" : "当前节点"}</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] font-medium text-ink">
-          {node?.name ?? ""}
+          {selectorMode ? "" : node?.name ?? ""}
         </span>
         {(() => {
           const def = nodeIconByKey(current);
@@ -672,7 +744,7 @@ function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => v
             return (
               <Tooltip key={d.key} content={d.label}>
                 <button
-                  onClick={() => void apply(d.key)}
+                  onClick={() => apply(d.key)}
                   className={`flex h-9 w-full items-center justify-center rounded-md border transition-colors ${
                     active
                       ? "border-primary bg-primarysoft text-primarystrong"
@@ -692,7 +764,7 @@ function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => v
         <button
           className="btn-ghost h-8 flex-1 gap-1.5 text-[12px]"
           title="随机选一个图标"
-          onClick={() => void apply(randomNodeIcon().key)}
+          onClick={() => apply(randomNodeIcon().key)}
         >
           <Dices size={14} /> 随机一个
         </button>
@@ -700,7 +772,7 @@ function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => v
           className="btn-ghost h-8 flex-1 text-[12px]"
           title="清除自定义图标，回退类型默认图标"
           disabled={current == null}
-          onClick={() => void apply(null)}
+          onClick={() => apply(null)}
         >
           恢复默认
         </button>
@@ -723,7 +795,7 @@ function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => v
  * 常驻到下次同步结果替换），不占正文空间。
  */
 /** 变更动作 -> 展示图标（未推送变更列表弹窗用） */
-function dirtyActionIcon(action: SyncDirtyAction): React.ReactNode {
+function dirtyActionIcon(action: SyncChangeAction): React.ReactNode {
   switch (action) {
     case "create":
       return <Plus size={13} className="shrink-0 text-ok" />;
@@ -731,17 +803,17 @@ function dirtyActionIcon(action: SyncDirtyAction): React.ReactNode {
       return <Pencil size={13} className="shrink-0 text-primarystrong" />;
     case "rename":
       return <Type size={13} className="shrink-0 text-primarystrong" />;
-    case "move":
-      return <ArrowLeftRight size={13} className="shrink-0 text-primarystrong" />;
     case "delete":
       return <Trash2 size={13} className="shrink-0 text-err" />;
     case "env":
       return <SlidersHorizontal size={13} className="shrink-0 text-primarystrong" />;
+    case "tree":
+      return <ListTree size={13} className="shrink-0 text-primarystrong" />;
   }
 }
 
 /** 变更动作 -> 中文文案（未推送变更列表弹窗用） */
-function dirtyActionLabel(action: SyncDirtyAction): string {
+function dirtyActionLabel(action: SyncChangeAction): string {
   switch (action) {
     case "create":
       return "新建";
@@ -749,26 +821,26 @@ function dirtyActionLabel(action: SyncDirtyAction): string {
       return "修改";
     case "rename":
       return "改名";
-    case "move":
-      return "移动";
     case "delete":
       return "删除";
     case "env":
       return "环境库变更";
+    case "tree":
+      return "树结构变更";
   }
 }
 
 /** 空变更列表常量：selector 返回 undefined 时复用，避免每次渲染产生新引用触发重渲染 */
-const EMPTY_DIRTY: SyncDirtyEntry[] = [];
+const EMPTY_DIRTY: SyncChangeEntry[] = [];
 
 function SyncBar() {
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const project = useAppStore((s) => s.projects.find((p) => p.id === s.activeProjectId));
-  const { addLogs, reloadNodes } = useAppStore();
-  /** 当前项目未推送的变更列表（资源树/环境库变更提醒数据源，推送成功后清空） */
+  const { addLogs, reloadNodes, refreshSyncChanges } = useAppStore();
+  /** 当前项目未推送的变更列表（同步目录 git status，推送后工作区干净自然清零） */
   const dirty =
     useAppStore((s) =>
-      s.activeProjectId != null ? s.syncDirty[s.activeProjectId] : undefined,
+      s.activeProjectId != null ? s.syncChanges[s.activeProjectId] : undefined,
     ) ?? EMPTY_DIRTY;
   const [info, setInfo] = useState<BranchInfo | null>(null);
   const [busy, setBusy] = useState<"push" | "pull" | null>(null);
@@ -790,7 +862,7 @@ function SyncBar() {
   const hasSync = !!project?.sync_dir;
 
   /**
-   * 读取分支信息（挂载/切项目/定时检查/同步完成 后共用）。
+   * 读取分支信息 + 刷新未推送变更列表（挂载/切项目/定时检查/同步完成 后共用）。
    * 成功：更新分支下拉，并清除「分支读取失败」类提醒（目录可能被外部 git init 恢复）。
    * 失败：清空下拉；仅在「正常 → 异常」跃迁时提醒，定时检查不反复刷同一告警。
    */
@@ -813,7 +885,9 @@ function SyncBar() {
           text: `无法读取分支信息：${String(e)}。同步目录可能不是 git 仓库（或 git 不可用），请检查目录后手动处理`,
         });
       });
-  }, []);
+    // 变更列表与分支同一节奏刷新：外部直接改文件也能在 10s 内反映到徽标
+    void refreshSyncChanges(pid);
+  }, [refreshSyncChanges]);
 
   /* 项目切换/挂载时读取分支信息；读取失败时图标提醒（不再只静默写日志，否则同步条看不到分支名） */
   useEffect(() => {
@@ -825,7 +899,7 @@ function SyncBar() {
   }, [hasSync, activeProjectId, refreshBranches]);
 
   /* 定时检查仓库状态（10s）：外部删掉 .git / 手动 git init 恢复等变化及时反映到栏头，
-     分支下拉与推送/拉取按钮的确认逻辑随之更新 */
+     分支下拉与推送/拉取按钮的确认逻辑随之更新；同时刷新未推送变更列表 */
   useEffect(() => {
     if (!hasSync || activeProjectId == null) return;
     const t = window.setInterval(() => refreshBranches(activeProjectId), 10_000);
@@ -876,13 +950,10 @@ function SyncBar() {
       addLogs(logs);
       setNotice(noticeOf(logs, dir));
       if (dir === "pull") await reloadNodes();
-      /* 未推送提醒清零：推送成功（日志无 error，变更已 commit+push）/ 拉取导入后
-         本地与仓库内容一致；推送失败（含部分文件导出 error）保留待下次处理 */
-      if (dir === "push" ? !logs.some((l) => l.level === "error") : true) {
-        useAppStore.getState().clearSyncDirty();
-      }
       /* 推送/拉取会改变仓库状态（如推送对旧版误删 .git 的目录自动 git init 重建、
-         首次提交让 unborn 分支诞生），完成后刷新分支下拉，无需重启应用 */
+         首次提交让 unborn 分支诞生），完成后刷新分支下拉，无需重启应用；
+         未推送变更列表一并刷新：推送成功后工作区干净徽标自然消失，
+         推送失败（含部分文件导出 error）变更仍在列表里待下次处理 */
       refreshBranches(project.id);
     } catch (e) {
       const label = dir === "push" ? "推送" : "拉取";
@@ -905,6 +976,8 @@ function SyncBar() {
       const next = await api.projectBranches(project.id);
       setInfo(next);
       setNotice({ level: "info", kind: "sync", text: `已切换分支：${branch}（分支间内容可能不同，可点击「拉取」加载该分支配置）` });
+      /* 未提交改动会跟随 checkout 带到新分支，变更列表按新状态刷新 */
+      void refreshSyncChanges(project.id);
     } catch (e) {
       useAppStore.getState().addLog("error", String(e));
       setNotice({ level: "error", kind: "sync", text: `切换分支失败：${String(e)}。请检查仓库状态（可能有未提交改动）后手动处理` });
@@ -1061,8 +1134,8 @@ function SyncBar() {
           ))}
         </div>
         <p className="mt-2.5 text-[11.5px] leading-relaxed text-inksoft/70">
-          变更已实时写入同步目录（尚未 commit）。点击「推送」提交到 git 仓库后提醒消失；
-          同一节点的多次变更只保留最新动作。应用重启后重新累计。
+          列表以同步目录的 git status 为准：工具内的增删改已实时写入（尚未 commit），
+          外部直接改动的文件同样会被列出。点击「推送」提交后提醒消失；应用重启后未推送的变更不会丢失提醒。
         </p>
       </Modal>
 

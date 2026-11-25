@@ -12,6 +12,7 @@ import {
   Moon,
   Palette,
   RefreshCw,
+  ScrollText,
   Sun,
   Timer,
 } from "lucide-react";
@@ -19,6 +20,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAppStore, MAX_CALL_TIMEOUT_SECS } from "../store";
+import { CHANGELOG_RAW, getVersionNotes } from "../lib/changelog";
 import { type ThemeMode } from "../theme";
 import { openRepoPage, REPO_URL } from "../api";
 import { Modal } from "./ui";
@@ -50,6 +52,13 @@ interface Props {
 /** 设置弹窗：左侧 tab 导航 + 右侧分区（tab 状态跨开关保留，重开停在上次页） */
 export function SettingsModal({ open, onClose }: Props) {
   const [tab, setTab] = useState<SettingsTab>("appearance");
+  /** 原生菜单「检查更新」触发的自动检查标记：打开时强制切到「关于」tab 触发检查 */
+  const autoCheck = useAppStore((s) => s.settingsAutoCheck);
+
+  /* 菜单触发：弹窗打开即切「关于」tab，由 UpdaterSection 挂载时自动检查一次 */
+  useEffect(() => {
+    if (open && autoCheck) setTab("about");
+  }, [open, autoCheck]);
 
   return (
     <Modal open={open} title="设置" onClose={onClose} width={680} height={520}>
@@ -159,6 +168,10 @@ function CallSection() {
 function AboutSection() {
   /** 当前应用版本（浏览器演示模式下取不到，显示为空） */
   const [version, setVersion] = useState("");
+  /** 本次版本更新日志弹窗 */
+  const [logOpen, setLogOpen] = useState(false);
+  /** 原生菜单触发的自动检查标记（透传给 UpdaterSection，检查完由其清除） */
+  const autoCheck = useAppStore((s) => s.settingsAutoCheck);
 
   useEffect(() => {
     getVersion()
@@ -176,9 +189,17 @@ function AboutSection() {
           SQLite 中，除你配置的 MCP Server、同步仓库与检查更新（GitHub Releases）外不发起任何网络请求。
         </span>
       </div>
+      {/* 本次版本更新日志：CHANGELOG.md 打包内置，离线可查（零网络请求） */}
+      <div className="mt-2.5">
+        <button className="btn-ghost h-8 gap-1.5 text-[12px]" onClick={() => setLogOpen(true)}>
+          <ScrollText size={13} /> 查看本次版本更新日志
+        </button>
+      </div>
+      {logOpen && <ChangelogModal onClose={() => setLogOpen(false)} />}
       {/* GitHub 仓库入口 + 更新状态机：同一行；说明/进度/错误由 UpdaterSection 在下方通栏展示 */}
       <UpdaterSection
         className="mt-2.5"
+        autoCheck={autoCheck}
         leading={
           <button
             className="btn-ghost h-8 shrink-0 gap-1.5"
@@ -202,15 +223,19 @@ type UpdateState = "idle" | "checking" | "available" | "downloading" | "installe
  *
  * @param leading 按钮行最左侧的前置节点（如 GitHub 仓库入口），与更新状态按钮同行
  * @param className 外层容器附加类名（与上方内容的间距由调用方控制）
+ * @param autoCheck 原生菜单「检查更新」触发：挂载即自动检查一次（初始直接进入
+ *                  checking 态），检查结束（无论结果）清除 store 里的标记防止误触发
  */
 function UpdaterSection({
   leading,
   className = "",
+  autoCheck = false,
 }: {
   leading?: React.ReactNode;
   className?: string;
+  autoCheck?: boolean;
 }) {
-  const [state, setState] = useState<UpdateState>("idle");
+  const [state, setState] = useState<UpdateState>(autoCheck ? "checking" : "idle");
   /** 已是最新 / 出错时的提示文案 */
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
@@ -243,6 +268,14 @@ function UpdaterSection({
       setState("idle");
     }
   };
+
+  /* 原生菜单「检查更新」触发：挂载即自动检查一次，结束后（无论成功/失败）清除
+     store 标记——下次手动打开设置不应再自动检查 */
+  useEffect(() => {
+    if (!autoCheck) return;
+    void doCheck().finally(() => useAppStore.setState({ settingsAutoCheck: false }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /** 下载并安装：完成后提示重启（macOS/Linux 直接替换应用文件） */
   const install = async () => {
@@ -318,11 +351,67 @@ function UpdaterSection({
           {error}
         </div>
       )}
-      {state === "idle" && !note && !error && (
-        <p className="mt-2 text-[11.5px] leading-relaxed text-inksoft/70">
-          检查 GitHub Releases 获取最新版本，下载前会校验更新包签名。
+        {state === "idle" && !note && !error && (
+          <p className="mt-2 text-[11.5px] leading-relaxed text-inksoft/70">
+            检查 GitHub Releases 获取最新版本，下载前会校验更新包签名。
+          </p>
+        )}
+
+        {/* 更新日志显示框：检查到新版本时展示（内容 = latest.json 的 notes，
+            CI 发版时从仓库根 CHANGELOG.md 最新段落提取）；无日志内容则不出框 */}
+        {state === "available" && update?.body?.trim() && (
+          <div className="mt-2.5 rounded-md border border-line bg-panel2 px-3 py-2">
+            <p className="mb-1 text-[11px] text-inksoft">更新日志 · v{newVersion}</p>
+            <div className="max-h-[150px] overflow-y-auto whitespace-pre-wrap break-words text-[12px] leading-relaxed text-ink/90">
+              {update.body.trim()}
+            </div>
+          </div>
+        )}
+    </div>
+  );
+}
+
+/**
+ * 本次版本更新日志弹窗：内容来自打包内置的 CHANGELOG.md（构建期 raw 导入，
+ * 运行期零网络请求）；按当前应用版本提取对应段落展示。
+ *
+ * 版本取不到（浏览器演示模式）或 CHANGELOG.md 无该版本记录时显示说明文案。
+ */
+function ChangelogModal({ onClose }: { onClose: () => void }) {
+  /** 当前应用版本（取不到时空串，标题退化为「更新日志」） */
+  const [version, setVersion] = useState("");
+
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => setVersion(""));
+  }, []);
+
+  const notes = version ? getVersionNotes(CHANGELOG_RAW, version) : null;
+
+  return (
+    <Modal
+      open
+      title={version ? `更新日志 · v${version}` : "更新日志"}
+      onClose={onClose}
+      width={520}
+      footer={
+        <button className="btn-primary" onClick={onClose}>
+          知道了
+        </button>
+      }
+    >
+      {notes ? (
+        <div className="max-h-[300px] overflow-y-auto whitespace-pre-wrap break-words text-[12.5px] leading-relaxed text-ink">
+          {notes.body}
+        </div>
+      ) : (
+        <p className="text-[12.5px] leading-relaxed text-inksoft">
+          {version
+            ? `CHANGELOG.md 中暂无 v${version} 的记录（v0.1.19 之前的版本未维护更新日志）。`
+            : "演示模式下取不到当前应用版本号，无法定位对应日志。"}
         </p>
       )}
-    </div>
+    </Modal>
   );
 }

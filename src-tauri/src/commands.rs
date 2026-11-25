@@ -599,6 +599,25 @@ pub fn project_checkout(db: State<'_, Db>, project_id: i64, branch: String) -> C
         .map_err(crate::error::AppError::new)
 }
 
+/// 读取项目同步目录的未提交变更列表（git status 视角，未推送变更提醒的数据源）。
+///
+/// - `project_id`：项目 ID
+/// - 返回 `SyncChanges`：`available` = 同步目录是否为可用 git 仓库（false 时前端
+///   隐藏变更徽标）；`entries[].nodeId` = 资源树节点 ID（null = 不对应单个节点），
+///   `name` = 展示名，`action` = create/update/rename/delete/env/tree，`path` = 相对
+///   仓库根的文件路径
+/// - 目录/仓库异常一律静默（`available=false`，不报错）：该命令被前端 10s 定时轮询；
+///   仅项目不存在或数据库读取失败时报错
+#[tauri::command]
+pub async fn project_sync_changes(
+    db: State<'_, Db>,
+    project_id: i64,
+) -> CmdResult<crate::sync::SyncChanges> {
+    crate::sync::project_changes(&db, project_id)
+        .await
+        .map_err(crate::error::AppError::new)
+}
+
 /// 复制节点：目录连同整棵子树（含各 Server 连接配置）一起复制。
 ///
 /// # 参数

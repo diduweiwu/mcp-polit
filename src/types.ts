@@ -37,23 +37,25 @@ export interface BranchInfo {
   branches: string[];
 }
 
-/** 节点/环境库相对上次推送的变更动作类型（资源树变更提醒用） */
-export type SyncDirtyAction =
-  | "create" // 新建节点
-  | "update" // 修改（Server 配置 / 自定义图标）
-  | "rename" // 改名
-  | "move" // 移动（拖拽换目录）
+/** 同步目录未提交变更的动作类型（未推送变更提醒用，与后端 action 字符串一致） */
+export type SyncChangeAction =
+  | "create" // 新增（未跟踪文件：新建节点 / 外部放入的文件）
+  | "update" // 修改（Server 配置 / 自定义图标等）
+  | "rename" // 改名（git 暂存过的改名记录）
   | "delete" // 删除
-  | "env"; // 项目环境库变更（非节点，nodeId 为 null）
+  | "env" // 项目环境库变更（environments.json）
+  | "tree"; // 资源树结构变更（tree.json 元数据：改名/移动/排序/图标）
 
-/** 一条未推送的变更记录（按项目分桶存储，推送/拉取成功后清空） */
-export interface SyncDirtyEntry {
-  /** 变更节点 ID；null = 项目级变更（环境库），不对应资源树条目 */
+/** 同步目录的一条未提交变更（以 git status 为唯一数据源，按项目分桶缓存） */
+export interface SyncChangeEntry {
+  /** 变更节点 ID；null = 不对应单个节点（环境库/树结构/外部文件/已删节点的残留变更） */
   nodeId: number | null;
-  /** 变更时的节点名（删除后节点已不存在，靠这里展示）；环境库固定「环境库」 */
+  /** 展示名：节点名 / 文件名 / 「环境库」/「资源树结构」 */
   name: string;
   /** 变更动作 */
-  action: SyncDirtyAction;
+  action: SyncChangeAction;
+  /** 相对仓库根的文件路径（rename 为新路径） */
+  path: string;
 }
 
 /** 树节点类型 */

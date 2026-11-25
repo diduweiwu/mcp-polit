@@ -16,8 +16,8 @@ import type {
   ParamCase,
   Project,
   ServerConfig,
+  SyncChangeEntry,
   SyncDirResolve,
-  SyncDirtyEntry,
   ToolInfo,
   TreeNode,
 } from "./types";
@@ -87,8 +87,14 @@ interface AppState {
   /* 全局调用超时（秒）：工具调用的超时下限，实际生效取与 Server 配置较大的值 */
   callTimeoutSecs: number;
 
-  /* 未推送的变更（按项目分桶，内存态）：资源树变更提醒数据源，推送/拉取成功后清空 */
-  syncDirty: Record<number, SyncDirtyEntry[]>;
+  /* 未推送的变更（按项目分桶）：以同步目录 git status 为唯一数据源，
+     定时轮询 + 实时同步导出后刷新，推送后自然清空（工作区回到干净状态） */
+  syncChanges: Record<number, SyncChangeEntry[]>;
+
+  /* 设置弹窗开关（原生菜单「检查更新」与顶栏 ⌘, 共用同一状态） */
+  settingsOpen: boolean;
+  /** 菜单触发的自动检查标记：设置弹窗打开后自动切「关于」并检查一次，用完即清 */
+  settingsAutoCheck: boolean;
 
   /* 项目 */
   projects: Project[];
@@ -168,13 +174,20 @@ interface AppState {
   setCallTimeoutSecs: (secs: number) => Promise<void>;
 
   /**
-   * 标记一条未推送的变更（资源树变更提醒数据源）。
-   * 同一节点的多次变更只保留最新一条（如改名后再改配置 → 只记「修改」）。
+   * 拉取当前项目同步目录的未提交变更列表（git status 视角）并写入 syncChanges。
+   *
+   * 调用时机：切换项目 / 实时同步导出完成 / 推送拉取完成 / SyncBar 10s 定时轮询。
+   * 目录不存在或非 git 仓库时置为空列表（徽标隐藏），失败静默不打扰（不写日志面板）。
+   *
+   * @param pid 项目 ID（必须显式传入：导出完成回调里 activeProjectId 可能已切换）
    */
-  markSyncDirty: (entry: SyncDirtyEntry) => void;
+  refreshSyncChanges: (pid: number) => Promise<void>;
 
-  /** 清空当前项目的未推送变更（推送 / 拉取成功后调用） */
-  clearSyncDirty: () => void;
+  /** 打开设置弹窗（autoCheck：打开后自动切「关于」并检查一次更新，原生菜单触发用） */
+  openSettings: (autoCheck?: boolean) => void;
+
+  /** 关闭设置弹窗（顺带清除自动检查标记，防止下次手动打开时误触发检查） */
+  closeSettings: () => void;
 
   /** 切换激活项目 */
   setActiveProject: (id: number) => Promise<void>;
@@ -205,7 +218,16 @@ interface AppState {
   updateProjectSyncDir: (id: number, syncDir: string | null, resolve?: SyncDirResolve) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
 
-  createNode: (parentId: number | null, type: NodeType, name: string) => Promise<void>;
+  /**
+   * 新建节点（目录 / Server）。
+   *
+   * @param parentId 父目录 ID；null = 根层
+   * @param type 节点类型
+   * @param name 名称（后端同级重名校验兜底拦截）
+   * @param icon 可选自定义图标 key；传入时创建后紧跟一次 set_node_icon 落盘
+   *            （后端 create_node 无 icon 参数），随本次防抖导出一并写入同步目录
+   */
+  createNode: (parentId: number | null, type: NodeType, name: string, icon?: string) => Promise<void>;
   renameNode: (id: number, name: string) => Promise<void>;
   /** 设置节点自定义图标（icon 注册表 key；null 恢复默认），刷新节点列表并触发同步导出 */
   setNodeIcon: (id: number, icon: string | null) => Promise<void>;
@@ -309,7 +331,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   initialized: false,
   themeMode: "light",
   callTimeoutSecs: DEFAULT_CALL_TIMEOUT_SECS,
-  syncDirty: {},
+  syncChanges: {},
+  settingsOpen: false,
+  settingsAutoCheck: false,
   projects: [],
   activeProjectId: null,
   nodes: [],
@@ -386,19 +410,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     await api.saveSetting("call_timeout_secs", String(v)).catch(() => {});
   },
 
-  markSyncDirty(entry) {
-    const pid = get().activeProjectId;
-    if (pid == null) return;
-    set((s) => {
-      const list = (s.syncDirty[pid] ?? []).filter((e) => e.nodeId !== entry.nodeId);
-      return { syncDirty: { ...s.syncDirty, [pid]: [...list, entry] } };
-    });
+  async refreshSyncChanges(pid) {
+    try {
+      const { entries } = await api.projectSyncChanges(pid);
+      // 只更新仍处于激活态的桶：请求期间用户切走项目时不覆盖新项目的数据
+      if (useAppStore.getState().activeProjectId === pid) {
+        useAppStore.setState((s) => ({ syncChanges: { ...s.syncChanges, [pid]: entries } }));
+      }
+    } catch {
+      /* 静默：10s 轮询场景下失败不刷日志面板，按无变更处理让徽标消失 */
+      useAppStore.setState((s) => ({ syncChanges: { ...s.syncChanges, [pid]: [] } }));
+    }
   },
 
-  clearSyncDirty() {
-    const pid = get().activeProjectId;
-    if (pid == null) return;
-    set((s) => ({ syncDirty: { ...s.syncDirty, [pid]: [] } }));
+  openSettings(autoCheck = false) {
+    set({ settingsOpen: true, settingsAutoCheck: autoCheck });
+  },
+
+  closeSettings() {
+    set({ settingsOpen: false, settingsAutoCheck: false });
   },
 
   async setActiveProject(id) {
@@ -414,6 +444,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().reloadNodes();
     // 加载项目环境库 + 旧环境组一次性迁移（幂等；迁移明细/冲突写日志面板）
     await get().loadEnvironments();
+    // 拉取未推送变更列表（git status）；无同步目录时后端返回空列表
+    void get().refreshSyncChanges(id);
     void api
       .migrateLegacyEnvs(id)
       .then((logs) => {
@@ -493,9 +525,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     const rest = get().projects.filter((p) => p.id !== id);
     /* 该项目的未推送变更记录随之移除（分桶数据不残留） */
     set((s) => {
-      const dirty = { ...s.syncDirty };
-      delete dirty[id];
-      return { projects: rest, syncDirty: dirty };
+      const changes = { ...s.syncChanges };
+      delete changes[id];
+      return { projects: rest, syncChanges: changes };
     });
     if (get().activeProjectId === id) {
       if (rest.length > 0) {
@@ -507,22 +539,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  async createNode(parentId, type, name) {
+  async createNode(parentId, type, name, icon) {
     const pid = get().activeProjectId;
     if (pid == null) return;
     const node = await api.createNode(pid, parentId, type, name);
+    if (icon) {
+      // 自定义图标随创建一并落盘；直接调 API 不走 setNodeIcon action，避免二次 reloadNodes
+      await api.setNodeIcon(node.id, icon);
+    }
     await get().reloadNodes({ keepExpand: true });
     // 只保证新建节点可见（展开祖先链）；目录再展开自身，其余目录保持原状
     get().revealNode(node.id);
     if (type === "folder") get().expandNode(node.id);
-    get().markSyncDirty({ nodeId: node.id, name: node.name, action: "create" });
     scheduleSyncExport();
   },
 
   async renameNode(id, name) {
     await api.renameNode(id, name);
     await get().reloadNodes({ keepExpand: true });
-    get().markSyncDirty({ nodeId: id, name, action: "rename" });
     scheduleSyncExport();
   },
 
@@ -530,18 +564,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   async setNodeIcon(id, icon) {
     await api.setNodeIcon(id, icon);
     await get().reloadNodes({ keepExpand: true });
-    get().markSyncDirty({
-      nodeId: id,
-      name: get().nodes.find((n) => n.id === id)?.name ?? "?",
-      action: "update",
-    });
     scheduleSyncExport();
   },
 
   async deleteNode(id) {
     await api.deleteNode(id);
     const s = get();
-    const removed = s.nodes.find((n) => n.id === id);
     const remaining = s.nodes.filter((n) => n.id !== id);
     const patch: Partial<AppState> = { nodes: remaining };
     if (s.selectedNodeId === id) {
@@ -549,32 +577,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       patch.selectedToolName = null;
       patch.results = [];
     }
-    /* 变更提醒：本节点记一条「删除」；其子树节点既已随之删除，旧变更记录一并移除，
-       避免列表出现指向已消失节点的幽灵条目 */
-    const pid = s.activeProjectId;
-    if (pid != null) {
-      const doomed = new Set<number>([id]);
-      let grew = true;
-      while (grew) {
-        grew = false;
-        for (const n of s.nodes) {
-          if (n.parent_id != null && doomed.has(n.parent_id) && !doomed.has(n.id)) {
-            doomed.add(n.id);
-            grew = true;
-          }
-        }
-      }
-      patch.syncDirty = {
-        ...s.syncDirty,
-        [pid]: (s.syncDirty[pid] ?? []).filter((e) => e.nodeId == null || !doomed.has(e.nodeId)),
-      };
-    }
     set(patch as AppState);
-    get().markSyncDirty({
-      nodeId: id,
-      name: removed?.name ?? "?",
-      action: "delete",
-    });
     await get().reloadNodes({ keepExpand: true });
     scheduleSyncExport();
   },
@@ -584,11 +587,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().reloadNodes({ keepExpand: true });
     // 展开目标祖先链：拖进折叠目录时移动结果可见（否则节点像「消失」）
     get().revealNode(id);
-    get().markSyncDirty({
-      nodeId: id,
-      name: get().nodes.find((n) => n.id === id)?.name ?? "?",
-      action: "move",
-    });
     scheduleSyncExport();
   },
 
@@ -603,7 +601,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 副本与源同级（祖先已随源展开）；目录副本展开自身即可见其子树
     get().revealNode(copy.id);
     if (copy.node_type === "folder") get().expandNode(copy.id);
-    get().markSyncDirty({ nodeId: copy.id, name: copy.name, action: "create" });
     scheduleSyncExport();
     return copy;
   },
@@ -1063,7 +1060,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     await api.saveEnvironments(pid, envs);
     // 后端整批替换会重新生成 id，重新拉取保证缓存一致（以环境名为身份）
     await get().loadEnvironments();
-    get().markSyncDirty({ nodeId: null, name: "环境库", action: "env" });
     scheduleSyncExport(); // 实时同步：环境库已变更，防抖写盘到同步目录
   },
 
@@ -1131,7 +1127,7 @@ export function scheduleSyncExport(): void {
   if (syncExportTimer != null) window.clearTimeout(syncExportTimer);
   syncExportTimer = window.setTimeout(() => {
     syncExportTimer = null;
-    const { activeProjectId, addLogs } = useAppStore.getState();
+    const { activeProjectId, addLogs, refreshSyncChanges } = useAppStore.getState();
     if (activeProjectId == null) return;
     api
       .projectSyncExport(activeProjectId)
@@ -1140,6 +1136,11 @@ export function scheduleSyncExport(): void {
       })
       .catch((e) => {
         useAppStore.getState().addLog("warn", `自动同步失败：${String(e)}`);
+      })
+      .finally(() => {
+        /* 导出落盘后刷新未推送变更列表（git status 才能看到本次写入）；
+           传入的是发起时的项目 ID，回调里切走项目也不会写错桶 */
+        void refreshSyncChanges(activeProjectId);
       });
   }, 300);
 }
