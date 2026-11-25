@@ -8,7 +8,7 @@
  *   支持搜索与取消收藏；卡片与摘要行上的星标按钮即可收藏
  * - 每条结果可「放大查看」：右侧滑出大抽屉，左侧请求 / 右侧响应，请求支持复制为 cURL
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Braces,
@@ -31,7 +31,7 @@ import { useAppStore } from "../store";
 import { copyText } from "../lib/clipboard";
 import { buildToolsCallCurl } from "../lib/curl";
 import type { CallResult, HistoryEntry, LogLevel } from "../types";
-import { EmptyState } from "./ui";
+import { Collapse, EmptyState } from "./ui";
 import { JsonNode } from "./JsonView";
 
 /** 结果栏 tab：调用结果 / 历史 / 收藏 */
@@ -267,17 +267,15 @@ function HistoryPanel({ onExpand }: { onExpand: (entry: HistoryEntry) => void })
                 onToggleExpand={() => setExpandedSeq(expandedSeq === h.seq ? null : h.seq)}
                 onToggleStar={() => void toggleStar(h)}
               />
-              {/* 展开的详情 */}
-              {expandedSeq === h.seq && (
-                <div className="anim-fade-in mt-0.5">
-                  <ResultCard
-                    result={h}
-                    starred={h.starred}
-                    onToggleStar={() => void toggleStar(h)}
-                    onExpand={() => onExpand(h)}
-                  />
-                </div>
-              )}
+              {/* 展开的详情：Collapse 双向动画（收起不卸载，保留卡片内部状态） */}
+              <Collapse open={expandedSeq === h.seq} className="mt-0.5">
+                <ResultCard
+                  result={h}
+                  starred={h.starred}
+                  onToggleStar={() => void toggleStar(h)}
+                  onExpand={() => onExpand(h)}
+                />
+              </Collapse>
             </div>
           ))
         )}
@@ -355,16 +353,15 @@ function StarPanel({ onExpand }: { onExpand: (entry: HistoryEntry) => void }) {
                   onToggleExpand={() => setExpandedId(expandedId === h.id ? null : h.id!)}
                   onToggleStar={() => void toggleStar(h)}
                 />
-                {expandedId === h.id && (
-                  <div className="anim-fade-in mt-0.5">
-                    <ResultCard
-                      result={h}
-                      starred={h.starred}
-                      onToggleStar={() => void toggleStar(h)}
-                      onExpand={() => onExpand(h)}
-                    />
-                  </div>
-                )}
+                {/* 详情：Collapse 双向动画（收起不卸载，保留卡片内部状态） */}
+                <Collapse open={expandedId === h.id} className="mt-0.5">
+                  <ResultCard
+                    result={h}
+                    starred={h.starred}
+                    onToggleStar={() => void toggleStar(h)}
+                    onExpand={() => onExpand(h)}
+                  />
+                </Collapse>
               </div>
             ),
           )
@@ -720,8 +717,9 @@ function ResultCard({
         </div>
       </div>
 
-      {/* 展开后：请求 / 响应两段分开显示，各自独立复制（折叠时不渲染，避免隐藏的树展开开销） */}
-      {!collapsed && (
+      {/* 请求 / 响应两段分开显示，各自独立复制；Collapse 双向动画，懒挂载
+          （未展开过不产生 DOM，避免隐藏的树展开开销；收起保留内容，再展开即时呈现） */}
+      <Collapse open={!collapsed}>
         <>
           {/* 请求段：格式化入参 JSON，独立复制按钮 */}
           <div className="border-b border-line">
@@ -766,7 +764,7 @@ function ResultCard({
             </div>
           </div>
         </>
-      )}
+      </Collapse>
     </div>
   );
 }
@@ -887,6 +885,27 @@ function ResponsePanel({ result, structured }: ResponsePanelProps) {
 function ResultDrawer({ entry, onClose }: { entry: HistoryEntry; onClose: () => void }) {
   const { serverConfigs, loadConfig, toggleStar, nodes } = useAppStore();
   const nodeId = entry.node_id;
+  /** 退出动画播放中标记（播完才真正回调 onClose 卸载；期间忽略重复请求） */
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+
+  /** 请求关闭：先播 200ms 滑出动画再卸载（与 Modal 的关闭时序一致） */
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setClosing(true);
+    window.setTimeout(() => {
+      closingRef.current = false;
+      setClosing(false);
+      onClose();
+    }, 200);
+  }, [onClose]);
+
+  /* 父组件切换展示条目时复位关闭动画状态：残留的关闭定时器不应把新条目的抽屉误关 */
+  useEffect(() => {
+    closingRef.current = false;
+    setClosing(false);
+  }, [entry.seq]);
 
   /* 配置按需加载（历史里的 server 可能从未在本会话打开过摘要） */
   const cfg = nodeId != null ? serverConfigs[nodeId] : undefined;
@@ -897,11 +916,11 @@ function ResultDrawer({ entry, onClose }: { entry: HistoryEntry; onClose: () => 
   /* Esc 关闭 */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [requestClose]);
 
   /** cURL 文本：配置就绪且为 HTTP 传输才生成；stdio 返回 null（按钮禁用说明原因） */
   const curl = useMemo(
@@ -921,10 +940,17 @@ function ResultDrawer({ entry, onClose }: { entry: HistoryEntry; onClose: () => 
 
   return (
     <>
-      {/* 遮罩：点击关闭 */}
-      <div className="anim-fade-in fixed inset-0 z-40 bg-black/40" onClick={onClose} />
-      {/* 面板：右侧滑入 */}
-      <div className="anim-drawer-in fixed inset-y-0 right-0 z-50 flex w-[min(1080px,94vw)] flex-col border-l border-line bg-panel shadow-2xl">
+      {/* 遮罩：点击关闭；关闭时与面板一起淡出 */}
+      <div
+        className={`fixed inset-0 z-40 bg-black/40 ${closing ? "anim-fade-out" : "anim-fade-in"}`}
+        onClick={requestClose}
+      />
+      {/* 面板：右侧滑入，关闭时对称滑出 */}
+      <div
+        className={`fixed inset-y-0 right-0 z-50 flex w-[min(1080px,94vw)] flex-col border-l border-line bg-panel shadow-2xl ${
+          closing ? "anim-drawer-out" : "anim-drawer-in"
+        }`}
+      >
         {/* 头部：元信息 + 收藏 + 关闭 */}
         <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-3">
           {entry.is_error ? (
@@ -958,7 +984,7 @@ function ResultDrawer({ entry, onClose }: { entry: HistoryEntry; onClose: () => 
           <button
             className="rounded p-1.5 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
             title="关闭（Esc）"
-            onClick={onClose}
+            onClick={requestClose}
           >
             <X size={16} />
           </button>

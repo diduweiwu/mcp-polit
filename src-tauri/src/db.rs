@@ -730,6 +730,46 @@ pub fn get_setting(conn: &Connection, key: &str) -> CmdResult<Option<String>> {
     Ok(rows.next().transpose()?)
 }
 
+/* ---------- 全局调用超时 ---------- */
+
+/// 设置表中全局调用超时的键名（秒，由设置页写入）。
+pub const CALL_TIMEOUT_SECS_KEY: &str = "call_timeout_secs";
+
+/// 全局调用超时默认值（秒）：设置未写入或值非法时回退到该值。
+pub const DEFAULT_CALL_TIMEOUT_SECS: i64 = 60;
+
+/// 全局调用超时上限（秒）：与设置页输入限制一致，防止误填超大值导致调用长期挂起。
+pub const MAX_CALL_TIMEOUT_SECS: i64 = 1024;
+
+/// 读取全局调用超时（秒）。
+///
+/// 该值是工具调用的超时**下限**：实际生效超时取它与 Server 配置 `timeout_ms` 的较大者
+/// （见 `mcp_manager::call_tool`），未单独调大过超时的 Server（默认 30s）按此全局值生效。
+///
+/// 值缺失或非法（非数字）时回退 [`DEFAULT_CALL_TIMEOUT_SECS`]；负数、0 或超出上限时
+/// 收敛到 `1 ~ [`MAX_CALL_TIMEOUT_SECS`]`（防御性 clamp，正常路径由设置页保证合法范围）。
+///
+/// # 参数
+///
+/// - `conn`: SQLite 连接。
+///
+/// # 返回
+///
+/// 全局调用超时秒数（1 ~ 1024）。
+///
+/// # 示例
+///
+/// ```text
+/// let secs = get_call_timeout_secs(&conn)?; // 未设置时返回 60
+/// ```
+pub fn get_call_timeout_secs(conn: &Connection) -> CmdResult<i64> {
+    let raw = get_setting(conn, CALL_TIMEOUT_SECS_KEY)?;
+    let secs = raw
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(DEFAULT_CALL_TIMEOUT_SECS);
+    Ok(secs.clamp(1, MAX_CALL_TIMEOUT_SECS))
+}
+
 /* ---------- 项目级环境库 ---------- */
 
 /// 单个环境的写入负载：整存整取接口使用（id / 排序由后端按数组序生成）。

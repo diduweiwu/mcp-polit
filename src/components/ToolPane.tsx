@@ -22,7 +22,7 @@ import {
 import { activeEnvName, useAppStore } from "../store";
 import type { TreeNode } from "../types";
 import { isSensitiveKey, parseSensitiveKeys } from "../lib/sensitive";
-import { EmptyState, StatusDot } from "./ui";
+import { Collapse, EmptyState, StatusDot } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
 /** 工具列表栏 */
@@ -253,11 +253,10 @@ function ConnectedConfigBar({ node }: { node: TreeNode }) {
           className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
         />
       </button>
-      {open && (
-        <div className="anim-fade-in mt-1">
-          <ServerSummary node={node} status="connected" />
-        </div>
-      )}
+      {/* 摘要展开/收起：Collapse 双向动画（收起不卸载，保留内容状态） */}
+      <Collapse open={open} className="mt-1">
+        <ServerSummary node={node} status="connected" />
+      </Collapse>
     </div>
   );
 }
@@ -346,6 +345,7 @@ function SummaryRow({ label, children }: { label: string; children: React.ReactN
  */
 function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
   const cfg = useAppStore((s) => s.serverConfigs[node.id]);
+  const callTimeoutSecs = useAppStore((s) => s.callTimeoutSecs);
   const { connect, cancelConnect, disconnect, refreshTools } = useAppStore();
   /** 当前全局环境名（连接时配置里的 {{}} 引用按它插值；空串 = 未选择） */
   const envName = useAppStore((s) => activeEnvName(s));
@@ -363,6 +363,8 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
 
   const isHttp = cfg.transport_type === "streamable_http";
   const connecting = status === "connecting";
+  /** 实际生效的调用超时（毫秒）：Server 配置与全局设置（秒）取较大者，与后端 call_tool 一致 */
+  const effectiveTimeoutMs = Math.max(cfg.timeout_ms, callTimeoutSecs * 1000);
 
   return (
     <div className="anim-fade-in p-2">
@@ -422,7 +424,10 @@ function ServerSummary({ node, status }: { node: TreeNode; status: string }) {
       )}
 
       <div className="mb-2.5 flex items-center gap-1 text-[11px] text-inksoft">
-        <Clock size={11} /> 调用超时 {cfg.timeout_ms} ms
+        <Clock size={11} /> 调用超时 {effectiveTimeoutMs} ms
+        {cfg.timeout_ms < effectiveTimeoutMs && (
+          <span className="text-inksoft/60">· 全局下限生效</span>
+        )}
       </div>
       {cfg.note?.trim() && (
         <div className="mb-2.5 rounded-md bg-panel2 p-2 text-[12px] leading-relaxed text-inksoft selectable">

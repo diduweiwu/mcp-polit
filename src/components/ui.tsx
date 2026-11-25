@@ -223,6 +223,43 @@ export function EmptyState({
   );
 }
 
+/** 折叠容器属性 */
+interface CollapseProps {
+  /** true 展开（高度过渡到内容高度）/ false 收起（高度过渡到 0） */
+  open: boolean;
+  /** 折叠内容 */
+  children: ReactNode;
+  /** 外层容器附加类名（间距等布局用） */
+  className?: string;
+}
+
+/**
+ * 双向动画折叠容器：grid-rows 0fr↔1fr 高度过渡（无需测高），展开收起都有动画。
+ *
+ * 与条件渲染（`{open && ...}`）的差异：内容在首次展开时才挂载（未开过的条目零 DOM
+ * 开销），收起时不卸载——既播放收起动画，也保留内容内部状态（如 JSON 折叠树、
+ * 滚动位置），再次展开即时呈现。
+ *
+ * 使用示例：
+ * ```tsx
+ * <Collapse open={expanded} className="mt-0.5">
+ *   <ResultCard ... />
+ * </Collapse>
+ * ```
+ */
+export function Collapse({ open, children, className = "" }: CollapseProps) {
+  /** 内容是否已挂载（首次展开置 true 后不再回落，支撑收起动画与状态保留） */
+  const [mounted, setMounted] = useState(open);
+  useEffect(() => {
+    if (open) setMounted(true);
+  }, [open]);
+  return (
+    <div className={`collapse-box ${open ? "open" : ""} ${className}`}>
+      <div>{mounted && children}</div>
+    </div>
+  );
+}
+
 /** 下拉菜单容器（带点击外部关闭） */
 export function Dropdown({
   trigger,

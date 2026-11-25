@@ -17,6 +17,7 @@ import type {
   Project,
   ServerConfig,
   SyncDirResolve,
+  SyncDirtyEntry,
   ToolInfo,
   TreeNode,
 } from "./types";
@@ -54,12 +55,37 @@ function rowToEntry(r: api.StoredHistoryRow, seq: number): HistoryEntry {
   };
 }
 
+/** 全局调用超时默认值（秒），与后端 db.rs 的 DEFAULT_CALL_TIMEOUT_SECS 保持一致 */
+const DEFAULT_CALL_TIMEOUT_SECS = 60;
+
+/** 全局调用超时上限（秒），与后端 db.rs 的 MAX_CALL_TIMEOUT_SECS 保持一致 */
+export const MAX_CALL_TIMEOUT_SECS = 1024;
+
+/**
+ * 解析全局调用超时设置值：缺失或非法时回退默认值，并收敛到 1~1024 秒。
+ * 与后端 `get_call_timeout_secs` 的防御逻辑一致，双端各自兜底。
+ *
+ * @param raw 设置表中的原始字符串（可能为 undefined / 非数字 / 负数）
+ * @returns 合法的超时秒数（1 ~ 1024）
+ */
+function clampCallTimeoutSecs(raw: string | undefined): number {
+  const n = raw === undefined ? NaN : Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_CALL_TIMEOUT_SECS;
+  return Math.min(MAX_CALL_TIMEOUT_SECS, Math.max(1, Math.floor(n)));
+}
+
 interface AppState {
   /* 初始化标记 */
   initialized: boolean;
 
   /* 主题设置 */
   themeMode: ThemeMode;
+
+  /* 全局调用超时（秒）：工具调用的超时下限，实际生效取与 Server 配置较大的值 */
+  callTimeoutSecs: number;
+
+  /* 未推送的变更（按项目分桶，内存态）：资源树变更提醒数据源，推送/拉取成功后清空 */
+  syncDirty: Record<number, SyncDirtyEntry[]>;
 
   /* 项目 */
   projects: Project[];
@@ -131,6 +157,21 @@ interface AppState {
   /** 设置主题色（持久化） */
   /** 切换明暗（持久化） */
   setThemeMode: (mode: ThemeMode) => Promise<void>;
+
+  /**
+   * 修改全局调用超时（秒，持久化）。
+   * 非法值静默忽略并收敛到 1~1024（设置页输入已 clamp，这里兜底防御）。
+   */
+  setCallTimeoutSecs: (secs: number) => Promise<void>;
+
+  /**
+   * 标记一条未推送的变更（资源树变更提醒数据源）。
+   * 同一节点的多次变更只保留最新一条（如改名后再改配置 → 只记「修改」）。
+   */
+  markSyncDirty: (entry: SyncDirtyEntry) => void;
+
+  /** 清空当前项目的未推送变更（推送 / 拉取成功后调用） */
+  clearSyncDirty: () => void;
 
   /** 切换激活项目 */
   setActiveProject: (id: number) => Promise<void>;
@@ -264,6 +305,8 @@ async function fetchTools(id: number): Promise<ToolInfo[] | null> {
 export const useAppStore = create<AppState>((set, get) => ({
   initialized: false,
   themeMode: "light",
+  callTimeoutSecs: DEFAULT_CALL_TIMEOUT_SECS,
+  syncDirty: {},
   projects: [],
   activeProjectId: null,
   nodes: [],
@@ -302,7 +345,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       applyThemeMode(mode);
       const toolParams = JSON.parse(map["tool_params"] || "{}") as Record<string, string>;
       const cases = JSON.parse(map["tool_cases"] || "{}") as Record<string, ParamCase[]>;
-      set({ themeMode: mode, settings: map, toolParams, cases });
+      const callTimeoutSecs = clampCallTimeoutSecs(map["call_timeout_secs"]);
+      set({ themeMode: mode, settings: map, toolParams, cases, callTimeoutSecs });
     } catch {
       /* 后端未就绪时用默认值 */
     }
@@ -331,6 +375,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     applyThemeMode(mode);
     set({ themeMode: mode });
     await api.saveSetting("theme_mode", mode).catch(() => {});
+  },
+
+  async setCallTimeoutSecs(secs) {
+    const v = clampCallTimeoutSecs(Number.isFinite(secs) ? String(Math.floor(secs)) : undefined);
+    set({ callTimeoutSecs: v });
+    await api.saveSetting("call_timeout_secs", String(v)).catch(() => {});
+  },
+
+  markSyncDirty(entry) {
+    const pid = get().activeProjectId;
+    if (pid == null) return;
+    set((s) => {
+      const list = (s.syncDirty[pid] ?? []).filter((e) => e.nodeId !== entry.nodeId);
+      return { syncDirty: { ...s.syncDirty, [pid]: [...list, entry] } };
+    });
+  },
+
+  clearSyncDirty() {
+    const pid = get().activeProjectId;
+    if (pid == null) return;
+    set((s) => ({ syncDirty: { ...s.syncDirty, [pid]: [] } }));
   },
 
   async setActiveProject(id) {
@@ -423,7 +488,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   async deleteProject(id) {
     await api.deleteProject(id);
     const rest = get().projects.filter((p) => p.id !== id);
-    set({ projects: rest });
+    /* 该项目的未推送变更记录随之移除（分桶数据不残留） */
+    set((s) => {
+      const dirty = { ...s.syncDirty };
+      delete dirty[id];
+      return { projects: rest, syncDirty: dirty };
+    });
     if (get().activeProjectId === id) {
       if (rest.length > 0) {
         await get().setActiveProject(rest[0].id);
@@ -442,12 +512,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 只保证新建节点可见（展开祖先链）；目录再展开自身，其余目录保持原状
     get().revealNode(node.id);
     if (type === "folder") get().expandNode(node.id);
+    get().markSyncDirty({ nodeId: node.id, name: node.name, action: "create" });
     scheduleSyncExport();
   },
 
   async renameNode(id, name) {
     await api.renameNode(id, name);
     await get().reloadNodes({ keepExpand: true });
+    get().markSyncDirty({ nodeId: id, name, action: "rename" });
     scheduleSyncExport();
   },
 
@@ -455,12 +527,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   async setNodeIcon(id, icon) {
     await api.setNodeIcon(id, icon);
     await get().reloadNodes({ keepExpand: true });
+    get().markSyncDirty({
+      nodeId: id,
+      name: get().nodes.find((n) => n.id === id)?.name ?? "?",
+      action: "update",
+    });
     scheduleSyncExport();
   },
 
   async deleteNode(id) {
     await api.deleteNode(id);
     const s = get();
+    const removed = s.nodes.find((n) => n.id === id);
     const remaining = s.nodes.filter((n) => n.id !== id);
     const patch: Partial<AppState> = { nodes: remaining };
     if (s.selectedNodeId === id) {
@@ -468,7 +546,32 @@ export const useAppStore = create<AppState>((set, get) => ({
       patch.selectedToolName = null;
       patch.results = [];
     }
+    /* 变更提醒：本节点记一条「删除」；其子树节点既已随之删除，旧变更记录一并移除，
+       避免列表出现指向已消失节点的幽灵条目 */
+    const pid = s.activeProjectId;
+    if (pid != null) {
+      const doomed = new Set<number>([id]);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const n of s.nodes) {
+          if (n.parent_id != null && doomed.has(n.parent_id) && !doomed.has(n.id)) {
+            doomed.add(n.id);
+            grew = true;
+          }
+        }
+      }
+      patch.syncDirty = {
+        ...s.syncDirty,
+        [pid]: (s.syncDirty[pid] ?? []).filter((e) => e.nodeId == null || !doomed.has(e.nodeId)),
+      };
+    }
     set(patch as AppState);
+    get().markSyncDirty({
+      nodeId: id,
+      name: removed?.name ?? "?",
+      action: "delete",
+    });
     await get().reloadNodes({ keepExpand: true });
     scheduleSyncExport();
   },
@@ -478,6 +581,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().reloadNodes({ keepExpand: true });
     // 展开目标祖先链：拖进折叠目录时移动结果可见（否则节点像「消失」）
     get().revealNode(id);
+    get().markSyncDirty({
+      nodeId: id,
+      name: get().nodes.find((n) => n.id === id)?.name ?? "?",
+      action: "move",
+    });
     scheduleSyncExport();
   },
 
@@ -491,6 +599,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 副本与源同级（祖先已随源展开）；目录副本展开自身即可见其子树
     get().revealNode(copy.id);
     if (copy.node_type === "folder") get().expandNode(copy.id);
+    get().markSyncDirty({ nodeId: copy.id, name: copy.name, action: "create" });
     scheduleSyncExport();
   },
 
@@ -946,6 +1055,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     await api.saveEnvironments(pid, envs);
     // 后端整批替换会重新生成 id，重新拉取保证缓存一致（以环境名为身份）
     await get().loadEnvironments();
+    get().markSyncDirty({ nodeId: null, name: "环境库", action: "env" });
     scheduleSyncExport(); // 实时同步：环境库已变更，防抖写盘到同步目录
   },
 

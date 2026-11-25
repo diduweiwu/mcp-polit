@@ -130,6 +130,11 @@ input[type="radio"]:disabled {
   from { opacity: 0; transform: translateX(40px); }
   to { opacity: 1; transform: translateX(0); }
 }
+/* 右侧抽屉滑出（结果放大查看）：向右退场，与入场对称 */
+@keyframes mcp-drawer-out {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 0; transform: translateX(40px); }
+}
 
 .anim-fade-in {
   animation: mcp-fade-in 0.18s ease-out both;
@@ -157,6 +162,10 @@ input[type="radio"]:disabled {
 .anim-drawer-in {
   animation: mcp-drawer-in 0.26s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+/* 右侧抽屉滑出动画（关闭放大抽屉时播，播完再卸载） */
+.anim-drawer-out {
+  animation: mcp-drawer-out 0.2s cubic-bezier(0.4, 0, 1, 1) both;
+}
 
 /* 树形目录展开/收起：grid-rows 高度过渡（0fr -> 1fr），无需测高 */
 .tree-children {
@@ -168,6 +177,21 @@ input[type="radio"]:disabled {
   grid-template-rows: 1fr;
 }
 .tree-children > div {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 通用折叠容器（Collapse 组件）：与 .tree-children 同款 grid-rows 高度过渡，
+   展开收起双向动画，无需测高；内层 overflow hidden 裁剪超出内容 */
+.collapse-box {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.collapse-box.open {
+  grid-template-rows: 1fr;
+}
+.collapse-box > div {
   min-height: 0;
   overflow: hidden;
 }

@@ -8,6 +8,7 @@ import { createPortal } from "react-dom";
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowLeftRight,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -26,11 +27,15 @@ import {
   Pencil,
   Plug,
   PlugZap,
+  Plus,
+  Search,
   Server,
   Settings2,
+  SlidersHorizontal,
   Square,
   Terminal,
   Trash2,
+  Type,
   Upload,
 } from "lucide-react";
 import { Dices } from "lucide-react";
@@ -38,7 +43,7 @@ import * as api from "../api";
 import { useAppStore } from "../store";
 import { buildTree, collectIds, siblingNameConflict, type TreeEntry } from "../lib/tree";
 import { NODE_ICONS, nodeIconByKey, randomNodeIcon } from "../lib/node-icons";
-import type { BranchInfo, ConnStatus, TreeNode } from "../types";
+import type { BranchInfo, ConnStatus, SyncDirtyAction, SyncDirtyEntry, TreeNode } from "../types";
 import { ConfirmDialog, Dropdown, EmptyState, MenuItem, Modal, StatusDot, Tooltip } from "./ui";
 import { ServerFormModal } from "./ServerFormModal";
 
@@ -152,7 +157,25 @@ interface CtxMenu {
 /** 树形栏 */
 export function TreePane() {
   const { nodes, activeProjectId, connStates } = useAppStore();
+  const syncDirty = useAppStore((s) => s.syncDirty);
   const tree = useMemo(() => buildTree(nodes), [nodes]);
+  /**
+   * 未推送变更的高亮集合：dirty 节点本身 + 其全部祖先。
+   * 目录条目也亮起（子树内有变更即可见），折叠目录中的变更不会被藏住。
+   */
+  const dirtyIds = useMemo(() => {
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const out = new Set<number>();
+    for (const e of activeProjectId != null ? syncDirty[activeProjectId] ?? [] : []) {
+      if (e.nodeId == null) continue;
+      let cur = byId.get(e.nodeId);
+      while (cur) {
+        out.add(cur.id);
+        cur = cur.parent_id != null ? byId.get(cur.parent_id) : undefined;
+      }
+    }
+    return out;
+  }, [nodes, syncDirty, activeProjectId]);
   /** 未选择项目：全部增删入口禁用（按钮置灰、右键不弹菜单） */
   const noProject = activeProjectId == null;
   /** 连接握手中需锁定的节点（server 及其祖先目录）：禁增删改移与配置编辑 */
@@ -365,6 +388,7 @@ export function TreePane() {
               onCtx={openCtx}
               highlightId={ctxHighlight}
               onUserClick={() => setCtxHighlight(null)}
+              dirtyIds={dirtyIds}
             />
           ))
         )}
@@ -558,15 +582,24 @@ export function TreePane() {
 }
 
 /**
- * 更换图标弹窗：网格展示全部注册图标，点击立即应用（可连续试选，实时落盘并触发同步导出）；
- * 「随机一个」一键换随机图标，「恢复默认」清空自定义回退类型默认图标。
- * 节点当前图标从 store 实时解析（应用后 reloadNodes，选中高亮跟随更新）。
+ * 更换图标弹窗：搜索过滤 + 网格展示全部注册图标，点击立即应用（可连续试选，
+ * 实时落盘并触发同步导出）；「随机一个」一键换随机图标，「恢复默认」清空自定义回退
+ * 类型默认图标。节点当前图标从 store 实时解析（应用后 reloadNodes，选中高亮跟随更新）。
  */
 function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => void }) {
   const node = useAppStore((s) => s.nodes.find((n) => n.id === nodeId));
   const [error, setError] = useState("");
+  /** 过滤关键字（匹配图标中文语义名 / 持久化 key，不区分大小写） */
+  const [kw, setKw] = useState("");
   /** 当前生效的自定义图标 key（null = 默认图标；应用后随 store 刷新） */
   const current = node?.icon ?? null;
+
+  /** 按关键字过滤后的图标列表（空关键字 = 全部） */
+  const filtered = useMemo(() => {
+    const k = kw.trim().toLowerCase();
+    if (!k) return NODE_ICONS;
+    return NODE_ICONS.filter((d) => d.label.includes(k) || d.key.toLowerCase().includes(k));
+  }, [kw]);
 
   /** 应用一个图标 key（或 null 恢复默认）；失败行内提示，不关弹窗可重试 */
   const apply = async (key: string | null) => {
@@ -598,26 +631,42 @@ function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => v
         })()}
       </div>
 
-      {/* 图标网格：点击即应用 */}
-      <div className="grid grid-cols-8 gap-1">
-        {NODE_ICONS.map((d) => {
-          const active = current === d.key;
-          return (
-            <button
-              key={d.key}
-              title={d.label}
-              onClick={() => void apply(d.key)}
-              className={`flex h-9 items-center justify-center rounded-md border transition-colors ${
-                active
-                  ? "border-primary bg-primarysoft text-primarystrong"
-                  : "border-line text-inksoft hover:border-primary/50 hover:bg-panel2 hover:text-ink"
-              }`}
-            >
-              <d.Icon size={16} />
-            </button>
-          );
-        })}
+      {/* 搜索框：按语义名 / key 过滤，打开即聚焦 */}
+      <div className="relative mb-2">
+        <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-inksoft" />
+        <input
+          className="field !py-1 pl-7 text-[12.5px]"
+          autoFocus
+          placeholder="搜索图标（如：数据、云、git…）"
+          value={kw}
+          onChange={(e) => setKw(e.target.value)}
+        />
       </div>
+
+      {/* 图标网格：点击即应用；悬浮显示语义名（自定义 Tooltip：WKWebView 不渲染原生 title） */}
+      {filtered.length === 0 ? (
+        <div className="py-4 text-center text-[12px] text-inksoft">没有匹配的图标</div>
+      ) : (
+        <div className="grid max-h-[240px] grid-cols-8 gap-1 overflow-y-auto pr-0.5">
+          {filtered.map((d) => {
+            const active = current === d.key;
+            return (
+              <Tooltip key={d.key} content={d.label}>
+                <button
+                  onClick={() => void apply(d.key)}
+                  className={`flex h-9 w-full items-center justify-center rounded-md border transition-colors ${
+                    active
+                      ? "border-primary bg-primarysoft text-primarystrong"
+                      : "border-line text-inksoft hover:border-primary/50 hover:bg-panel2 hover:text-ink"
+                  }`}
+                >
+                  <d.Icon size={16} />
+                </button>
+              </Tooltip>
+            );
+          })}
+        </div>
+      )}
 
       {/* 操作行：一键随机 / 恢复默认 */}
       <div className="mt-3 flex items-center gap-1.5">
@@ -648,17 +697,64 @@ function IconPickerModal({ nodeId, onClose }: { nodeId: number; onClose: () => v
 /**
  * 同步条：项目绑定了 git 目录时显示。
  * 分支下拉（点击切换，checkout 后刷新树）+ 推送（弹窗填写提交信息后 commit+push）/
- * 拉取（pull+导入）；每 10s 定时检查仓库状态（外部删 .git / 手动 git init 恢复及时反映）；
+ * 拉取（pull+导入）；未推送变更徽标（分支旁黄底数字，点击弹变更列表，推送成功后清零）；
+ * 每 10s 定时检查仓库状态（外部删 .git / 手动 git init 恢复及时反映）；
  * 目录读不到分支时推送/拉取先弹确认（自动 git init 是显式动作，不再静默成功）；
  * 同步结果与错误压缩为栏头一枚状态图标（按级别变色，悬浮显示全文、点击弹详情弹窗，
  * 常驻到下次同步结果替换），不占正文空间。
  */
+/** 变更动作 -> 展示图标（未推送变更列表弹窗用） */
+function dirtyActionIcon(action: SyncDirtyAction): React.ReactNode {
+  switch (action) {
+    case "create":
+      return <Plus size={13} className="shrink-0 text-ok" />;
+    case "update":
+      return <Pencil size={13} className="shrink-0 text-primarystrong" />;
+    case "rename":
+      return <Type size={13} className="shrink-0 text-primarystrong" />;
+    case "move":
+      return <ArrowLeftRight size={13} className="shrink-0 text-primarystrong" />;
+    case "delete":
+      return <Trash2 size={13} className="shrink-0 text-err" />;
+    case "env":
+      return <SlidersHorizontal size={13} className="shrink-0 text-primarystrong" />;
+  }
+}
+
+/** 变更动作 -> 中文文案（未推送变更列表弹窗用） */
+function dirtyActionLabel(action: SyncDirtyAction): string {
+  switch (action) {
+    case "create":
+      return "新建";
+    case "update":
+      return "修改";
+    case "rename":
+      return "改名";
+    case "move":
+      return "移动";
+    case "delete":
+      return "删除";
+    case "env":
+      return "环境库变更";
+  }
+}
+
+/** 空变更列表常量：selector 返回 undefined 时复用，避免每次渲染产生新引用触发重渲染 */
+const EMPTY_DIRTY: SyncDirtyEntry[] = [];
+
 function SyncBar() {
   const activeProjectId = useAppStore((s) => s.activeProjectId);
   const project = useAppStore((s) => s.projects.find((p) => p.id === s.activeProjectId));
   const { addLogs, reloadNodes } = useAppStore();
+  /** 当前项目未推送的变更列表（资源树/环境库变更提醒数据源，推送成功后清空） */
+  const dirty =
+    useAppStore((s) =>
+      s.activeProjectId != null ? s.syncDirty[s.activeProjectId] : undefined,
+    ) ?? EMPTY_DIRTY;
   const [info, setInfo] = useState<BranchInfo | null>(null);
   const [busy, setBusy] = useState<"push" | "pull" | null>(null);
+  /** 未推送变更列表弹窗（点击栏头徽标打开） */
+  const [changesOpen, setChangesOpen] = useState(false);
   /** 结果/错误提醒横幅（info 自动消失，warn/error 常驻：不提供手动清除，
       直到下次同步产出新结果被替换——成功即绿色 info 自动消失=问题已解决） */
   const [notice, setNotice] = useState<SyncNotice | null>(null);
@@ -761,6 +857,11 @@ function SyncBar() {
       addLogs(logs);
       setNotice(noticeOf(logs, dir));
       if (dir === "pull") await reloadNodes();
+      /* 未推送提醒清零：推送成功（日志无 error，变更已 commit+push）/ 拉取导入后
+         本地与仓库内容一致；推送失败（含部分文件导出 error）保留待下次处理 */
+      if (dir === "push" ? !logs.some((l) => l.level === "error") : true) {
+        useAppStore.getState().clearSyncDirty();
+      }
       /* 推送/拉取会改变仓库状态（如推送对旧版误删 .git 的目录自动 git init 重建、
          首次提交让 unborn 分支诞生），完成后刷新分支下拉，无需重启应用 */
       refreshBranches(project.id);
@@ -854,6 +955,17 @@ function SyncBar() {
         ) : (
           <span className="text-[11.5px] text-inksoft/70">Git 同步</span>
         )}
+        {/* 未推送变更徽标：黄底数字，点击弹变更列表（实时同步已写盘，提醒的是「未 commit/推送」） */}
+        {dirty.length > 0 && (
+          <Tooltip content={`有 ${dirty.length} 项未推送的变更（点击查看）`}>
+            <button
+              className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-warn/15 px-1 text-[10.5px] font-semibold text-warn transition-colors hover:bg-warn/25"
+              onClick={() => setChangesOpen(true)}
+            >
+              {dirty.length}
+            </button>
+          </Tooltip>
+        )}
         {/* 同步结果/错误提醒：压缩成栏头一枚状态图标；悬浮显示全文气泡（自定义
             Tooltip：WKWebView 不渲染原生 title），点击弹「同步结果」弹窗看全文——
             详情不再用栏内下拉（窄栏下会被 overflow-hidden 裁剪，Portal 弹窗不受限）；
@@ -904,6 +1016,36 @@ function SyncBar() {
           {busy === "pull" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
         </button>
       </div>
+
+      {/* 未推送变更列表弹窗：与栏头徽标配套，逐条列出变更动作与节点名 */}
+      <Modal
+        open={changesOpen}
+        title={`未推送的变更（${dirty.length}）`}
+        onClose={() => setChangesOpen(false)}
+        width={440}
+        footer={
+          <button className="btn-primary" onClick={() => setChangesOpen(false)}>
+            知道了
+          </button>
+        }
+      >
+        <div className="flex flex-col gap-1">
+          {dirty.map((e, i) => (
+            <div
+              key={`${e.nodeId ?? "env"}-${i}`}
+              className="flex items-center gap-2 rounded-md bg-panel2 px-2.5 py-1.5 text-[12.5px]"
+            >
+              {dirtyActionIcon(e.action)}
+              <span className="min-w-0 flex-1 truncate text-ink">{e.name}</span>
+              <span className="shrink-0 text-[11px] text-inksoft">{dirtyActionLabel(e.action)}</span>
+            </div>
+          ))}
+        </div>
+        <p className="mt-2.5 text-[11.5px] leading-relaxed text-inksoft/70">
+          变更已实时写入同步目录（尚未 commit）。点击「推送」提交到 git 仓库后提醒消失；
+          同一节点的多次变更只保留最新动作。应用重启后重新累计。
+        </p>
+      </Modal>
 
       {/* 推送确认弹窗：填写提交信息（可留空用默认），展示目标项目与分支 */}
       <Modal
@@ -1044,10 +1186,12 @@ interface TreeItemProps {
   highlightId: number | null;
   /** 用户左键点击本条目时回调（清除右键定位高亮，注意力已转移） */
   onUserClick: () => void;
+  /** 未推送变更的高亮集合（dirty 节点 + 祖先链）；命中时条目右侧亮起小圆点 */
+  dirtyIds: Set<number>;
 }
 
 /** 递归树条目：目录可折叠，Server 点击选中并自动连接 */
-function TreeItem({ entry, depth, onCtx, highlightId, onUserClick }: TreeItemProps) {
+function TreeItem({ entry, depth, onCtx, highlightId, onUserClick, dirtyIds }: TreeItemProps) {
   const { node, children } = entry;
   const {
     expandedIds,
@@ -1177,6 +1321,12 @@ function TreeItem({ entry, depth, onCtx, highlightId, onUserClick }: TreeItemPro
           </>
         )}
         <span className="min-w-0 flex-1 truncate text-[13px]">{node.name}</span>
+        {/* 未推送变更标识：黄点（目录 = 子树内有变更也亮起），悬浮说明、点击列表见同步条 */}
+        {dirtyIds.has(node.id) && (
+          <Tooltip content="有未推送的变更（详情见同步条提醒）">
+            <span className="mr-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-warn" />
+          </Tooltip>
+        )}
         {status && <StatusDot status={status} />}
       </div>
 
@@ -1200,6 +1350,7 @@ function TreeItem({ entry, depth, onCtx, highlightId, onUserClick }: TreeItemPro
                 onCtx={onCtx}
                 highlightId={highlightId}
                 onUserClick={onUserClick}
+                dirtyIds={dirtyIds}
               />
             ))
             )}

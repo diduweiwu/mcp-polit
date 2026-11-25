@@ -1,6 +1,6 @@
 /**
  * 设置弹窗：左侧竖排 tab 导航 + 右侧内容区——外观（明暗三态）、
- * 关于（版本信息 + 在线更新）。
+ * 调用（全局调用超时）、关于（版本信息 + 在线更新）。
  * 弹窗固定高度（Modal height），切 tab 时尺寸不跳变，内容超长由右侧区域内部滚动。
  */
 import { useEffect, useState } from "react";
@@ -13,11 +13,12 @@ import {
   Palette,
   RefreshCw,
   Sun,
+  Timer,
 } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { useAppStore } from "../store";
+import { useAppStore, MAX_CALL_TIMEOUT_SECS } from "../store";
 import { type ThemeMode } from "../theme";
 import { openRepoPage, REPO_URL } from "../api";
 import { Modal } from "./ui";
@@ -31,11 +32,12 @@ const MODE_OPTIONS: Array<{ key: ThemeMode; label: string; icon: React.ReactNode
 ];
 
 /** 设置 tab 键 */
-type SettingsTab = "appearance" | "about";
+type SettingsTab = "appearance" | "call" | "about";
 
 /** 设置 tab 定义（顺序即展示顺序，icon 用于左侧导航） */
 const TABS: Array<{ key: SettingsTab; label: string; icon: React.ReactNode }> = [
   { key: "appearance", label: "外观", icon: <Palette size={14} /> },
+  { key: "call", label: "调用", icon: <Timer size={14} /> },
   { key: "about", label: "关于", icon: <Info size={14} /> },
 ];
 
@@ -73,6 +75,7 @@ export function SettingsModal({ open, onClose }: Props) {
         {/* 右侧内容区：固定高度下内容各自滚动 */}
         <div className="min-w-0 flex-1 overflow-y-auto">
           {tab === "appearance" && <AppearanceSection />}
+          {tab === "call" && <CallSection />}
           {tab === "about" && <AboutSection />}
         </div>
       </div>
@@ -105,6 +108,48 @@ function AppearanceSection() {
       </div>
       <p className="text-[11.5px] text-inksoft/70">
         「跟随系统」会实时响应系统的深浅色切换。
+      </p>
+    </section>
+  );
+}
+
+/** 调用 tab：全局调用超时（工具调用的超时下限，实际生效取与 Server 配置较大的值） */
+function CallSection() {
+  const { callTimeoutSecs, setCallTimeoutSecs } = useAppStore();
+  /** 输入草稿：失焦时才 clamp + 落库，避免输入中间态（如清空）被强行改写 */
+  const [draft, setDraft] = useState(String(callTimeoutSecs));
+
+  // 外部变更（重开弹窗/其他入口修改）时同步草稿
+  useEffect(() => setDraft(String(callTimeoutSecs)), [callTimeoutSecs]);
+
+  /** 失焦提交：收敛到 1~1024 秒（与前后端防御逻辑一致），有变化才落库 */
+  const commit = () => {
+    const n = Number(draft);
+    const v =
+      Number.isFinite(n) && draft.trim() !== ""
+        ? Math.min(MAX_CALL_TIMEOUT_SECS, Math.max(1, Math.floor(n)))
+        : callTimeoutSecs;
+    setDraft(String(v));
+    if (v !== callTimeoutSecs) void setCallTimeoutSecs(v);
+  };
+
+  return (
+    <section className="anim-fade-in">
+      <label className="label">调用超时（秒）</label>
+      <input
+        className="field w-40"
+        type="number"
+        min={1}
+        max={MAX_CALL_TIMEOUT_SECS}
+        step={1}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+      />
+      <p className="mt-1.5 text-[11.5px] leading-relaxed text-inksoft/70">
+        工具调用等待结果的超时下限，范围 1 ~ {MAX_CALL_TIMEOUT_SECS} 秒，默认 60 秒。
+        实际生效取本值与 Server 配置中「调用超时」的较大者——单独调大过超时的 Server 不受影响。
       </p>
     </section>
   );

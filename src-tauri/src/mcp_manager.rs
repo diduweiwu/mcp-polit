@@ -369,7 +369,11 @@ impl McpManager {
                 .clone();
             let conn = db.0.lock().unwrap();
             let cfg = crate::db::get_server_config(&conn, node_id)?;
-            (h, cfg.timeout_ms, cfg)
+            // 全局调用超时（设置页，秒）作为下限：实际生效取与 Server 配置的较大者，
+            // 未单独调大过超时的 Server（默认 30s）直接按全局值生效
+            let global_secs = crate::db::get_call_timeout_secs(&conn)?;
+            let timeout_ms = cfg.timeout_ms.max(global_secs * 1000);
+            (h, timeout_ms, cfg)
         };
 
         let started = Instant::now();
@@ -396,7 +400,7 @@ impl McpManager {
                 Err(AppError::new(msg))
             }
             Err(_) => Err(AppError::new(format!(
-                "工具调用超时（{timeout_ms} 毫秒），可在 Server 配置中调大超时时间"
+                "工具调用超时（{timeout_ms} 毫秒），可在 设置 → 调用 或 Server 配置中调大超时时间"
             ))),
         }
     }
