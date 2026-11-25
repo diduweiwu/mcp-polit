@@ -48,6 +48,9 @@ function rowToEntry(r: api.StoredHistoryRow, seq: number): HistoryEntry {
     structured_content: r.structured_content,
     duration_ms: r.duration_ms,
     arguments: r.arguments,
+    // 请求头快照（HTTP 传输才有；旧记录为 null），敏感名单供展示打码
+    request_headers: r.request_headers ?? null,
+    sensitive_headers: r.sensitive_headers ?? null,
     node_id: r.node_id,
     server_name: r.server_name,
     timestamp: r.created_at.length >= 19 ? r.created_at.slice(11, 19) : r.created_at,
@@ -208,7 +211,7 @@ interface AppState {
   setNodeIcon: (id: number, icon: string | null) => Promise<void>;
   deleteNode: (id: number) => Promise<void>;
   /** 复制节点：目录含整棵子树与各 Server 配置；副本名称自动追加随机后缀 */
-  duplicateNode: (id: number) => Promise<void>;
+  duplicateNode: (id: number) => Promise<TreeNode>;
   moveNode: (id: number, newParentId: number | null) => Promise<void>;
   /** 展开目录（含沿路祖先） */
   expandNode: (id: number) => void;
@@ -591,7 +594,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   async duplicateNode(id) {
     const src = get().nodes.find((n) => n.id === id);
-    if (!src) return;
+    // 源不存在（已被删除等）抛错而非静默返回：调用方（复制并编辑）依赖返回的副本节点
+    if (!src) throw new Error("源节点不存在，可能已被删除");
     // 副本名称 = 原名 + 4 位随机 base36 后缀，避免同级重名
     const suffix = Math.random().toString(36).slice(2, 6);
     const copy = await api.duplicateNode(id, `${src.name}-${suffix}`);
@@ -601,6 +605,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (copy.node_type === "folder") get().expandNode(copy.id);
     get().markSyncDirty({ nodeId: copy.id, name: copy.name, action: "create" });
     scheduleSyncExport();
+    return copy;
   },
 
   expandNode(id) {
@@ -800,6 +805,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           structured_content: result.structured_content,
           duration_ms: result.duration_ms,
           arguments: result.arguments,
+          // 请求头快照与敏感名单随行落库（stdio / 无头时为 null）
+          request_headers: result.request_headers ?? null,
+          sensitive_headers: result.sensitive_headers ?? null,
         })
         .then((id) =>
           useAppStore.setState((s) => ({

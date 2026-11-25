@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../store";
 import { copyText } from "../lib/clipboard";
+import { isSensitiveKey, parseSensitiveKeys } from "../lib/sensitive";
 import { buildToolsCallCurl } from "../lib/curl";
 import type { CallResult, HistoryEntry, LogLevel } from "../types";
 import { Collapse, EmptyState } from "./ui";
@@ -538,6 +539,34 @@ function formatArgsJson(raw: string): string {
   }
 }
 
+/** 敏感头的展示形态：固定星号，不显示真实内容（与 Server 摘要的打码口径一致） */
+const MASKED_VALUE = "******";
+
+/**
+ * 解析请求头快照为键值行数组，敏感头的值替换为星号（解析期即丢弃原值，不留明文）。
+ *
+ * @param raw 请求头快照（request_headers，JSON 对象字符串；空/非法 = 空数组）
+ * @param sensitiveRaw 敏感头名称名单（sensitive_headers，JSON 数组字符串）
+ * @returns `[名称, 展示值]` 数组（保持 JSON 对象的原有顺序）
+ *
+ * @example
+ * parseHeaderRows('{"Authorization":"Bearer x","Accept":"json"}', '["Authorization"]');
+ * // => [["Authorization", "******"], ["Accept", "json"]]
+ */
+function parseHeaderRows(raw?: string | null, sensitiveRaw?: string | null): Array<[string, string]> {
+  if (!raw?.trim()) return [];
+  try {
+    const obj = JSON.parse(raw) as unknown;
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
+    const sensitive = parseSensitiveKeys(sensitiveRaw);
+    return Object.entries(obj as Record<string, unknown>)
+      .filter(([, v]) => typeof v === "string")
+      .map(([k, v]) => [k, isSensitiveKey(sensitive, k) ? MASKED_VALUE : v as string]);
+  } catch {
+    return [];
+  }
+}
+
 /** 从 content 数组中提取全部 text 块拼接 */
 function extractTextBody(content: unknown): string {
   if (!Array.isArray(content)) return "";
@@ -616,7 +645,8 @@ function useCopyFeedback(): [
 /**
  * 单条结果卡片；isNew=true（最新一条）默认展开，其余默认折叠，点击头部可展开/收起。
  *
- * 展开后内容分「请求 · 入参」与「响应」上下两段独立显示，各带复制按钮；
+ * 展开后内容分「请求 · 请求头」「请求 · 入参」与「响应」段独立显示，各带复制按钮；
+ * HTTP 传输的调用带请求头快照（敏感值打码，复制为明文），stdio/旧记录不显示请求头段；
  * 头部右侧提供收藏星标（落盘后可用）与「放大查看」（右侧抽屉）入口。
  */
 function ResultCard({
@@ -636,6 +666,7 @@ function ResultCard({
   const [tab, setTab] = useState<"content" | "structured">("content");
   const [copyState, copyResultText] = useCopyFeedback();
   const [argsCopyState, copyArgsText] = useCopyFeedback();
+  const [headersCopyState, copyHeadersText] = useCopyFeedback();
   /** 折叠态：非最新结果默认只显示摘要行，手动展开查看详情 */
   const [collapsed, setCollapsed] = useState(!isNew);
 
@@ -648,6 +679,11 @@ function ResultCard({
   const structured = result.structured_content ?? null;
   const formattedArgs = formatArgsJson(result.arguments);
   const canStar = (result as HistoryEntry).id != null;
+  /** 请求头快照键值行（敏感值已打码；stdio / 旧记录为空数组 = 不显示该段） */
+  const headerRows = parseHeaderRows(result.request_headers, result.sensitive_headers);
+
+  /** 复制请求头快照明文 JSON（含鉴权头时由复制按钮的提示语提醒注意粘贴场合） */
+  const copyHeaders = () => copyHeadersText(result.request_headers ?? "");
 
   /** 复制请求入参（格式化后的 JSON） */
   const copyArgs = () => copyArgsText(formattedArgs);
@@ -721,6 +757,32 @@ function ResultCard({
           （未展开过不产生 DOM，避免隐藏的树展开开销；收起保留内容，再展开即时呈现） */}
       <Collapse open={!collapsed}>
         <>
+          {/* 请求头段：HTTP 传输的调用才有快照；敏感值打码展示，复制按钮复制明文 */}
+          {headerRows.length > 0 && (
+            <div className="border-b border-line">
+              <div className="flex h-7 items-center justify-between bg-panel2/60 pl-2.5 pr-1">
+                <span className="text-[10.5px] font-semibold tracking-wide text-inksoft/80">
+                  请求 · 请求头
+                </span>
+                <CopyBtn
+                  state={headersCopyState}
+                  title="复制请求头 JSON（含鉴权头明文，注意粘贴场合）"
+                  onCopy={copyHeaders}
+                />
+              </div>
+              <div className="max-h-[120px] overflow-y-auto px-2.5 py-2 font-mono text-[12px] leading-relaxed">
+                {headerRows.map(([k, v]) => (
+                  <div key={k} className="break-all selectable">
+                    <span className="text-primarystrong">{k}:</span>{" "}
+                    <span className={v === MASKED_VALUE ? "text-inksoft/50" : "text-inksoft"}>
+                      {v}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* 请求段：格式化入参 JSON，独立复制按钮 */}
           <div className="border-b border-line">
             <div className="flex h-7 items-center justify-between bg-panel2/60 pl-2.5 pr-1">
@@ -777,12 +839,19 @@ interface RequestPanelProps {
   curl: string | null;
   /** cURL 按钮禁用原因（悬浮说明） */
   curlHint?: string;
+  /** 请求头快照（JSON 对象字符串）；null/缺省 = stdio 或旧记录，不显示请求头段 */
+  requestHeaders?: string | null;
+  /** 敏感请求头名称名单（JSON 数组字符串），展示打码用 */
+  sensitiveHeaders?: string | null;
 }
 
-/** 放大抽屉左栏：请求入参（全高滚动），支持复制 JSON / 复制 cURL */
-function RequestPanel({ formattedArgs, curl, curlHint }: RequestPanelProps) {
+/** 放大抽屉左栏：请求头（HTTP 传输才有）+ 请求入参（全高滚动），支持复制 JSON / 复制 cURL */
+function RequestPanel({ formattedArgs, curl, curlHint, requestHeaders, sensitiveHeaders }: RequestPanelProps) {
   const [argsCopyState, copyArgsText] = useCopyFeedback();
   const [curlCopyState, copyCurlText] = useCopyFeedback();
+  const [headersCopyState, copyHeadersText] = useCopyFeedback();
+  /** 请求头快照键值行（敏感值已打码；为空 = 不显示请求头段） */
+  const headerRows = parseHeaderRows(requestHeaders, sensitiveHeaders);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-col border-r border-line">
@@ -813,6 +882,29 @@ function RequestPanel({ formattedArgs, curl, curlHint }: RequestPanelProps) {
           />
         </div>
       </div>
+      {/* 请求头块：快照存在时显示在入参上方（敏感值打码，复制为明文） */}
+      {headerRows.length > 0 && (
+        <div className="shrink-0 border-b border-line">
+          <div className="flex h-7 items-center justify-between bg-panel2/60 pl-3 pr-1.5">
+            <span className="text-[10.5px] font-semibold tracking-wide text-inksoft/80">
+              请求 · 请求头
+            </span>
+            <CopyBtn
+              state={headersCopyState}
+              title="复制请求头 JSON（含鉴权头明文，注意粘贴场合）"
+              onCopy={() => void copyHeadersText(requestHeaders ?? "")}
+            />
+          </div>
+          <div className="max-h-[132px] overflow-y-auto px-3 py-2 font-mono text-[12px] leading-relaxed">
+            {headerRows.map(([k, v]) => (
+              <div key={k} className="break-all selectable">
+                <span className="text-primarystrong">{k}:</span>{" "}
+                <span className={v === MASKED_VALUE ? "text-inksoft/50" : "text-inksoft"}>{v}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto p-3">
         <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-relaxed text-inksoft selectable">
           {formattedArgs}
@@ -992,7 +1084,13 @@ function ResultDrawer({ entry, onClose }: { entry: HistoryEntry; onClose: () => 
 
         {/* 主体：左请求 / 右响应 */}
         <div className="grid min-h-0 flex-1 grid-cols-2">
-          <RequestPanel formattedArgs={formattedArgs} curl={curl} curlHint={curlHint} />
+          <RequestPanel
+            formattedArgs={formattedArgs}
+            curl={curl}
+            curlHint={curlHint}
+            requestHeaders={entry.request_headers}
+            sensitiveHeaders={entry.sensitive_headers}
+          />
           <ResponsePanel result={entry} structured={structured} />
         </div>
       </div>

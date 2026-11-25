@@ -107,7 +107,7 @@ const demoHistory: Array<Record<string, unknown>> = [
   { seq: 1, tool_name: "read_file", node_id: 5, server_name: "文件系统", timestamp: "09:58:03", is_error: true, duration_ms: 12, arguments: JSON.stringify({ path: "/etc/hosts" }), content: [{ type: "text", text: "权限不足：read denied by policy" }], structured_content: null },
 ];
 
-/** 演示工具调用的模拟响应 */
+/** 演示工具调用的模拟响应（request_headers 给 HTTP 形态示例，演示请求头段 UI） */
 function mockCallTool(toolName: string, argsJson: string) {
   seq += 1;
   if (toolName === "web_search") {
@@ -115,12 +115,15 @@ function mockCallTool(toolName: string, argsJson: string) {
       seq, tool_name: toolName, is_error: false, duration_ms: 500 + Math.floor(Math.random() * 400),
       content: [{ type: "text", text: `1. 「${JSON.parse(argsJson || "{}").query ?? "…"}」的搜索结果（演示数据）——包含 5 条高质量链接与摘要。` }],
       structured_content: null, arguments: argsJson,
+      request_headers: JSON.stringify({ "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: "Bearer demo-token-******" }),
+      sensitive_headers: JSON.stringify(["Authorization"]),
     };
   }
   return {
     seq, tool_name: toolName, is_error: false, duration_ms: 120,
     content: [{ type: "text", text: `（演示）${toolName} 调用成功，参数：${argsJson}` }],
     structured_content: null, arguments: argsJson,
+    request_headers: null, sensitive_headers: null,
   };
 }
 

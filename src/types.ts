@@ -208,4 +208,14 @@ export interface CallResult {
   duration_ms: number;
   /** 入参快照（JSON 字符串） */
   arguments: string;
+  /**
+   * 请求头快照：连接时按激活环境插值后实际发送的请求头（JSON 对象字符串）。
+   * 仅 Streamable HTTP 传输有值；null/缺省 = stdio 传输或旧历史记录
+   */
+  request_headers?: string | null;
+  /**
+   * 敏感请求头名称名单（JSON 数组字符串，如 '["Authorization"]'）：
+   * 展示时这些头的值打码为星号，复制按钮仍复制明文
+   */
+  sensitive_headers?: string | null;
 }

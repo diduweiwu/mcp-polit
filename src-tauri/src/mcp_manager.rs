@@ -31,6 +31,12 @@ pub struct ConnHandle {
     service: Arc<RunningService<RoleClient, ()>>,
     /// 连接时缓存的工具列表（手动刷新时更新）
     tools: Mutex<Vec<ToolInfo>>,
+    /// 请求头快照：连接时按激活环境插值后的 headers（JSON 对象字符串）。
+    /// 取连接时的值（而非调用时重插值）：连接后切换环境，历史仍记录当时真实发送的头。
+    /// 仅 Streamable HTTP 传输有值；stdio 为本地子进程无 HTTP 头
+    request_headers: Option<String>,
+    /// 敏感请求头名称名单（JSON 数组字符串），随快照一并返回供前端展示打码
+    sensitive_headers: Option<String>,
 }
 
 /// 连接状态（含最后一次错误信息）。
@@ -223,13 +229,18 @@ impl McpManager {
             }
         };
 
-        // 入表并广播
+        // 入表并广播；同时缓存请求头快照（HTTP 传输记录插值后的实际头，stdio 无 HTTP 头）
+        let is_http = config.transport_type == TransportType::StreamableHttp;
         let manager = app.state::<McpManager>();
         manager.conns.lock().unwrap().insert(
             node_id,
             Arc::new(ConnHandle {
                 service,
                 tools: Mutex::new(tools.clone()),
+                request_headers: snapshot_opt(is_http.then(|| config.headers.clone()).flatten()),
+                sensitive_headers: snapshot_opt(
+                    is_http.then(|| config.sensitive_headers.clone()).flatten(),
+                ),
             }),
         );
         Self::report(&app, node_id, ConnStatus::Connected, None);
@@ -394,6 +405,9 @@ impl McpManager {
                 structured_content: res.structured_content,
                 duration_ms,
                 arguments: arguments_json,
+                // 连接时缓存的请求头快照（HTTP 传输才有值）：记录当时真实发送的头
+                request_headers: handle.request_headers.clone(),
+                sensitive_headers: handle.sensitive_headers.clone(),
             }),
             Ok(Err(e)) => {
                 let msg = sanitize(format!("工具调用失败：{e}"), &config);
@@ -710,6 +724,11 @@ fn collect_secret_values(map: &Map<String, Value>, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// 归一化快照可选字段：空白串视为无（`None`），避免把空头列表当快照存库。
+fn snapshot_opt(s: Option<String>) -> Option<String> {
+    s.filter(|v| !v.trim().is_empty())
 }
 
 /* ---------- 插值引擎单元测试（内存库，不依赖网络/子进程） ---------- */

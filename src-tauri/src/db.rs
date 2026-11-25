@@ -137,6 +137,12 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), AppError> {
             structured_content TEXT,
             -- 入参快照：JSON 字符串
             arguments TEXT NOT NULL DEFAULT '',
+            -- 请求头快照：连接时按激活环境插值后实际发送的请求头（JSON 对象字符串）；
+            -- NULL = stdio 传输（无 HTTP 头）或旧记录
+            request_headers TEXT,
+            -- 敏感请求头名称名单：JSON 数组字符串（如 '["Authorization"]'），
+            -- 前端展示时这些头的值打码为星号，复制仍为明文
+            sensitive_headers TEXT,
             -- 调用耗时：毫秒
             duration_ms INTEGER NOT NULL DEFAULT 0,
             -- 调用时间：本地时间
@@ -194,6 +200,16 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), AppError> {
     // 节点自定义图标：前端 icon 注册表的 key（如 "database"），NULL = 使用默认图标
     let _ = conn.execute(
         "ALTER TABLE tree_nodes ADD COLUMN icon TEXT",
+        [],
+    );
+    // 调用历史请求头快照：连接时插值后实际发送的请求头（JSON 对象字符串），
+    // NULL = stdio 传输或旧记录；敏感头名单随行存储供前端展示打码
+    let _ = conn.execute(
+        "ALTER TABLE call_history ADD COLUMN request_headers TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE call_history ADD COLUMN sensitive_headers TEXT",
         [],
     );
     Ok(())
@@ -1041,8 +1057,8 @@ pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<i6
     conn.execute(
         "INSERT INTO call_history
                 (node_id, server_name, tool_name, is_error, content, structured_content,
-                 arguments, duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 arguments, request_headers, sensitive_headers, duration_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             record.node_id,
             record.server_name,
@@ -1051,6 +1067,8 @@ pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<i6
             content,
             structured,
             record.result.arguments,
+            record.result.request_headers,
+            record.result.sensitive_headers,
             record.result.duration_ms
         ],
     )?;
@@ -1073,7 +1091,8 @@ pub fn insert_history(conn: &Connection, record: &HistoryRecord) -> CmdResult<i6
 pub fn list_history(conn: &Connection, limit: i64, offset: i64) -> CmdResult<Vec<HistoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, node_id, server_name, tool_name, is_error, content,
-                structured_content, arguments, duration_ms, created_at, starred
+                structured_content, arguments, duration_ms, created_at, starred,
+                request_headers, sensitive_headers
          FROM call_history ORDER BY id DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(rusqlite::params![limit, offset], map_history_row)?;
@@ -1113,7 +1132,8 @@ pub fn set_history_starred(conn: &Connection, id: i64, starred: bool) -> CmdResu
 pub fn list_starred_history(conn: &Connection) -> CmdResult<Vec<HistoryRecord>> {
     let mut stmt = conn.prepare(
         "SELECT id, node_id, server_name, tool_name, is_error, content,
-                structured_content, arguments, duration_ms, created_at, starred
+                structured_content, arguments, duration_ms, created_at, starred,
+                request_headers, sensitive_headers
          FROM call_history WHERE starred = 1 ORDER BY id DESC",
     )?;
     let rows = stmt.query_map([], map_history_row)?;
@@ -1136,7 +1156,7 @@ pub fn clear_history(conn: &Connection) -> CmdResult<i64> {
 
 /// 历史表行映射。SELECT 列序：
 /// `id, node_id, server_name, tool_name, is_error, content, structured_content,
-///  arguments, duration_ms, created_at, starred`。
+///  arguments, duration_ms, created_at, starred, request_headers, sensitive_headers`。
 fn map_history_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryRecord> {
     let content_raw: String = row.get(5)?;
     let structured_raw: Option<String> = row.get(6)?;
@@ -1166,6 +1186,9 @@ fn map_history_row(row: &rusqlite::Row) -> rusqlite::Result<HistoryRecord> {
             structured_content,
             duration_ms: row.get(8)?,
             arguments: row.get(7)?,
+            // NULL = stdio 传输（无 HTTP 头）或旧记录
+            request_headers: row.get(11)?,
+            sensitive_headers: row.get(12)?,
         },
     })
 }
@@ -1495,5 +1518,65 @@ mod tests {
         let vars: serde_json::Value = serde_json::from_str(&dev.variables).unwrap();
         assert_eq!(vars["OLD"], "keep");
         assert_eq!(vars["NEW"], "x");
+    }
+
+    /// 历史请求头快照往返：写入带快照的记录，读回时 request_headers / sensitive_headers
+    /// 原样保留（HTTP 传输场景）；再验证无快照（stdio / 旧记录模拟）读回为 None。
+    #[test]
+    fn 历史请求头快照往返() {
+        let conn = mem_db();
+        let record = HistoryRecord {
+            id: 0,
+            node_id: 1,
+            server_name: "demo".into(),
+            created_at: String::new(),
+            starred: false,
+            result: CallResult {
+                seq: 1,
+                tool_name: "get_issue".into(),
+                is_error: false,
+                content: serde_json::json!([{ "type": "text", "text": "ok" }]),
+                structured_content: None,
+                duration_ms: 42,
+                arguments: "{}".into(),
+                request_headers: Some(
+                    r#"{"Authorization":"Bearer t","Accept":"application/json"}"#.into(),
+                ),
+                sensitive_headers: Some(r#"["Authorization"]"#.into()),
+            },
+        };
+        insert_history(&conn, &record).unwrap();
+
+        let got = list_history(&conn, 10, 0).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].result.request_headers.as_deref(),
+            Some(r#"{"Authorization":"Bearer t","Accept":"application/json"}"#)
+        );
+        assert_eq!(got[0].result.sensitive_headers.as_deref(), Some(r#"["Authorization"]"#));
+
+        // 无快照（stdio / 旧记录）：两列为 NULL，读回 None 不报错
+        let bare = HistoryRecord {
+            id: 0,
+            node_id: 1,
+            server_name: "demo".into(),
+            created_at: String::new(),
+            starred: false,
+            result: CallResult {
+                seq: 2,
+                tool_name: "get_issue".into(),
+                is_error: false,
+                content: serde_json::json!([{ "type": "text", "text": "ok" }]),
+                structured_content: None,
+                duration_ms: 42,
+                arguments: "{}".into(),
+                request_headers: None,
+                sensitive_headers: None,
+            },
+        };
+        insert_history(&conn, &bare).unwrap();
+        let all = list_history(&conn, 10, 0).unwrap();
+        let bare_row = all.iter().find(|r| r.result.request_headers.is_none()).unwrap();
+        assert!(bare_row.result.sensitive_headers.is_none());
     }
 }

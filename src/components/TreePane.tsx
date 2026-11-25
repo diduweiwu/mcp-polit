@@ -89,14 +89,18 @@ async function dropMove(srcId: number, parentId: number | null) {
  * 执行复制：调用 store.duplicateNode 并统一处理失败，
  * 错误写入日志面板归属到源节点，不静默吞掉。
  *
+ * @param srcId 源节点 ID
+ * @returns 复制出的新节点；失败返回 null（失败详情已写日志面板）
+ *
  * @example
- * duplicateWithLog(node.id); // 右键菜单「复制」
+ * const copy = await duplicateWithLog(node.id); // 复制后可据此打开编辑弹窗
  */
-async function duplicateWithLog(srcId: number) {
+async function duplicateWithLog(srcId: number): Promise<TreeNode | null> {
   try {
-    await useAppStore.getState().duplicateNode(srcId);
+    return await useAppStore.getState().duplicateNode(srcId);
   } catch (e) {
     useAppStore.getState().addLog("error", `复制失败：${String(e)}`, srcId);
+    return null;
   }
 }
 
@@ -447,7 +451,22 @@ export function TreePane() {
                   icon={<Copy size={13} />}
                   label="复制"
                   disabled={lockedIds.has(ctx.node.id)}
-                  onClick={runMenu(() => void duplicateWithLog(ctx.node!.id))}
+                  onClick={runMenu(() => {
+                    void duplicateWithLog(ctx.node!.id).then(async (copy) => {
+                      if (!copy) return;
+                      if (copy.node_type === "server") {
+                        // Server：选中副本（不自动连接）后打开编辑配置弹窗，改名/调配置免再点右键
+                        await useAppStore.getState().selectNode(copy.id, { autoConnect: false });
+                        setFormParent(null);
+                        setFormOpen(true);
+                      } else {
+                        // 目录：打开重命名弹窗（预填副本名，改完保存即可）
+                        setRenameTarget(copy);
+                        setRenameName(copy.name);
+                        setRenameError("");
+                      }
+                    });
+                  })}
                 />
                 <CtxItem
                   icon={<Pencil size={13} />}

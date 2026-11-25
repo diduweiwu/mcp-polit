@@ -249,6 +249,14 @@ pub struct CallResult {
     pub duration_ms: i64,
     /// 入参快照（JSON 字符串，便于前端历史对照）
     pub arguments: String,
+    /// 请求头快照：连接时按激活环境插值后实际发送的请求头（JSON 对象字符串）。
+    /// 仅 Streamable HTTP 传输有值；stdio 为本地子进程无 HTTP 头；旧历史记录无值
+    #[serde(default)]
+    pub request_headers: Option<String>,
+    /// 敏感请求头名称名单（JSON 数组字符串，原样取自 Server 配置）：
+    /// 前端展示时这些头的值打码为星号，复制按钮仍复制明文
+    #[serde(default)]
+    pub sensitive_headers: Option<String>,
 }
 
 /// 日志条目：同步等操作的执行记录，前端在结果面板底部的日志区展示。
