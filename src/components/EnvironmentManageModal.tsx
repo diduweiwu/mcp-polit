@@ -52,6 +52,8 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  /** 变量键名重复错误（KVEditor 上报）：非空时禁用保存，避免重名条目静默合并丢失 */
+  const [varDupError, setVarDupError] = useState("");
 
   /* 打开时初始化草稿（保存后 store 更新也会同步进来，表现为草稿与落库值一致） */
   useEffect(() => {
@@ -59,6 +61,7 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
     setDraft(environments.map((e) => ({ name: e.name, variables: e.variables })));
     setSelected(0);
     setError("");
+    setVarDupError("");
     setCreating(false);
     setRenamingIdx(null);
     setDeleteTarget(null);
@@ -118,6 +121,11 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
   /** 保存：整批落盘；被删除/改名的激活环境自动跟随或回到「不使用环境」 */
   const submit = async () => {
     setError("");
+    // 变量键名重复兜底（正常路径已被保存按钮禁用拦住）
+    if (varDupError) {
+      setError(varDupError);
+      return;
+    }
     if (draft.some((e) => !e.name.trim())) {
       setError("环境名不能为空");
       return;
@@ -163,7 +171,7 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
             <button className="btn-ghost" onClick={onClose}>
               取消
             </button>
-            <button className="btn-primary" disabled={saving} onClick={() => void submit()}>
+            <button className="btn-primary" disabled={saving || !!varDupError} onClick={() => void submit()}>
               {saving ? "保存中…" : "保存"}
             </button>
           </>
@@ -335,9 +343,10 @@ export function EnvironmentManageModal({ open, onClose }: Props) {
                   <KVEditor
                     title="变量"
                     json={cur.variables}
-                    onChange={(v) =>
-                      setDraft((d) => d.map((e, i) => (i === selected ? { ...e, variables: v } : e)))
-                    }
+                    onChange={(v, err) => {
+                      setDraft((d) => d.map((e, i) => (i === selected ? { ...e, variables: v } : e)));
+                      setVarDupError(err ?? "");
+                    }}
                     keyPlaceholder="变量名，如 TOKEN"
                     valuePlaceholder="值，如 sk-xxxx"
                   />

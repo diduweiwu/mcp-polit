@@ -15,7 +15,14 @@ interface KVProps {
   title: string;
   /** JSON 对象字符串 */
   json: string;
-  onChange: (json: string) => void;
+  /**
+   * 内容写回回调。
+   * @param json JSON 对象字符串（空串 = 无有效条目；存在键名重复的行时不写回、保持原值）
+   * @param error 内容错误文案（null/缺省 = 无错误）。目前唯一错误是键名重复——
+   *             重名条目无法用 JSON 对象表达，编辑器不写回并保留草稿行，
+   *             调用方应据此禁用保存，避免静默合并丢数据
+   */
+  onChange: (json: string, error?: string | null) => void;
   keyPlaceholder?: string;
   valuePlaceholder?: string;
   /** 敏感条目的 key 列表（受控）。不传 = 关闭敏感标记能力（不渲染 checkbox） */
@@ -25,6 +32,28 @@ interface KVProps {
   /** 可引用的环境变量名列表（当前激活环境）。传入时在编辑器底部渲染提示条，
    *  点击变量chip复制 {{变量名}} 引用；传空数组时提示去环境管理里添加 */
   availableVars?: string[];
+}
+
+/**
+ * 找出键值行中的重复键名（按去首尾空格后的名称判重，区分大小写）。
+ *
+ * @param rows 键值行
+ * @returns 重复键名列表（去重、按首现顺序）；无重复返回 null
+ *
+ * @example
+ * findDuplicateKeys([["API", "1"], ["API", "2"], ["X", ""]]); // => ["API"]
+ * findDuplicateKeys([["A", "1"]]);                            // => null
+ */
+function findDuplicateKeys(rows: Array<[string, string]>): string[] | null {
+  const seen = new Set<string>();
+  const dups = new Set<string>();
+  for (const [k] of rows) {
+    const t = k.trim();
+    if (!t) continue;
+    if (seen.has(t)) dups.add(t);
+    else seen.add(t);
+  }
+  return dups.size > 0 ? [...dups] : null;
 }
 
 /** 键值对编辑器：环境变量 / 自定义请求头用，输出 JSON 对象字符串 */
@@ -71,6 +100,12 @@ export function KVEditor({
 
   /** 展示行：优先草稿（含待填写的空行），否则为 JSON 解析结果 */
   const rows = draft ?? parsed;
+
+  /** 当前重复键名（渲染期派生：行标红与底部提示始终与行内容一致） */
+  const dupKeys = useMemo(
+    () => findDuplicateKeys(rows.filter(([k]) => k.trim() !== "")),
+    [rows],
+  );
 
   /**
    * 值输入框内 `{{变量名}}` 的补全状态（availableVars 非空时启用）：
@@ -136,12 +171,24 @@ export function KVEditor({
     setSuggest(null);
   };
 
-  /** 行变化：有效行写回 JSON；含空 key 行时保留在草稿中供继续填写 */
+  /**
+   * 行变化：有效行写回 JSON；含空 key 行时保留在草稿中供继续填写。
+   * 存在键名重复的行时**不写回**——JSON 对象无法表达重复键，直接序列化会静默
+   * 合并覆盖丢行（如 API1 改名为 API）；此时保持上一份合法 JSON 与完整草稿行，
+   * 错误文案经 onChange 第二参数通知调用方禁用保存。
+   */
   const setRows = (next: Array<[string, string]>) => {
     const valid = next.filter(([k]) => k.trim() !== "");
+    const dups = findDuplicateKeys(valid);
+    if (dups) {
+      // 重名：json 保持原值（不产生合法写回），仅上报错误；草稿保留全部行
+      onChange(json, `存在重复的键名：${dups.join("、")}`);
+      setDraft(next);
+      return;
+    }
     const out = valid.length === 0 ? "" : JSON.stringify(Object.fromEntries(valid));
     lastWritten.current = out;
-    onChange(out);
+    onChange(out, null);
     setDraft(next.some(([k]) => k.trim() === "") ? next : null);
   };
 
@@ -214,7 +261,9 @@ export function KVEditor({
           return (
             <div key={i} className="flex items-center gap-1.5">
               <input
-                className="field min-w-0 flex-1 font-mono !py-1"
+                className={`field min-w-0 flex-1 font-mono !py-1 ${
+                  dupKeys?.includes(k.trim()) ? "!border-err/60" : ""
+                }`}
                 placeholder={keyPlaceholder}
                 value={k}
                 onChange={(e) => {
@@ -319,6 +368,12 @@ export function KVEditor({
             </div>
           );
         })}
+        {/* 键名重复提示：重名条目不写回（不会静默合并），调用方据此禁用保存 */}
+        {dupKeys && (
+          <p className="text-[11.5px] leading-relaxed text-err">
+            存在重复的键名：{dupKeys.join("、")}——重复条目不会被保存，请修改名称后再保存。
+          </p>
+        )}
         {/* 环境变量引用提示条：点击 chip 复制 {{变量名}}，粘贴到任意值框即可引用 */}
         {availableVars != null && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px] text-inksoft">

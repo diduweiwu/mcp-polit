@@ -68,6 +68,9 @@ export function ServerFormModal({ parentId, onClose }: Props) {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  /** 键值编辑器的内容级错误（键名重复等）：非空时禁用保存（编辑器行内已有红字提示） */
+  const [envDupError, setEnvDupError] = useState("");
+  const [headersDupError, setHeadersDupError] = useState("");
   /** 连通性测试进行中 */
   const [testing, setTesting] = useState(false);
   /** 连通性测试结果：ok=成功（绿色提示），否则红色错误 */
@@ -110,6 +113,9 @@ export function ServerFormModal({ parentId, onClose }: Props) {
 
   /** 校验配置有效性：返回错误文案，通过时返回空串 */
   const validateConfig = (): string => {
+    // 键值编辑器的内容级错误（键名重复）：正常路径已被保存按钮禁用拦住，此处兜底
+    if (envDupError) return envDupError;
+    if (headersDupError) return headersDupError;
     if (cfg.transport_type === "stdio" && !cfg.command?.trim()) {
       return "stdio 模式必须填写启动命令";
     }
@@ -239,7 +245,11 @@ export function ServerFormModal({ parentId, onClose }: Props) {
           <button className="btn-ghost" onClick={onClose}>
             取消
           </button>
-          <button className="btn-primary" disabled={saving || !ready} onClick={() => void submit()}>
+          <button
+            className="btn-primary"
+            disabled={saving || !ready || !!envDupError || !!headersDupError}
+            onClick={() => void submit()}
+          >
             {saving ? "保存中…" : "保存"}
           </button>
         </>
@@ -333,7 +343,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
               <KVEditor
                 title="环境变量"
                 json={cfg.env ?? ""}
-                onChange={(v) => patch({ env: v })}
+                onChange={(v, err) => {
+                  patch({ env: v });
+                  setEnvDupError(err ?? "");
+                }}
                 keyPlaceholder="变量名，如 DEBUG"
                 valuePlaceholder="值，如 1，或 {{VAR}} 引用环境变量"
                 availableVars={availableVars}
@@ -365,7 +378,10 @@ export function ServerFormModal({ parentId, onClose }: Props) {
               <KVEditor
                 title="自定义请求头（可放鉴权信息）"
                 json={cfg.headers ?? ""}
-                onChange={(v) => patch({ headers: v })}
+                onChange={(v, err) => {
+                  patch({ headers: v });
+                  setHeadersDupError(err ?? "");
+                }}
                 keyPlaceholder="头名称，如 Authorization"
                 valuePlaceholder="值，如 Bearer {{TOKEN}}"
                 sensitiveKeys={parseSensitiveKeys(cfg.sensitive_headers)}
