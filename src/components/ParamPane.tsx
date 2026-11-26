@@ -10,7 +10,7 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { BookmarkPlus, Play, Table2, Braces, Loader2, SlidersHorizontal, PanelLeftClose } from "lucide-react";
 import { useAppStore } from "../store";
 import { buildDefaults, pruneArgs, SchemaForm, type FormValue } from "./SchemaForm";
-import { Modal, SearchSelect } from "./ui";
+import { EmptyState, Modal, SearchSelect } from "./ui";
 
 /** 参数栏 */
 export function ParamPane() {
@@ -117,9 +117,11 @@ export function ParamPane() {
         className={`flex h-full flex-col overflow-hidden bg-panel/50 ${closing ? "anim-fade-out" : "anim-pane-in"}`}
       >
         <PaneHeader title="参数" tool={null} mode={mode} setMode={setMode} onCollapse={collapseWithAnim} />
-        <div className="flex flex-1 items-center justify-center text-[13px] text-inksoft">
-          选择一个工具后在此填写参数
-        </div>
+        {/* 空态与工具列表/调用结果两栏共用 EmptyState：icon 与文字首行跨栏水平对齐 */}
+        <EmptyState
+          icon={<SlidersHorizontal size={36} strokeWidth={1.2} />}
+          text="选择一个工具后在此填写参数"
+        />
       </div>
     );
   }

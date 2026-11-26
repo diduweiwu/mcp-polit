@@ -23,7 +23,7 @@ import { useAppStore, MAX_CALL_TIMEOUT_SECS } from "../store";
 import { CHANGELOG_RAW, getVersionNotes } from "../lib/changelog";
 import { type ThemeMode } from "../theme";
 import { openRepoPage, REPO_URL } from "../api";
-import { Modal } from "./ui";
+import { Modal, Tooltip } from "./ui";
 import { GithubIcon } from "./icons";
 
 /** 明暗三态选项 */
@@ -189,27 +189,36 @@ function AboutSection() {
           SQLite 中，除你配置的 MCP Server、同步仓库与检查更新（GitHub Releases）外不发起任何网络请求。
         </span>
       </div>
-      {/* 本次版本更新日志：CHANGELOG.md 打包内置，离线可查（零网络请求） */}
-      <div className="mt-2.5">
-        <button className="btn-ghost h-8 gap-1.5 text-[12px]" onClick={() => setLogOpen(true)}>
-          <ScrollText size={13} /> 查看本次版本更新日志
-        </button>
-      </div>
-      {logOpen && <ChangelogModal onClose={() => setLogOpen(false)} />}
-      {/* GitHub 仓库入口 + 更新状态机：同一行；说明/进度/错误由 UpdaterSection 在下方通栏展示 */}
+      {/* 更新状态机 + 右侧两个入口 icon（本次更新日志 / GitHub 仓库）；说明/进度/错误由
+          UpdaterSection 在下方通栏展示；更新日志弹窗挂载在此处 */}
       <UpdaterSection
         className="mt-2.5"
         autoCheck={autoCheck}
-        leading={
-          <button
-            className="btn-ghost h-8 shrink-0 gap-1.5"
-            title={`在浏览器打开 ${REPO_URL}`}
-            onClick={() => void openRepoPage()}
-          >
-            <GithubIcon size={13} /> GitHub 仓库
-          </button>
+        trailing={
+          <>
+            {/* 本次版本更新日志：CHANGELOG.md 打包内置，离线可查（零网络请求） */}
+            <Tooltip content="本次版本更新日志（离线可查）">
+              <button
+                className="rounded p-1.5 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
+                aria-label="查看本次版本更新日志"
+                onClick={() => setLogOpen(true)}
+              >
+                <ScrollText size={14} />
+              </button>
+            </Tooltip>
+            <Tooltip content={`在浏览器打开 ${REPO_URL}`}>
+              <button
+                className="rounded p-1.5 text-inksoft transition-colors hover:bg-panel2 hover:text-ink"
+                aria-label={`在浏览器打开 ${REPO_URL}`}
+                onClick={() => void openRepoPage()}
+              >
+                <GithubIcon size={14} />
+              </button>
+            </Tooltip>
+          </>
         }
       />
+      {logOpen && <ChangelogModal onClose={() => setLogOpen(false)} />}
     </section>
   );
 }
@@ -221,17 +230,18 @@ type UpdateState = "idle" | "checking" | "available" | "downloading" | "installe
  * 在线更新区：检查 GitHub Releases 最新版本（updater 插件做签名校验），
  * 发现新版本后下载安装（带进度），完成后可一键重启应用。
  *
- * @param leading 按钮行最左侧的前置节点（如 GitHub 仓库入口），与更新状态按钮同行
+ * @param trailing 状态行右侧的附加节点（如更新日志/GitHub 仓库入口 icon），
+ *                 紧跟当前状态元素（按钮/进度文案）之后同行展示
  * @param className 外层容器附加类名（与上方内容的间距由调用方控制）
  * @param autoCheck 原生菜单「检查更新」触发：挂载即自动检查一次（初始直接进入
  *                  checking 态），检查结束（无论结果）清除 store 里的标记防止误触发
  */
 function UpdaterSection({
-  leading,
+  trailing,
   className = "",
   autoCheck = false,
 }: {
-  leading?: React.ReactNode;
+  trailing?: React.ReactNode;
   className?: string;
   autoCheck?: boolean;
 }) {
@@ -304,9 +314,8 @@ function UpdaterSection({
 
   return (
     <div className={`min-w-0 ${className}`}>
-      {/* 第一行：前置节点（GitHub 仓库入口）+ 更新状态按钮/进度文案 */}
+      {/* 第一行：更新状态按钮/进度文案 + 右侧附加入口 icon */}
       <div className="flex items-center gap-2">
-        {leading}
         {state === "idle" && (
           <button className="btn-ghost h-8 gap-1.5" onClick={() => void doCheck()}>
             <RefreshCw size={13} /> 检查更新
@@ -336,6 +345,8 @@ function UpdaterSection({
         {note && state === "idle" && (
           <span className="text-[12px] text-ok">{note}</span>
         )}
+        {/* 右侧附加入口 icon（更新日志 / GitHub 仓库）：紧跟状态元素之后 */}
+        {trailing && <span className="flex shrink-0 items-center gap-1">{trailing}</span>}
       </div>
 
       {state === "downloading" && progress.total > 0 && (

@@ -437,6 +437,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch {
       /* 历史读取失败不影响启动 */
     }
+    // 4. 收藏：启动即预加载——收藏 tab 的数量徽章直接读 stars 缓存，
+    //    若等首次切到该 tab 才加载，重启后徽章会一直不显示（点进 tab 才冒出来）
+    void get().loadStars();
   },
 
   async setThemeMode(mode) {

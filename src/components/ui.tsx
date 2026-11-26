@@ -215,10 +215,26 @@ export function EmptyState({
   children?: ReactNode;
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-      {icon && <div className="text-inksoft/50">{icon}</div>}
-      <div className="max-w-[260px] text-[13px] leading-relaxed text-inksoft">{text}</div>
+    <div className="flex h-full flex-col items-center overflow-hidden p-6 text-center">
+      {/* 上下弹性块按固定比例（3:4）撑开：icon 锚定在内容区约 43% 高度处。
+          文本绝对定位在锚块下方 48px（icon 底 36 + 间距 12），不占弹性流——
+          icon 与文字首行的位置均与文本行数无关，并排多个空态面板可水平对齐
+          （旧版整组垂直居中，文本长的面板 icon 会被顶高）。
+          ⚠ 调用方若面板底部还有常驻占位条（如结果栏的日志条），需自行用负
+          margin 补偿其高度，否则锚定区域不等高会残留错位。 */}
+      <div className="min-h-2 shrink grow-[3]" />
+      <div className="relative w-full shrink-0">
+        {icon && (
+          <div className="flex h-9 items-center justify-center text-inksoft/50">
+            {icon}
+          </div>
+        )}
+        <div className="absolute inset-x-0 top-[48px] flex justify-center">
+          <div className="max-w-[260px] text-[13px] leading-relaxed text-inksoft">{text}</div>
+        </div>
+      </div>
       {children}
+      <div className="min-h-2 shrink grow-[4]" />
     </div>
   );
 }

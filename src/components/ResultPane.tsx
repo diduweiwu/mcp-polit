@@ -123,8 +123,11 @@ export function ResultPane() {
         </div>
       )}
 
+      {/* 空态时给内容区负 margin（33px = 日志条 h-8 标题 + 上边框）补偿其常驻占位：
+          EmptyState 的 icon 锚定区与其他两栏（无底部占位条）等高，三栏空态 icon/文字水平对齐；
+          非空态不加，保证列表滚动底缘不被日志条遮挡 */}
       {tab === "results" ? (
-        <div className="flex-1 overflow-y-auto p-2">
+        <div className={`flex-1 overflow-y-auto p-2 ${results.length === 0 && !running ? "-mb-[33px]" : ""}`}>
           {results.length === 0 && !running ? (
             <EmptyState
               icon={<Braces size={36} strokeWidth={1.2} />}
@@ -240,9 +243,9 @@ function HistoryPanel({ onExpand }: { onExpand: (entry: HistoryEntry) => void })
         </div>
       </div>
 
-      {/* 列表：滚动到底触发动态加载更早的记录 */}
+      {/* 列表：滚动到底触发动态加载更早的记录（空态时同结果 tab 负 margin 补偿日志条占位，切 tab 时 icon 不跳） */}
       <div
-        className="flex-1 overflow-y-auto p-2"
+        className={`flex-1 overflow-y-auto p-2 ${filtered.length === 0 ? "-mb-[33px]" : ""}`}
         onScroll={(e) => {
           const el = e.currentTarget;
           if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) void loadMoreHistory();
@@ -333,7 +336,7 @@ function StarPanel({ onExpand }: { onExpand: (entry: HistoryEntry) => void }) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2">
+      <div className={`flex-1 overflow-y-auto p-2 ${filtered.length === 0 ? "-mb-[33px]" : ""}`}>
         {filtered.length === 0 ? (
           <EmptyState
             icon={<Star size={36} strokeWidth={1.2} />}
