@@ -15,6 +15,8 @@ import {
   Check,
   ChevronUp,
   Copy,
+  Eye,
+  EyeOff,
   History,
   ListTree,
   Loader2,
@@ -546,17 +548,19 @@ function formatArgsJson(raw: string): string {
 const MASKED_VALUE = "******";
 
 /**
- * 解析请求头快照为键值行数组，敏感头的值替换为星号（解析期即丢弃原值，不留明文）。
+ * 解析请求头快照为键值行数组，并标记敏感头（是否敏感由第三列携带）。
+ * 打码是展示层行为（HeaderRowsView 控制默认星号 + 眼睛切换明文）：快照 JSON
+ * 本身含明文（复制按钮/cURL 均复制明文），此处不做值丢弃。
  *
  * @param raw 请求头快照（request_headers，JSON 对象字符串；空/非法 = 空数组）
  * @param sensitiveRaw 敏感头名称名单（sensitive_headers，JSON 数组字符串）
- * @returns `[名称, 展示值]` 数组（保持 JSON 对象的原有顺序）
+ * @returns `[名称, 原始值, 是否敏感]` 数组（保持 JSON 对象的原有顺序）
  *
  * @example
  * parseHeaderRows('{"Authorization":"Bearer x","Accept":"json"}', '["Authorization"]');
- * // => [["Authorization", "******"], ["Accept", "json"]]
+ * // => [["Authorization", "Bearer x", true], ["Accept", "json", false]]
  */
-function parseHeaderRows(raw?: string | null, sensitiveRaw?: string | null): Array<[string, string]> {
+function parseHeaderRows(raw?: string | null, sensitiveRaw?: string | null): Array<[string, string, boolean]> {
   if (!raw?.trim()) return [];
   try {
     const obj = JSON.parse(raw) as unknown;
@@ -564,10 +568,87 @@ function parseHeaderRows(raw?: string | null, sensitiveRaw?: string | null): Arr
     const sensitive = parseSensitiveKeys(sensitiveRaw);
     return Object.entries(obj as Record<string, unknown>)
       .filter(([, v]) => typeof v === "string")
-      .map(([k, v]) => [k, isSensitiveKey(sensitive, k) ? MASKED_VALUE : v as string]);
+      .map(([k, v]) => [k, v as string, isSensitiveKey(sensitive, k)]);
   } catch {
     return [];
   }
+}
+
+/**
+ * 请求头键值行视图（结果卡片与放大抽屉共用）：敏感头默认星号打码，非敏感行
+ * 原样明文（跟随调用时配置的敏感标记）。是否显示敏感行明文由父级通过
+ * revealSecrets 控制（如卡片标题行的段级「查看明文」入口），本组件不自带切换。
+ *
+ * @param rows parseHeaderRows 的输出（[名称, 原始值, 是否敏感]）
+ * @param revealSecrets 置 true 时敏感行显示明文（默认打码）
+ */
+function HeaderRowsView({
+  rows,
+  revealSecrets = false,
+}: {
+  rows: Array<[string, string, boolean]>;
+  revealSecrets?: boolean;
+}) {
+  return (
+    <div className="max-h-[132px] overflow-y-auto py-2 font-mono text-[12px] leading-relaxed">
+      {rows.map(([k, v, sensitive]) => {
+        const masked = sensitive && !revealSecrets;
+        return (
+          <div key={k} className="break-all px-2.5 selectable">
+            <span className="text-primarystrong">{k}:</span>{" "}
+            <span className={masked ? "text-inksoft/50" : "text-inksoft"}>
+              {masked ? MASKED_VALUE : v}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 历史详情卡片内的可收起内容段（请求头/入参/响应三段共用）：
+ * 标题行整行可点击切换收起/展开（chevron 旋转动画），right 槽放复制/视图切换
+ * 等操作按钮（拦截冒泡不误触标题行）；内容用 Collapse 承载——懒挂载 + 双向动画，
+ * 收起不卸载（保留 JSON 折叠树/滚动/tab 状态），默认展开。
+ *
+ * @param title 段标题（如「请求 · 请求头」）
+ * @param right 标题行右侧的操作区（按钮组，内部点击不会触发收起/展开）
+ * @param children 段内容
+ */
+function CollapsibleSection({
+  title,
+  right,
+  children,
+}: {
+  title: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  /** 展开状态（各卡片各段独立，会话内记忆） */
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="border-b border-line last:border-b-0">
+      <div
+        className="flex h-7 cursor-pointer select-none items-center justify-between bg-panel2/60 pl-2.5 pr-1"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="flex items-center gap-1 text-[10.5px] font-semibold tracking-wide text-inksoft/80">
+          <ChevronUp
+            size={12}
+            className={`shrink-0 text-inksoft transition-transform duration-200 ${open ? "" : "rotate-180"}`}
+          />
+          {title}
+        </span>
+        {right && (
+          <span className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+            {right}
+          </span>
+        )}
+      </div>
+      <Collapse open={open}>{children}</Collapse>
+    </div>
+  );
 }
 
 /** 从 content 数组中提取全部 text 块拼接 */
@@ -649,7 +730,7 @@ function useCopyFeedback(): [
  * 单条结果卡片；isNew=true（最新一条）默认展开，其余默认折叠，点击头部可展开/收起。
  *
  * 展开后内容分「请求 · 请求头」「请求 · 入参」与「响应」段独立显示，各带复制按钮；
- * HTTP 传输的调用带请求头快照（敏感值打码，复制为明文），stdio/旧记录不显示请求头段；
+ * HTTP 传输的调用带请求头快照（敏感值默认打码、标题行眼睛可整段查看明文，复制/cURL 为明文），stdio/旧记录不显示请求头段；
  * 头部右侧提供收藏星标（落盘后可用）与「放大查看」（右侧抽屉）入口。
  */
 function ResultCard({
@@ -682,11 +763,14 @@ function ResultCard({
   const structured = result.structured_content ?? null;
   const formattedArgs = formatArgsJson(result.arguments);
   const canStar = (result as HistoryEntry).id != null;
-  /** 请求头快照键值行（敏感值已打码；stdio / 旧记录为空数组 = 不显示该段） */
+  /** 请求头快照键值行（含敏感标记，打码由 HeaderRowsView 控制；stdio / 旧记录为空数组 = 不显示该段） */
   const headerRows = parseHeaderRows(result.request_headers, result.sensitive_headers);
 
   /** 复制请求头快照明文 JSON（含鉴权头时由复制按钮的提示语提醒注意粘贴场合） */
   const copyHeaders = () => copyHeadersText(result.request_headers ?? "");
+
+  /** 请求头段级「查看明文」：true 时敏感行整段显示明文（行内无逐行切换，入口在标题行） */
+  const [revealHeaders, setRevealHeaders] = useState(false);
 
   /** 复制请求入参（格式化后的 JSON） */
   const copyArgs = () => copyArgsText(formattedArgs);
@@ -756,78 +840,78 @@ function ResultCard({
         </div>
       </div>
 
-      {/* 请求 / 响应两段分开显示，各自独立复制；Collapse 双向动画，懒挂载
-          （未展开过不产生 DOM，避免隐藏的树展开开销；收起保留内容，再展开即时呈现） */}
+      {/* 请求头/入参/响应三段各自可收起（点标题行切换；复制/视图按钮拦截冒泡）；
+          Collapse 双向动画，懒挂载（未展开过不产生 DOM，避免隐藏的树展开开销；
+          收起保留内容——JSON 折叠树/滚动/tab 状态不丢，再展开即时呈现） */}
       <Collapse open={!collapsed}>
         <>
-          {/* 请求头段：HTTP 传输的调用才有快照；敏感值打码展示，复制按钮复制明文 */}
+          {/* 请求头段：HTTP 传输的调用才有快照；敏感值默认打码，标题行眼睛一键查看整段明文，
+              复制按钮复制明文 */}
           {headerRows.length > 0 && (
-            <div className="border-b border-line">
-              <div className="flex h-7 items-center justify-between bg-panel2/60 pl-2.5 pr-1">
-                <span className="text-[10.5px] font-semibold tracking-wide text-inksoft/80">
-                  请求 · 请求头
-                </span>
-                <CopyBtn
-                  state={headersCopyState}
-                  title="复制请求头 JSON（含鉴权头明文，注意粘贴场合）"
-                  onCopy={copyHeaders}
-                />
-              </div>
-              <div className="max-h-[120px] overflow-y-auto px-2.5 py-2 font-mono text-[12px] leading-relaxed">
-                {headerRows.map(([k, v]) => (
-                  <div key={k} className="break-all selectable">
-                    <span className="text-primarystrong">{k}:</span>{" "}
-                    <span className={v === MASKED_VALUE ? "text-inksoft/50" : "text-inksoft"}>
-                      {v}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            <CollapsibleSection
+              title="请求 · 请求头"
+              right={
+                <>
+                  <button
+                    className="rounded p-1 text-inksoft transition-colors hover:bg-panel hover:text-ink"
+                    title={revealHeaders ? "恢复脱敏显示" : "查看敏感头明文"}
+                    aria-label={revealHeaders ? "恢复请求头脱敏显示" : "查看请求头明文"}
+                    onClick={() => setRevealHeaders((v) => !v)}
+                  >
+                    {revealHeaders ? <Eye size={12} /> : <EyeOff size={12} />}
+                  </button>
+                  <CopyBtn
+                    state={headersCopyState}
+                    title="复制请求头 JSON（含鉴权头明文，注意粘贴场合）"
+                    onCopy={copyHeaders}
+                  />
+                </>
+              }
+            >
+              <HeaderRowsView rows={headerRows} revealSecrets={revealHeaders} />
+            </CollapsibleSection>
           )}
 
           {/* 请求段：格式化入参 JSON，独立复制按钮 */}
-          <div className="border-b border-line">
-            <div className="flex h-7 items-center justify-between bg-panel2/60 pl-2.5 pr-1">
-              <span className="text-[10.5px] font-semibold tracking-wide text-inksoft/80">
-                请求 · 入参
-              </span>
-              <CopyBtn state={argsCopyState} title="复制入参 JSON" onCopy={copyArgs} />
-            </div>
+          <CollapsibleSection
+            title="请求 · 入参"
+            right={<CopyBtn state={argsCopyState} title="复制入参 JSON" onCopy={copyArgs} />}
+          >
             <pre className="max-h-[120px] overflow-y-auto whitespace-pre-wrap break-all px-2.5 py-2 font-mono text-[12px] leading-relaxed text-inksoft selectable">
               {formattedArgs}
             </pre>
-          </div>
+          </CollapsibleSection>
 
           {/* 响应段：内容/结构化切换 + 树/原始视图 + 独立复制按钮 */}
-          <div>
-            <div className="flex h-7 items-center gap-0.5 bg-panel2/60 pl-2.5 pr-1">
-              <span className="mr-auto text-[10.5px] font-semibold tracking-wide text-inksoft/80">
-                响应
-              </span>
-              {structured !== null && (
-                <>
-                  <ViewToggle active={tab === "content"} onClick={() => setTab("content")}>
-                    内容
-                  </ViewToggle>
-                  <ViewToggle active={tab === "structured"} onClick={() => setTab("structured")}>
-                    结构化
-                  </ViewToggle>
-                  <span className="mx-1 h-3.5 w-px bg-line" />
-                </>
-              )}
-              <ViewToggle active={view === "tree"} onClick={() => setView("tree")} icon={<ListTree size={12} />}>
-                树
-              </ViewToggle>
-              <ViewToggle active={view === "raw"} onClick={() => setView("raw")} icon={<Braces size={12} />}>
-                原始
-              </ViewToggle>
-              <CopyBtn state={copyState} title="复制响应" onCopy={copyResult} />
-            </div>
+          <CollapsibleSection
+            title="响应"
+            right={
+              <>
+                {structured !== null && (
+                  <>
+                    <ViewToggle active={tab === "content"} onClick={() => setTab("content")}>
+                      内容
+                    </ViewToggle>
+                    <ViewToggle active={tab === "structured"} onClick={() => setTab("structured")}>
+                      结构化
+                    </ViewToggle>
+                    <span className="mx-1 h-3.5 w-px bg-line" />
+                  </>
+                )}
+                <ViewToggle active={view === "tree"} onClick={() => setView("tree")} icon={<ListTree size={12} />}>
+                  树
+                </ViewToggle>
+                <ViewToggle active={view === "raw"} onClick={() => setView("raw")} icon={<Braces size={12} />}>
+                  原始
+                </ViewToggle>
+                <CopyBtn state={copyState} title="复制响应" onCopy={copyResult} />
+              </>
+            }
+          >
             <div className="max-h-[300px] overflow-y-auto p-2.5">
               <ResponseBody result={result} structured={structured} tab={tab} view={view} />
             </div>
-          </div>
+          </CollapsibleSection>
         </>
       </Collapse>
     </div>
@@ -853,7 +937,7 @@ function RequestPanel({ formattedArgs, curl, curlHint, requestHeaders, sensitive
   const [argsCopyState, copyArgsText] = useCopyFeedback();
   const [curlCopyState, copyCurlText] = useCopyFeedback();
   const [headersCopyState, copyHeadersText] = useCopyFeedback();
-  /** 请求头快照键值行（敏感值已打码；为空 = 不显示请求头段） */
+  /** 请求头快照键值行（含敏感标记，打码由 HeaderRowsView 控制；为空 = 不显示请求头段） */
   const headerRows = parseHeaderRows(requestHeaders, sensitiveHeaders);
 
   return (
@@ -885,7 +969,7 @@ function RequestPanel({ formattedArgs, curl, curlHint, requestHeaders, sensitive
           />
         </div>
       </div>
-      {/* 请求头块：快照存在时显示在入参上方（敏感值打码，复制为明文） */}
+      {/* 请求头块：快照存在时显示在入参上方（敏感值默认打码、眼睛切换明文，复制为明文） */}
       {headerRows.length > 0 && (
         <div className="shrink-0 border-b border-line">
           <div className="flex h-7 items-center justify-between bg-panel2/60 pl-3 pr-1.5">
@@ -898,13 +982,8 @@ function RequestPanel({ formattedArgs, curl, curlHint, requestHeaders, sensitive
               onCopy={() => void copyHeadersText(requestHeaders ?? "")}
             />
           </div>
-          <div className="max-h-[132px] overflow-y-auto px-3 py-2 font-mono text-[12px] leading-relaxed">
-            {headerRows.map(([k, v]) => (
-              <div key={k} className="break-all selectable">
-                <span className="text-primarystrong">{k}:</span>{" "}
-                <span className={v === MASKED_VALUE ? "text-inksoft/50" : "text-inksoft"}>{v}</span>
-              </div>
-            ))}
+          <div className="px-0.5">
+            <HeaderRowsView rows={headerRows} />
           </div>
         </div>
       )}
