@@ -150,9 +150,9 @@ export function ToolPane() {
         </div>
       )}
 
-      {/* 连接错误提示 */}
+      {/* 连接错误提示（whitespace-pre-wrap 保留原始换行；break-all 兜底超长无空格行不溢出） */}
       {status === "error" && err && (
-        <div className="mx-2 mt-2 rounded-md border border-err/30 bg-err/10 p-2 text-[12px] leading-relaxed text-err selectable">
+        <div className="mx-2 mt-2 whitespace-pre-wrap break-all rounded-md border border-err/30 bg-err/10 p-2 text-[12px] leading-relaxed text-err selectable">
           {err}
         </div>
       )}

@@ -77,6 +77,47 @@ function clampCallTimeoutSecs(raw: string | undefined): number {
   return Math.min(MAX_CALL_TIMEOUT_SECS, Math.max(1, Math.floor(n)));
 }
 
+/** 资源树展开状态在 localStorage 中的键名：按项目隔离（mcpilot.expanded.<projectId>） */
+function expandedKey(pid: number): string {
+  return `mcpilot.expanded.${pid}`;
+}
+
+/**
+ * 读取某项目已保存的资源树展开目录 id 列表。
+ *
+ * @param pid 项目 id
+ * @returns 展开的目录 id 数组；无任何记录时返回 null（首次打开该项目，走默认全展开）
+ */
+function loadExpandedIds(pid: number): number[] | null {
+  try {
+    const raw = localStorage.getItem(expandedKey(pid));
+    if (raw == null) return null;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter((n) => typeof n === "number") : [];
+  } catch {
+    /* 记录损坏时按「已记录、全收起」处理，下次操作会覆盖重写 */
+    return [];
+  }
+}
+
+/**
+ * 把当前资源树的展开目录集合写入 localStorage（按项目隔离），供下次启动/切回项目时恢复。
+ *
+ * @param pid 项目 id（为 null 时不写）
+ * @param expandedIds 当前展开状态表（仅 value 为 true 的项视为展开）
+ */
+function persistExpanded(pid: number | null, expandedIds: Record<number, boolean>) {
+  if (pid == null) return;
+  const ids = Object.keys(expandedIds)
+    .filter((k) => expandedIds[Number(k)])
+    .map(Number);
+  try {
+    localStorage.setItem(expandedKey(pid), JSON.stringify(ids));
+  } catch {
+    /* localStorage 不可用时忽略：仅影响下次启动的记忆 */
+  }
+}
+
 interface AppState {
   /* 初始化标记 */
   initialized: boolean;
@@ -482,10 +523,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ nodes });
       return;
     }
-    // 默认展开全部目录（少量节点时体验最好）
+    // 默认展开全部目录（少量节点时体验最好）；该项目存过展开记录则按记录恢复（跨重启/切项目的记忆）
+    const saved = loadExpandedIds(id);
     const expandedIds: Record<number, boolean> = {};
     for (const n of nodes) {
-      if (n.node_type === "folder") expandedIds[n.id] = true;
+      if (n.node_type === "folder" && (saved === null || saved.includes(n.id))) {
+        expandedIds[n.id] = true;
+      }
     }
     set({ nodes, expandedIds });
   },
@@ -523,6 +567,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   async deleteProject(id) {
     await api.deleteProject(id);
     const rest = get().projects.filter((p) => p.id !== id);
+    /* 该项目的资源树展开记录随之移除（localStorage 不残留已删项目的数据） */
+    localStorage.removeItem(expandedKey(id));
     /* 该项目的未推送变更记录随之移除（分桶数据不残留） */
     set((s) => {
       const changes = { ...s.syncChanges };
@@ -607,6 +653,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   expandNode(id) {
     set((s) => ({ expandedIds: { ...s.expandedIds, [id]: true } }));
+    persistExpanded(get().activeProjectId, get().expandedIds);
   },
 
   revealNode(id) {
@@ -619,9 +666,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   toggleExpand(id) {
     set((s) => ({ expandedIds: { ...s.expandedIds, [id]: !s.expandedIds[id] } }));
+    persistExpanded(get().activeProjectId, get().expandedIds);
   },
 
-  /** 一键展开：全部目录置为展开 */
+  /** 一键展开：全部目录置为展开（并持久化，重启后保持） */
   expandAllFolders() {
     set((s) => {
       const expandedIds: Record<number, boolean> = {};
@@ -630,11 +678,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return { expandedIds };
     });
+    persistExpanded(get().activeProjectId, get().expandedIds);
   },
 
-  /** 一键收起：清空展开表（目录全部折叠） */
+  /** 一键收起：清空展开表（目录全部折叠，并持久化空表，重启后保持收起） */
   collapseAllFolders() {
     set({ expandedIds: {} });
+    persistExpanded(get().activeProjectId, {});
   },
 
   async selectNode(id, opts) {
