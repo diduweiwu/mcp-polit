@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- 受保护目录用途声明（Tauri 打包时合并进产物 Info.plist）。
+         macOS 对未沙盒应用访问「文稿/桌面/下载」按 TCC 弹窗授权：
+         应用不访问则永不弹窗；真的访问（如用户把同步目录绑到这些位置）时，
+         有此声明弹窗才带说明文案，缺失会被静默拒绝或弹无说明的弹窗。 -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>MCPilot 需要读取您绑定的同步目录（位于「文稿」时）以读写配置同步仓库。</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>MCPilot 需要读取您绑定的同步目录（位于「桌面」时）以读写配置同步仓库。</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>MCPilot 需要读取您绑定的同步目录（位于「下载」时）以读写配置同步仓库。</string>
+  </dict>
+</plist>
