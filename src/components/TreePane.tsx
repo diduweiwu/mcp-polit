@@ -251,9 +251,16 @@ export function TreePane() {
     }
   };
 
+  /** 关闭右键菜单并清除「定位高亮」：高亮只在菜单打开期间辅助定位，
+   * 菜单消失后若不清理会残留成假选中态（如复制场景：源节点与副本同时显示聚焦背景色） */
+  const closeCtx = () => {
+    setCtx(null);
+    setCtxHighlight(null);
+  };
+
   /** 右键菜单项统一入口：关闭菜单后执行动作 */
   const runMenu = (fn: () => void) => () => {
-    setCtx(null);
+    closeCtx();
     fn();
   };
 
@@ -411,7 +418,7 @@ export function TreePane() {
       {/* 右键菜单（Portal 到 body，避免被分栏绘制层覆盖） */}
       {ctx && createPortal(
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setCtx(null)} onContextMenu={(e) => { e.preventDefault(); setCtx(null); }} />
+          <div className="fixed inset-0 z-40" onClick={closeCtx} onContextMenu={(e) => { e.preventDefault(); closeCtx(); }} />
           <div
             className="card anim-pop-in fixed z-50 min-w-[150px] overflow-hidden py-1 shadow-xl"
             style={{ left: ctx.x, top: ctx.y }}
