@@ -113,6 +113,10 @@ jobs:
       # TCC 权限授权锚定证书而非二进制，应用升级不再重置目录授权（ad-hoc 时代的痛点）。
       # 证书 p12（base64）与导出密码走仓库级 Secrets：
       # MACOS_CERTIFICATE / MACOS_CERTIFICATE_PWD
+      # ⚠ set-key-partition-list 必须含 codesign: 分区（与 tauri 官方导入逻辑一致）：
+      # 新版 runner 的 /usr/bin/codesign 签名形态不被 apple-tool: 覆盖，缺它时
+      # codesign 取私钥会等一个 headless 机器上永远弹不出的授权框直接挂死
+      # （v0.2.4 首次启用签名实测卡死 20+ 分钟，Windows/Linux 正常完成佐证非网络问题）。
       - name: 导入 macOS 签名证书
         if: matrix.os == 'macos-latest'
         env:
@@ -123,9 +127,11 @@ jobs:
           security create-keychain -p build build.keychain
           security unlock-keychain -p build build.keychain
           security import /tmp/mcpilot-codesign.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security set-keychain-settings -t 3600 -u build.keychain
           security list-keychains -d user -s build.keychain $(security list-keychains | sed 's/"//g' | tr '\n' ' ')
           security default-keychain -s build.keychain
-          security set-key-partition-list -S apple-tool:,apple: -s -k build build.keychain
+          security unlock-keychain -p build build.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k build build.keychain
           rm -f /tmp/mcpilot-codesign.p12
           security find-identity -v -p codesigning
 
