@@ -109,6 +109,26 @@ jobs:
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_ENV"
 
+      # macOS 发布包用自签证书签名（tauri.conf bundle.macOS.signingIdentity = "MCPilot"）：
+      # TCC 权限授权锚定证书而非二进制，应用升级不再重置目录授权（ad-hoc 时代的痛点）。
+      # 证书 p12（base64）与导出密码走仓库级 Secrets：
+      # MACOS_CERTIFICATE / MACOS_CERTIFICATE_PWD
+      - name: 导入 macOS 签名证书
+        if: matrix.os == 'macos-latest'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/mcpilot-codesign.p12
+          security create-keychain -p build build.keychain
+          security unlock-keychain -p build build.keychain
+          security import /tmp/mcpilot-codesign.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PWD" -T /usr/bin/codesign
+          security list-keychains -d user -s build.keychain $(security list-keychains | sed 's/"//g' | tr '\n' ' ')
+          security default-keychain -s build.keychain
+          security set-key-partition-list -S apple-tool:,apple: -s -k build build.keychain
+          rm -f /tmp/mcpilot-codesign.p12
+          security find-identity -v -p codesigning
+
       - name: 构建 & 上传产物
         uses: tauri-apps/tauri-action@v0
         env:
