@@ -141,6 +141,7 @@ pub fn run() {
             commands::test_server_config,
             commands::refresh_tools,
             commands::call_tool,
+            commands::cancel_call,
             commands::get_conn_state,
             commands::get_cached_tools,
             // 应用设置

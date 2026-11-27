@@ -3,7 +3,7 @@
 //! 设计要点：
 //! - 每个成功连接的 server 对应一个 [`ConnHandle`]（rmcp 的 `RunningService` + 工具缓存）。
 //! - 状态通过 Tauri event（`conn-state`）实时推送给前端，前端树节点据此显示状态点。
-//! - 工具调用带超时保护（每个 server 可单独配置 `timeout_ms`）。
+//! - 工具调用带超时保护（每个 server 可单独配置 `timeout_ms`），进行中可主动取消。
 //! - 所有配置中的 header/env 属于敏感信息：不写日志、不出现在错误信息里。
 
 use std::collections::HashMap;
@@ -56,6 +56,8 @@ pub struct McpManager {
     states: Mutex<HashMap<i64, ConnState>>,
     /// node_id -> 进行中的连接握手取消令牌（握手结束后注销；中断/断开时取消）
     connect_tokens: Mutex<HashMap<i64, Arc<CancellationToken>>>,
+    /// 前端调用序号 seq -> 进行中的工具调用取消令牌（调用结束后注销；主动取消时触发）
+    pending_calls: Mutex<HashMap<i64, Arc<CancellationToken>>>,
 }
 
 impl McpManager {
@@ -65,6 +67,7 @@ impl McpManager {
             conns: Mutex::new(HashMap::new()),
             states: Mutex::new(HashMap::new()),
             connect_tokens: Mutex::new(HashMap::new()),
+            pending_calls: Mutex::new(HashMap::new()),
         }
     }
 
@@ -391,32 +394,92 @@ impl McpManager {
         let params = CallToolRequestParams::new(tool_name.clone()).with_arguments(JsonObject::from(
             arguments,
         ));
-        let fut = handle.service.peer().call_tool(params);
-        let result =
-            tokio::time::timeout(Duration::from_millis(timeout_ms.max(1) as u64), fut).await;
-        let duration_ms = started.elapsed().as_millis() as i64;
-
-        match result {
-            Ok(Ok(res)) => Ok(CallResult {
-                seq,
-                tool_name,
-                is_error: res.is_error.unwrap_or(false),
-                content: serde_json::to_value(&res.content).unwrap_or(Value::Null),
-                structured_content: res.structured_content,
-                duration_ms,
-                arguments: arguments_json,
-                // 连接时缓存的请求头快照（HTTP 传输才有值）：记录当时真实发送的头
-                request_headers: handle.request_headers.clone(),
-                sensitive_headers: handle.sensitive_headers.clone(),
-            }),
-            Ok(Err(e)) => {
-                let msg = sanitize(format!("工具调用失败：{e}"), &config);
-                Err(AppError::new(msg))
-            }
-            Err(_) => Err(AppError::new(format!(
-                "工具调用超时（{timeout_ms} 毫秒），可在 设置 → 调用 或 Server 配置中调大超时时间"
-            ))),
+        // 登记本次调用的取消令牌：前端可在进行中通过 cancel_call 主动取消（按 seq 查找）
+        let token = Arc::new(CancellationToken::new());
+        {
+            let manager = app.state::<McpManager>();
+            manager
+                .pending_calls
+                .lock()
+                .unwrap()
+                .insert(seq, token.clone());
         }
+        // 高层 call_tool 的 future 内部带 AbandonedRequestGuard：本 future 被丢弃
+        // （手动取消或超时）时会自动按 MCP 规范向 server 发送 notifications/cancelled
+        let fut = handle.service.peer().call_tool(params);
+        let result: CmdResult<CallResult> = tokio::select! {
+            r = tokio::time::timeout(Duration::from_millis(timeout_ms.max(1) as u64), fut) => {
+                match r {
+                    Ok(Ok(res)) => Ok(CallResult {
+                        seq,
+                        tool_name: tool_name.clone(),
+                        is_error: res.is_error.unwrap_or(false),
+                        content: serde_json::to_value(&res.content).unwrap_or(Value::Null),
+                        structured_content: res.structured_content,
+                        // 成功路径取实际耗时（与原实现一致；错误路径前端固定记 0，无需耗时）
+                        duration_ms: started.elapsed().as_millis() as i64,
+                        arguments: arguments_json,
+                        // 连接时缓存的请求头快照（HTTP 传输才有值）：记录当时真实发送的头
+                        request_headers: handle.request_headers.clone(),
+                        sensitive_headers: handle.sensitive_headers.clone(),
+                    }),
+                    Ok(Err(e)) => {
+                        let msg = sanitize(format!("工具调用失败：{e}"), &config);
+                        Err(AppError::new(msg))
+                    }
+                    Err(_) => Err(AppError::new(format!(
+                        "工具调用超时（{timeout_ms} 毫秒），可在 设置 → 调用 或 Server 配置中调大超时时间"
+                    ))),
+                }
+            }
+            // 用户主动取消：立刻返回（future 被丢弃，guard 负责通知 server）
+            _ = token.cancelled() => Err(AppError::new("工具调用已手动取消")),
+        };
+        // 注销挂起记录（完成/超时/取消任一结束方式都要清）；仅当表里仍是本次调用的
+        // 令牌时才移除：极端竞态（窗口刷新后前端 seq 重置撞上未结束的旧调用）下，
+        // 同 seq 的新记录可能已被登记，不能误删
+        {
+            let manager = app.state::<McpManager>();
+            let mut pending = manager.pending_calls.lock().unwrap();
+            if pending
+                .get(&seq)
+                .map(|t| Arc::ptr_eq(t, &token))
+                .unwrap_or(false)
+            {
+                pending.remove(&seq);
+            }
+        }
+        result
+    }
+
+    /// 主动取消一笔进行中的工具调用。
+    ///
+    /// 取消后等待中的 `call_tool` 立刻以「已手动取消」错误返回；请求 future 被丢弃时
+    /// 由 rmcp 内部 guard 自动向 server 发送 `notifications/cancelled`。
+    ///
+    /// # 参数
+    ///
+    /// - `seq`: 前端发起调用时传给 `call_tool` 的调用序号。
+    ///
+    /// # 返回
+    ///
+    /// 找不到对应的挂起调用（已结束或不存在）时返回错误，前端应静默忽略。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// McpManager::cancel_call(&app, 42)?;
+    /// ```
+    pub fn cancel_call(app: &AppHandle, seq: i64) -> CmdResult<()> {
+        let manager = app.state::<McpManager>();
+        let token = manager
+            .pending_calls
+            .lock()
+            .unwrap()
+            .remove(&seq)
+            .ok_or_else(|| AppError::new("该调用已结束或不存在，无需取消"))?;
+        token.cancel();
+        Ok(())
     }
 
     /// 查询某节点当前状态；无记录视为未连接。

@@ -247,6 +247,8 @@ function handle(cmd: string, args: Record<string, unknown> = {}): unknown {
       demoHistory.unshift({ ...result, node_id: args.nodeId, server_name: "GitHub Copilot", timestamp: "now" });
       return result;
     }
+    // 取消进行中的调用：演示模式调用为同步返回，不存在挂起请求，保持 IPC 形态即可
+    case "cancel_call": return null;
     // 推送：message 以 FAIL 开头时返回错误日志（失败提醒演示），
     // 以 CONFLICT 开头时返回推送被拒日志（历史分叉冲突提示演示）
     case "project_sync_push": {

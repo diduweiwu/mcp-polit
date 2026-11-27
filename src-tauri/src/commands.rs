@@ -497,6 +497,16 @@ pub async fn call_tool(
     McpManager::call_tool(app, &db, node_id, tool_name, map, arguments_json, seq).await
 }
 
+/// 主动取消进行中的工具调用（调用结束后取消会报「已结束或不存在」，前端静默处理）。
+///
+/// # 参数
+///
+/// - `seq`: 前端发起调用时传给 `call_tool` 的调用序号。
+#[tauri::command]
+pub async fn cancel_call(app: AppHandle, seq: i64) -> CmdResult<()> {
+    McpManager::cancel_call(&app, seq)
+}
+
 /// 查询某节点的连接状态与错误信息（前端刷新/重载后恢复展示用）。
 #[tauri::command]
 pub fn get_conn_state(app: AppHandle, node_id: i64) -> crate::models::ConnStateEvent {

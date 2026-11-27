@@ -228,6 +228,10 @@ export const callTool = (
     seq,
   });
 
+/** 取消进行中的工具调用（seq 为发起时传给 callTool 的调用序号）。
+ * 调用已结束时后端报错，调用方应静默忽略 */
+export const cancelCall = (seq: number) => invoke<null>("cancel_call", { seq });
+
 /* ---------- 应用设置 ---------- */
 
 /** 读取全部设置 */

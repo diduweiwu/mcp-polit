@@ -306,6 +306,8 @@ interface AppState {
 
   /** 运行工具；错误也会折叠成一条 is_error 结果进入面板 */
   runTool: (nodeId: number, toolName: string, argsJson: string) => Promise<void>;
+  /** 取消当前进行中的调用（后端按 seq 查找挂起请求）；无进行中调用时静默忽略 */
+  cancelRun: () => Promise<void>;
   /** 清空当前结果面板 */
   clearResults: () => void;
 
@@ -894,6 +896,13 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearResults() {
     set({ results: [] });
+  },
+
+  async cancelRun() {
+    // 运行中 seq 即本次调用序号（runTool 发起时写入）；调用已结束/不存在时后端报错，静默忽略
+    const { running, seq } = get();
+    if (!running) return;
+    await api.cancelCall(seq).catch(() => {});
   },
 
   toggleTreeCollapsed() {

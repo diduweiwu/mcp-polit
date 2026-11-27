@@ -34,7 +34,7 @@ import { copyText } from "../lib/clipboard";
 import { isSensitiveKey, parseSensitiveKeys } from "../lib/sensitive";
 import { buildToolsCallCurl } from "../lib/curl";
 import type { CallResult, HistoryEntry, LogLevel } from "../types";
-import { Collapse, EmptyState } from "./ui";
+import { Collapse, EmptyState, Tooltip } from "./ui";
 import { JsonNode } from "./JsonView";
 
 /** 结果栏 tab：调用结果 / 历史 / 收藏 */
@@ -122,6 +122,14 @@ export function ResultPane() {
       {running && (
         <div className="flex items-center gap-2 border-b border-line bg-primarysoft px-3 py-1.5 text-[12px] text-primarystrong">
           <Loader2 size={13} className="animate-spin" /> 正在调用工具…
+          <Tooltip content="取消本次调用（结果面板会记一条已取消）">
+            <button
+              className="ml-auto rounded p-1 text-primarystrong/70 hover:bg-panel2 hover:text-primarystrong"
+              onClick={() => void useAppStore.getState().cancelRun()}
+            >
+              <X size={13} />
+            </button>
+          </Tooltip>
         </div>
       )}
 
