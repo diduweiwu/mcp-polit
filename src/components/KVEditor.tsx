@@ -6,8 +6,9 @@
  * 密码框形式打码显示（眼睛可临时切换明文），标记随 key 改名/删行自动跟随；
  * 敏感标记只影响展示，真实值仍原样写回 JSON，连接时使用真实值。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { Eye, EyeOff, Plus, Trash2 } from "lucide-react";
+import { GrowTextarea } from "./ui";
 import { copyText } from "../lib/clipboard";
 
 /** 键值对编辑器属性 */
@@ -258,6 +259,35 @@ export function KVEditor({
           const sensitive = isSensitive(k);
           /** 该行值框当前实际展示形态：敏感且未点眼睛时用密码框打码 */
           const masked = sensitive && !revealed.has(k);
+          /** 值框共用事件：{{变量}} 补全检测与键盘导航（打码/明文两态行为一致） */
+          const valueEvents = {
+            onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+              const next = [...rows];
+              next[i] = [k, e.target.value];
+              setRows(next);
+              detectSuggest(i, e.target.value, e.target.selectionStart);
+            },
+            onKeyUp: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+              // 打字/移动光标都可能改变 {{ 触发区（onChange 覆盖不了纯移动光标）
+              detectSuggest(i, e.currentTarget.value, e.currentTarget.selectionStart);
+            },
+            onBlur: () => setSuggest(null),
+            onKeyDown: (e: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+              if (!suggestVisible) return;
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setSuggestIdx((n) => Math.min(n + 1, suggestCandidates.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setSuggestIdx((n) => Math.max(n - 1, 0));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                applySuggest(suggestCandidates[suggestIdx]);
+              } else if (e.key === "Escape") {
+                setSuggest(null);
+              }
+            },
+          };
           return (
             <div key={i} className="flex items-center gap-1.5">
               <input
@@ -274,40 +304,25 @@ export function KVEditor({
                   renameInSensitive(k, newK);
                 }}
               />
-              {/* 值输入框：relative 容器承载 {{变量}} 补全下拉 */}
+              {/* 值输入框：relative 容器承载 {{变量}} 补全下拉。
+                  打码行用密码 input（textarea 无法打码），其余用可增高文本框看长值 */}
               <span className="relative flex min-w-0 flex-1">
-                <input
-                  className={`field font-mono !py-1 ${masked ? "!pr-1 tracking-widest" : ""}`}
-                  placeholder={valuePlaceholder}
-                  type={masked ? "password" : "text"}
-                  value={v}
-                  onChange={(e) => {
-                    const next = [...rows];
-                    next[i] = [k, e.target.value];
-                    setRows(next);
-                    detectSuggest(i, e.target.value, e.target.selectionStart);
-                  }}
-                  onKeyUp={(e) => {
-                    // 打字/移动光标都可能改变 {{ 触发区（onChange 覆盖不了纯移动光标）
-                    detectSuggest(i, (e.target as HTMLInputElement).value, (e.target as HTMLInputElement).selectionStart);
-                  }}
-                  onBlur={() => setSuggest(null)}
-                  onKeyDown={(e) => {
-                    if (!suggestVisible) return;
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setSuggestIdx((n) => Math.min(n + 1, suggestCandidates.length - 1));
-                    } else if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setSuggestIdx((n) => Math.max(n - 1, 0));
-                    } else if (e.key === "Enter") {
-                      e.preventDefault();
-                      applySuggest(suggestCandidates[suggestIdx]);
-                    } else if (e.key === "Escape") {
-                      setSuggest(null);
-                    }
-                  }}
-                />
+                {masked ? (
+                  <input
+                    {...valueEvents}
+                    className="field font-mono !py-1 !pr-1 tracking-widest"
+                    placeholder={valuePlaceholder}
+                    type="password"
+                    value={v}
+                  />
+                ) : (
+                  <GrowTextarea
+                    {...valueEvents}
+                    className="field font-mono !py-1"
+                    placeholder={valuePlaceholder}
+                    value={v}
+                  />
+                )}
                 {/* {{变量}} 补全下拉：mousedown 阻止默认以保持输入框焦点 */}
                 {suggestVisible && (
                   <span className="absolute left-0 top-full z-20 mt-1 max-h-[150px] w-full overflow-y-auto rounded-md border border-line bg-panel py-1 shadow-lg">

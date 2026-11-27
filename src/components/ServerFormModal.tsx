@@ -9,7 +9,7 @@ import { activeEnvName, useAppStore, scheduleSyncExport } from "../store";
 import type { ServerConfig } from "../types";
 import { siblingNameConflict } from "../lib/tree";
 import { parseSensitiveKeys, stringifySensitiveKeys } from "../lib/sensitive";
-import { Modal } from "./ui";
+import { GrowTextarea, Modal } from "./ui";
 import { KVEditor } from "./KVEditor";
 
 /** 空/新建时的默认配置 */
@@ -313,7 +313,7 @@ export function ServerFormModal({ parentId, onClose }: Props) {
                   启动命令
                   <span className="ml-0.5 text-err" title="必填">*</span>
                 </label>
-                <input
+                <GrowTextarea
                   className="field font-mono"
                   placeholder="npx / uvx / node …"
                   value={cfg.command ?? ""}
@@ -322,9 +322,8 @@ export function ServerFormModal({ parentId, onClose }: Props) {
               </div>
               <div>
                 <label className="label">参数（JSON 数组）</label>
-                <textarea
+                <GrowTextarea
                   className="field font-mono"
-                  rows={2}
                   placeholder={'例如：["-y","@modelcontextprotocol/server-filesystem","/tmp"]'}
                   value={cfg.args ?? ""}
                   onChange={(e) => patch({ args: e.target.value })}
@@ -343,7 +342,7 @@ export function ServerFormModal({ parentId, onClose }: Props) {
               />
               <div>
                 <label className="label">工作目录（可选）</label>
-                <input
+                <GrowTextarea
                   className="field font-mono"
                   placeholder="/path/to/dir"
                   value={cfg.working_dir ?? ""}
@@ -358,7 +357,7 @@ export function ServerFormModal({ parentId, onClose }: Props) {
                   服务地址 URL
                   <span className="ml-0.5 text-err" title="必填">*</span>
                 </label>
-                <input
+                <GrowTextarea
                   className="field font-mono"
                   placeholder="http://127.0.0.1:3000/mcp"
                   value={cfg.url ?? ""}

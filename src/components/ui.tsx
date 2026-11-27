@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type TextareaHTMLAttributes,
 } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, Search, X } from "lucide-react";
@@ -604,5 +605,55 @@ export function SearchSelect({
         </div>
       )}
     </div>
+  );
+}
+
+/** 自动增高文本框的高度上限（px，约 12 行；超出后内部滚动） */
+const GROW_TEXTAREA_MAX = 240;
+
+/**
+ * 可调高度的自动增高文本框：替代单行输入框展示长文本（长 URL / 命令 / 令牌等
+ * 粘贴内容单行看不全的场景）。
+ *
+ * 行为：
+ * - 配合 `.field` 类使用，外观与单行输入框一致，单行起步；
+ * - 值变化（输入/粘贴/带入/清空）时高度自动跟随内容伸缩（上限约 12 行，
+ *   超出转内部滚动）；
+ * - 右下角拖拽手柄可手动调高（resize-y），拖出的高度保留到下次内容变化；
+ * - 无空格长内容（如 JWT 令牌）按需强制折行，贴进去即可看全。
+ *
+ * @param props 与原生 textarea 一致；受控用法（传 value）才能在输入/粘贴时自动增高
+ * @returns 自适应高度的 textarea 元素
+ *
+ * 使用示例：
+ * ```tsx
+ * <GrowTextarea
+ *   className="field font-mono"
+ *   placeholder="http://127.0.0.1:3000/mcp"
+ *   value={url}
+ *   onChange={(e) => patch({ url: e.target.value })}
+ * />
+ * ```
+ */
+export function GrowTextarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  // 挂载与值变化时重新测量：高度 = 内容实高 + 上下边框（border-box，scrollHeight 不含
+  // 边框，少 2px 会与 .field 单行输入框高度不齐）；上限 GROW_TEXTAREA_MAX，超出转内部滚动。
+  // 手动拖拽设置的内联高度会被浏览器保留，直到下一次值变化重新按内容自适应。
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const border = el.offsetHeight - el.clientHeight;
+    el.style.height = `${Math.min(el.scrollHeight + border, GROW_TEXTAREA_MAX)}px`;
+  }, [props.value]);
+  return (
+    <textarea
+      {...props}
+      ref={ref}
+      rows={1}
+      className={`${props.className ?? ""} resize-y leading-[1.5] [overflow-wrap:anywhere]`}
+      style={{ overflowY: "auto", ...props.style }}
+    />
   );
 }

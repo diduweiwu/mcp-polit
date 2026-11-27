@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
+import { GrowTextarea } from "./ui";
 import type { JsonSchema } from "../types";
 
 /** 表单值（与 schema 对应的树形对象） */
@@ -144,7 +145,7 @@ function SchemaField({
       }
       return (
         <Row label={label} required={required} desc={schema.description}>
-          <input
+          <GrowTextarea
             className="field"
             placeholder={schema.description || "字符串"}
             value={typeof value === "string" ? value : ""}
@@ -358,9 +359,8 @@ function JsonSubEdit({
 
   return (
     <Row label={label} required={required} desc={desc} badge="JSON">
-      <textarea
+      <GrowTextarea
         className="field font-mono !text-[12px]"
-        rows={4}
         placeholder='例如：{"nested": 1} 或 [1, 2]'
         value={draft}
         onChange={(e) => {

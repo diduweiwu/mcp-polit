@@ -8,6 +8,7 @@
  */
 import { useState } from "react";
 import { FolderOpen } from "lucide-react";
+import { GrowTextarea } from "./ui";
 import { pickDirectory } from "../api";
 
 /** 同步目录字段属性 */
@@ -52,14 +53,18 @@ export function SyncDirField({ value, onChange, onEnter, autoFocus }: SyncDirFie
 
   return (
     <div className="flex items-center gap-1.5">
-      <input
+      <GrowTextarea
         className="field min-w-0 flex-1 font-mono"
         placeholder="~/mcpilot-sync/backend 或本地目录路径"
         value={value}
         autoFocus={autoFocus}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
-          if (onEnter && e.key === "Enter") onEnter();
+          // 路径不会需要换行：回车保持「提交」语义，不插入换行
+          if (onEnter && e.key === "Enter") {
+            e.preventDefault();
+            onEnter();
+          }
         }}
       />
       <button
